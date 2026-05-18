@@ -100,12 +100,10 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             has_fixes = False
                             is_malware = False
                             
-                            # 1. Determine base context (Malware vs Standard Patch)
                             if vuln_id.startswith("MAL-") or "malicious" in file_name.lower():
                                 is_malware = True
                                 
                             summary = vuln_data.get("summary", "").lower()
-                            details = vuln_data.get("details", "").lower()
                             if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary:
                                 is_malware = True
 
@@ -118,14 +116,11 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                         if "fixed" in events:
                                             has_fixes = True
                             
-                            # 2. Lifecycle Evaluation: Determine if it's a Uniquely New Entry
-                            # We normalize string formats to prevent minor offset differences from failing the match
                             published_str = vuln_data.get("published", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
                             
                             is_new_entry = (published_str == modified_str)
 
-                            # 3. Build enriched classification keys
                             if is_malware:
                                 classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
                             elif has_fixes:
@@ -150,7 +145,10 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
 def get_artifact_layer(eco_name):
     """Maps ecosystem tags to clear enterprise infrastructure layers."""
     container_images = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-    app_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems"]
+    app_registries = [
+        "npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", 
+        "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"
+    ]
     
     if eco_name in container_images:
         return "Container Base Image"
@@ -161,16 +159,54 @@ def get_artifact_layer(eco_name):
     else:
         return "Global Baseline Noise"
 
-def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: str = None):
-    cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_delta)
+def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False):
+    """
+    Parses dynamic lookback parameters (either an integer or a YYYY-MM-DD date)
+    and processes streamed log entries matching that timeframe.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    
+    if time_boundary_str.isdigit():
+        days_delta = int(time_boundary_str)
+        cutoff_date = now - datetime.timedelta(days=days_delta)
+        time_label = f"LAST {days_delta} DAYS"
+    else:
+        try:
+            parsed_date = datetime.date.fromisoformat(time_boundary_str)
+            cutoff_date = datetime.datetime.combine(parsed_date, datetime.time.min, tzinfo=datetime.timezone.utc)
+            days_delta = (now.date() - parsed_date).days
+            time_label = f"SINCE {time_boundary_str} ({days_delta} DAYS AGO)"
+        except ValueError:
+            print(f"[-] Format error: '{time_boundary_str}' must be an integer or a valid YYYY-MM-DD date string.")
+            return
+
     print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
 
     ghsa_lookup = build_ghsa_ecosystem_map()
     
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     final_leaderboard = Counter()
-    bucket_counts = Counter()
     total_raw_rows = 0
+
+    if target_layer == "app":
+        final_leaderboard.update({
+            "npm": 0, "PyPI": 0, "Maven (Java)": 0, "Go (Golang)": 0, "NuGet": 0, 
+            "Packagist (PHP)": 0, "RubyGems": 0, "Crates.io": 0, "Hex": 0, "Pub": 0,
+            "ConanCenter": 0, "SwiftURL": 0
+        })
+    elif target_layer == "container":
+        final_leaderboard.update({
+            "Debian": 0, "Ubuntu": 0, "Alpine Linux": 0, "Alpaquita Linux": 0,
+            "Azure Linux": 0, "MinimOS": 0, "Chainguard": 0, "Bitnami": 0
+        })
+
+    bucket_counts = Counter({
+        "Malware (New Entry)": 0,
+        "Malware (Incremental Update)": 0,
+        "Vulnerability Fix (New Entry)": 0,
+        "Vulnerability Fix (Update)": 0,
+        "Metadata Correction / Adjustments": 0
+    })
 
     try:
         response = requests.get(manifest_url, stream=True, timeout=30)
@@ -212,17 +248,36 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
                 else:
                     raw_ecosystems.append(path_parts[0])
                     if path_parts[0].lower() in ['npm', 'pypi'] and "mal-" in path_parts[-1].lower():
-                        # For unzipped streaming, fallback to tracking updates unless cataloged natively
                         update_type = "Malware (New Entry)"
                     else:
                         update_type = "Vulnerability Fix (Update)"
-
-            bucket_counts[update_type] += 1
 
             for eco in raw_ecosystems:
                 eco_clean = eco.strip()
                 eco_lower = eco_clean.lower()
                 
+                if eco_lower == "crates.io": eco_clean = "Crates.io"
+                elif eco_lower == "hex": eco_clean = "Hex"
+                elif eco_lower == "pub": eco_clean = "Pub"
+                elif "conan" in eco_lower: eco_clean = "ConanCenter"
+                elif "swift" in eco_lower: eco_clean = "SwiftURL"
+
+                # Normalize unmappable variants up front
+                if eco_clean in ["OSV Global Meta-Records", "[EMPTY]", ""]:
+                    eco_clean = "Untagged Commit Hash/CVE Noise"
+
+                # FIXED LOGIC GATE: Intercept noise entries completely if --debug isn't supplied
+                if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode:
+                    continue
+
+                layer = get_artifact_layer(eco_clean)
+                if target_layer == "container" and layer != "Container Base Image":
+                    continue
+                elif target_layer == "app" and layer != "App Software Registry":
+                    continue
+
+                bucket_counts[update_type] += 1
+
                 if "ubuntu" in eco_lower: final_leaderboard["Ubuntu"] += 1
                 elif "debian" in eco_lower: final_leaderboard["Debian"] += 1
                 elif "alpine" in eco_lower: final_leaderboard["Alpine Linux"] += 1
@@ -239,7 +294,12 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
                 elif "chainguard" in eco_lower: final_leaderboard["Chainguard"] += 1
                 elif "echo" in eco_lower: final_leaderboard["Echo"] += 1
                 elif eco_lower == "git": final_leaderboard["GIT"] += 1
-                elif eco_clean in ["Untagged Commit Hash/CVE Noise", "OSV Global Meta-Records", "[EMPTY]", ""]:
+                elif eco_lower == "crates.io": final_leaderboard["Crates.io"] += 1
+                elif eco_lower == "hex": final_leaderboard["Hex"] += 1
+                elif eco_lower == "pub": final_leaderboard["Pub"] += 1
+                elif "conan" in eco_lower: final_leaderboard["ConanCenter"] += 1
+                elif "swift" in eco_lower: final_leaderboard["SwiftURL"] += 1
+                elif eco_clean == "Untagged Commit Hash/CVE Noise":
                     final_leaderboard["Untagged Commit Hash/CVE Noise"] += 1
                 else:
                     final_leaderboard[eco_clean] += 1
@@ -251,8 +311,6 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
     filtered_results = []
     for eco, count in final_leaderboard.items():
         layer = get_artifact_layer(eco)
-        if target_layer == "container" and layer != "Container Base Image": continue
-        elif target_layer == "app" and layer != "App Software Registry": continue
         filtered_results.append((eco, count, layer))
         
     filtered_results.sort(key=lambda x: x[1], reverse=True)
@@ -266,7 +324,7 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
     elif target_layer == "app": title += " (APP SOFTWARE REGISTRIES ONLY)"
 
     print("\n" + "="*85)
-    print(f"  {title} (LAST {days_delta} DAYS)")
+    print(f"  {title} ({time_label})")
     print("="*85)
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<32} | {'Activity Delta':<14} | {'Artifact Layer'}")
     print("-"*85)
@@ -278,21 +336,26 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
     
+    if debug_mode:
+        print("\n[*] DEBUG NOTE: 'Untagged Commit Hash/CVE Noise' is visible.")
+
     total_buckets = sum(bucket_counts.values())
-    if total_buckets > 0:
-        print("\n" + "="*50)
-        print("  DATA ENRICHMENT: THREAT BEHAVIOR PROFILE")
-        print("="*50)
-        for b_type, b_count in bucket_counts.most_common():
-            percentage = (b_count / total_buckets) * 100
-            print(f"-> {b_type:<32} | {b_count:<6,} ({percentage:.1f}%)")
-        print("="*50)
+    
+    print("\n" + "="*50)
+    print("  DATA ENRICHMENT: LAYER THREAT PROFILE")
+    print("="*50)
+    for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
+        b_count = bucket_counts[b_type]
+        percentage = (b_count / total_buckets) * 100 if total_buckets > 0 else 0.0
+        print(f"-> {b_type:<32} | {b_count:<6,} ({percentage:.1f}%)")
+    print("="*50)
     print()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
-    parser.add_argument("--days", type=int, default=30, help="Lookback delta window size in days.")
+    parser.add_argument("--days", type=str, default="30", help="The lookback window string parameters.")
+    parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
     
     args = parser.parse_args()
-    generate_enterprise_threat_leaderboard(days_delta=args.days, target_layer=args.layer)
+    generate_enterprise_threat_leaderboard(time_boundary_str=args.days, target_layer=args.layer, debug_mode=args.debug)
