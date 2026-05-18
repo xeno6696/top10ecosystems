@@ -10,9 +10,8 @@ import requests
 
 def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
     """
-    Checks for a local copy of all.zip before downloading.
-    Downloads the master database zip from OSV only if it's missing or stale,
-    then parses it in-memory to build the local lookup index.
+    Downloads the master database zip from OSV if missing or stale,
+    building a comprehensive local lookup index for root-level advisories.
     """
     master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
     os.makedirs(cache_dir, exist_ok=True)
@@ -79,13 +78,13 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
 
 def generate_enterprise_threat_leaderboard(days_delta: int = 30):
     """
-    Combines the streamed modifications log with local memory maps 
-    to output an authenticated, zero-leak ecosystem threat ledger.
+    Combines streamed log updates with local memory mapping to map
+    both folder-prefixed and root-level records to their clean parent ecosystems.
     """
     cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_delta)
     print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
 
-    # Build or fetch our local index map
+    # Load master mapping translation schema
     ghsa_lookup = build_ghsa_ecosystem_map()
     
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
@@ -113,29 +112,28 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30):
             total_raw_rows += 1
             raw_ecosystems = []
 
-            # Step 1: Normalize colon paths immediately (e.g., "Root:Ubuntu:22.04" -> "Ubuntu")
+            # Step 1: Catch explicit colon-delimited paths (e.g. "Root:Ubuntu:22.04")
             if ":" in path:
                 parts = path.split(":")
                 if len(parts) > 1:
                     raw_ecosystems.append(parts[1])
                 else:
-                    raw_ecosystems.append("OSV Global Meta-Records")
+                    raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
             else:
                 path_parts = path.split('/')
                 
-                # Step 2: Extract from Root/Global Advisories
+                # Step 2: Handle Root/Global files lacking clean directory prefixes (e.g. "GHSA-xxxx.json")
                 if len(path_parts) == 1 or path_parts[0].lower() in ['root', '']:
                     osv_id = path_parts[-1].replace(".json", "")
                     if osv_id in ghsa_lookup:
                         raw_ecosystems.extend(ghsa_lookup[osv_id])
                     else:
-                        raw_ecosystems.append("OSV Global Meta-Records")
-                # Step 3: Extract standard directory path (e.g. "npm/MAL-xxxx.json")
+                        raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
+                # Step 3: Handle native directory folder prefixes (e.g. "npm/MAL-xxxx.json" or "Maven/CVE-xxx.json")
                 else:
                     raw_ecosystems.append(path_parts[0])
 
-            # Step 4: Strict Enterprise Rollup Map
-            # Ensures version numbers and case-mismatches merge cleanly
+            # Step 4: Robust Enterprise Normalization & Map Aggregation
             for eco in raw_ecosystems:
                 eco_clean = eco.strip()
                 eco_lower = eco_clean.lower()
@@ -144,14 +142,38 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30):
                     final_leaderboard["Ubuntu"] += 1
                 elif "debian" in eco_lower:
                     final_leaderboard["Debian"] += 1
+                elif "alpine" in eco_lower:
+                    final_leaderboard["Alpine Linux"] += 1
+                elif "alpaquita" in eco_lower:
+                    final_leaderboard["Alpaquita Linux"] += 1
+                elif "azure linux" in eco_lower or "cbl-mariner" in eco_lower:
+                    final_leaderboard["Azure Linux"] += 1
+                elif "minimos" in eco_lower:
+                    final_leaderboard["MinimOS"] += 1
+                elif "android" in eco_lower:
+                    final_leaderboard["Android"] += 1
+                elif "maven" in eco_lower:
+                    final_leaderboard["Maven (Java)"] += 1
+                elif "packagist" in eco_lower:
+                    final_leaderboard["Packagist (PHP)"] += 1
+                elif eco_lower == "go" or "golang" in eco_lower:
+                    final_leaderboard["Go (Golang)"] += 1
                 elif "npm" in eco_lower:
                     final_leaderboard["npm"] += 1
                 elif "pypi" in eco_lower:
                     final_leaderboard["PyPI"] += 1
-                elif eco_clean == "OSV Global Meta-Records" or eco_clean == "[EMPTY]":
-                    final_leaderboard["OSV Global Meta-Records"] += 1
+                elif "bitnami" in eco_lower:
+                    final_leaderboard["Bitnami"] += 1
+                elif "chainguard" in eco_lower:
+                    final_leaderboard["Chainguard"] += 1
+                elif "echo" in eco_lower:
+                    final_leaderboard["Echo"] += 1
+                elif eco_lower == "git":
+                    final_leaderboard["GIT"] += 1
+                elif eco_clean in ["Untagged Commit Hash/CVE Noise", "OSV Global Meta-Records", "[EMPTY]", ""]:
+                    final_leaderboard["Untagged Commit Hash/CVE Noise"] += 1
                 else:
-                    # Keep original string for any other verified ecosystem (e.g., MinimOS, Azure Linux)
+                    # Capture unmapped stragglers (e.g. NuGet, RubyGems, Hex) 
                     final_leaderboard[eco_clean] += 1
 
     except Exception as e:
@@ -169,7 +191,7 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30):
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<26} | {'Activity Delta':<14}")
     print("-"*60)
     
-    # Show the top 12 to make sure your package managers (like npm) don't get pushed off by metadata keys
+    # Render the top 12 metrics explicitly
     for rank, (eco, count) in enumerate(final_leaderboard.most_common(12), 1):
         print(f"#{rank:<3} | {eco:<26} | {count:<14,}")
         
