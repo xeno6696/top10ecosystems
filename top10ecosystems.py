@@ -1,28 +1,73 @@
 import csv
 import datetime
-from collections import Counter
 import requests
+from collections import Counter
 
-def generate_top_ecosystems_leaderboard(days_delta: int = 30):
+def fetch_ecosystems_for_root_ids(osv_ids: list, batch_size: int = 1000) -> Counter:
     """
-    Streams the OSV modified index, filters records within the delta window,
-    and aggregates them to rank the top 10 most active software ecosystems.
+    Takes a massive list of root OSV IDs (like GHSAs) and uses the high-performance
+    batch endpoint to resolve their true internal target ecosystems.
     """
-    # Calculate cutoff time based on delta days
+    ecosystem_counts = Counter()
+    total_ids = len(osv_ids)
+    
+    if not osv_ids:
+        return ecosystem_counts
+
+    print(f"[*] Resolving ecosystems for {total_ids:,} global/root advisories in batches of {batch_size}...")
+    
+    # Process IDs in chunks to avoid HTTP payload limits
+    for i in range(0, total_ids, batch_size):
+        chunk = osv_ids[i:i + batch_size]
+        
+        # Format the query according to the OSV querybatch spec
+        # We query by ID to grab the structural details
+        payload = {"queries": [{"id": uid} for uid in chunk]}
+        
+        try:
+            # Using HTTP/2 or a persistent session is recommended for speed
+            url = "https://api.osv.dev/v1/querybatch"
+            res = requests.post(url, json=payload, timeout=30)
+            res.raise_for_status()
+            
+            batch_data = res.json()
+            results = batch_data.get("results", [])
+            
+            for entry in results:
+                vulns = entry.get("vulnerabilities", [])
+                for v in vulns:
+                    # Look deep inside the affected object array for the ecosystem
+                    for affected in v.get("affected", []):
+                        package_info = affected.get("package", {})
+                        eco = package_info.get("ecosystem")
+                        if eco:
+                            ecosystem_counts[eco] += 1
+                            
+        except Exception as e:
+            print(f"[-] Batch query failure at chunk {i}-{i+batch_size}: {e}")
+            continue
+            
+    return ecosystem_counts
+
+def generate_accurate_leaderboard(days_delta: int = 30):
+    """
+    Streams OSV metrics and accurately attributes both folder-mapped and 
+    root-mapped vulnerabilities to their real ecosystems.
+    """
     cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_delta)
-    print(f"[*] Analyzing OSV data for the last {days_delta} days (Since: {cutoff_date.date()})...")
+    print(f"[*] Gathering raw OSV update logs since: {cutoff_date.date()}...")
 
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     
-    # Track vulnerability mutations per ecosystem
-    ecosystem_counts = Counter()
-    total_processed = 0
+    final_ecosystems = Counter()
+    root_ids_to_resolve = []
+    total_raw_rows = 0
 
+    # 1. Stream index and catalog targets
     try:
         response = requests.get(manifest_url, stream=True, timeout=30)
         response.raise_for_status()
         
-        # Stream lines to prevent massive memory overhead
         lines = (line.decode('utf-8') for line in response.iter_lines())
         reader = csv.reader(lines)
         
@@ -33,36 +78,48 @@ def generate_top_ecosystems_leaderboard(days_delta: int = 30):
             mod_time_str, path = row[0], row[1]
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             
-            # Since the file is reverse-chronological, stop when we pass the delta cutoff
             if mod_time < cutoff_date:
                 break
             
-            # The CSV path looks like: "npm/MAL-2024-123.json" or "PyPI/GHSA-xxx.json"
-            # Extract the root folder, which represents the ecosystem name
-            ecosystem = path.split('/')[0]
-            ecosystem_counts[ecosystem] += 1
-            total_processed += 1
+            total_raw_rows += 1
+            path_parts = path.split('/')
+            
+            if len(path_parts) == 1:
+                # It's a root file (e.g., "GHSA-xxxx-xxxx-xxxx.json")
+                # Strip file extensions to isolate the raw ID string
+                osv_id = path_parts[0].replace(".json", "")
+                root_ids_to_resolve.append(osv_id)
+            else:
+                # Standard folder layout path (e.g., "npm/MAL-2024-123.json")
+                final_ecosystems[path_parts[0]] += 1
 
     except Exception as e:
-        print(f"[-] Error streaming manifest data: {e}")
+        print(f"[-] Manifest collection stream broke: {e}")
         return
 
-    if total_processed == 0:
-        print("[-] No advisory records found within the specified time delta.")
+    # 2. Extract real ecosystems from the root-level files
+    if root_ids_to_resolve:
+        root_mapping = fetch_ecosystems_for_root_ids(root_ids_to_resolve)
+        final_ecosystems.update(root_mapping)
+
+    # 3. Print the True Leaderboard
+    total_attributions = sum(final_ecosystems.values())
+    if total_attributions == 0:
+        print("[-] Zero attributions compiled.")
         return
 
-    # Print out the formatted Top 10 leaderboard
-    print("\n" + "="*50)
-    print(f"  TOP 10 MOST ACTIVE ECOSYSTEMS (LAST {days_delta} DAYS)")
-    print("="*50)
-    print(f"{'Rank':<5} | {'Ecosystem':<18} | {'Delta Mutations':<15} | {'Share'}")
-    print("-"*50)
+    print("\n" + "="*55)
+    print(f"  ACCURATE ECOSYSTEM THREAT LEADERBOARD (LAST {days_delta} DAYS)")
+    print("="*55)
+    print(f"{'Rank':<5} | {'Ecosystem':<22} | {'Activity Delta':<14}")
+    print("-"*55)
     
-    for rank, (eco, count) in enumerate(ecosystem_counts.most_common(10), 1):
-        percentage = (count / total_processed) * 100
-        print(f"#{rank:<3} | {eco:<18} | {count:<15,} | {percentage:.2f}%")
-    print("="*50 + f"\nTotal mutated entries analyzed: {total_processed:,}\n")
+    for rank, (eco, count) in enumerate(final_ecosystems.most_common(10), 1):
+        print(f"#{rank:<3} | {eco:<22} | {count:<14,}")
+    print("="*55)
+    print(f"Processed Raw Records: {total_raw_rows:,}")
+    print(f"Total Unique Ecosystem Attributions: {total_attributions:,}\n")
 
 if __name__ == "__main__":
-    # Adjust the lookback window here (e.g., 7 days, 30 days, 90 days)
-    generate_top_ecosystems_leaderboard(days_delta=30)
+    # Pulling metrics based on your 30-day window
+    generate_accurate_leaderboard(days_delta=30)
