@@ -1,4 +1,39 @@
-﻿import csv
+﻿"""
+OSV Threat Stream Campaign Dashboard Indicator
+=================================================================================
+A security engineering tool designed to track software supply chain fluctuations 
+by aggregating upstream vulnerability mutations from the Open Source Vulnerability 
+(OSV) database.
+
+CRITICAL ARCHITECTURAL NOTE ON METRICS:
+---------------------------------------------------------------------------------
+The "Activity Delta" column DOES NOT measure individual, real-world exploit attacks.
+Instead, it measures upstream VULNERABILITY DATABASE CHURN (mutations) over a 
+user-defined day window. 
+
+A single unit added to the Activity Delta column indicates one of three events:
+  1. A Brand New Vulnerability Entry: Creation of a new CVE, GHSA, or malware 
+     advisory (e.g., active typosquatting campaigns in npm/PyPI).
+  2. A Structural Patch/Version Update: An existing advisory was modified to 
+     expand/contract affected version ranges, or to inject newly patched versions.
+  3. Metadata Correction: Minor back-end adjustments, such as updating CVSS 
+     severity ratings or updating vendor description logs.
+
+Why Operating Systems (Debian/Ubuntu) volume dwarfs Application Registries (npm):
+---------------------------------------------------------------------------------
+Linux distributions run massive automated tracking systems. When a core utility 
+(like glibc or openssl) receives a security patch, the maintainers backport and 
+update thousands of historical records across multiple supported OS releases and 
+architectures simultaneously. This causes massive, automated, non-malicious 
+database spikes. 
+
+Conversely, Application Registry spikes (like npm) are heavily driven by active, 
+targeted software supply chain injections, malicious packages, or distinct library 
+vulnerabilities impacting application runtime code.
+=================================================================================
+"""
+
+import csv
 import datetime
 import io
 import json
@@ -150,6 +185,7 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
                     raw_ecosystems.append(path_parts[0])
 
             # Step 4: Robust Enterprise Normalization & Map Aggregation
+            # Each increment here represents a localized database mutation (Activity Delta)
             for eco in raw_ecosystems:
                 eco_clean = eco.strip()
                 eco_lower = eco_clean.lower()
@@ -234,7 +270,9 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
         
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
-    print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}\n")
+    print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
+    print("[*] Dashboard Interpretation Guide: Activity Delta = Upstream Registry Churn / Patch Volume.")
+    print("    This does NOT measure raw external intrusion attempts against company infrastructure.\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
