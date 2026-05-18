@@ -5,6 +5,7 @@ import json
 import os
 import time
 import zipfile
+import argparse
 from collections import Counter
 import requests
 
@@ -90,10 +91,11 @@ def get_artifact_layer(eco_name):
     else:
         return "Global Baseline Noise"
 
-def generate_enterprise_threat_leaderboard(days_delta: int = 30):
+def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: str = None):
     """
     Combines streamed log updates with local memory mapping to map
     both folder-prefixed and root-level records to their clean parent ecosystems.
+    Can be filtered by an isolated structural artifact layer.
     """
     cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_delta)
     print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
@@ -193,25 +195,60 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30):
         print(f"[-] Threat ledger stream disrupted: {e}")
         return
 
-    total_attributions = sum(final_leaderboard.values())
-    if total_attributions == 0:
-        print("[-] No valid delta records compiled.")
+    # Build the final filtered list if arguments are supplied
+    filtered_results = []
+    for eco, count in final_leaderboard.items():
+        layer = get_artifact_layer(eco)
+        
+        # Apply layer target formatting criteria
+        if target_layer == "container" and layer != "Container Base Image":
+            continue
+        elif target_layer == "app" and layer != "App Software Registry":
+            continue
+            
+        filtered_results.append((eco, count, layer))
+        
+    # Sort results by threat delta count descending
+    filtered_results.sort(key=lambda x: x[1], reverse=True)
+
+    if not filtered_results:
+        print("[-] No valid delta records compiled for the selected filter.")
         return
 
+    # Setup Dynamic Title
+    title = "VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD"
+    if target_layer == "container":
+        title += " (CONTAINER BASE IMAGES ONLY)"
+    elif target_layer == "app":
+        title += " (APP SOFTWARE REGISTRIES ONLY)"
+
     print("\n" + "="*85)
-    print(f"  VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD (LAST {days_delta} DAYS)")
+    print(f"  {title} (LAST {days_delta} DAYS)")
     print("="*85)
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<32} | {'Activity Delta':<14} | {'Artifact Layer'}")
     print("-"*85)
     
-    # Render the top 12 metrics explicitly
-    for rank, (eco, count) in enumerate(final_leaderboard.most_common(12), 1):
-        layer = get_artifact_layer(eco)
+    # Render Top 10 rows cleanly
+    for rank, (eco, count, layer) in enumerate(filtered_results[:10], 1):
         print(f"#{rank:<3} | {eco:<32} | {count:<14,} | {layer}")
         
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
-    print(f"Ecosystem Attributions:    {total_attributions:,}\n")
+    print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}\n")
 
 if __name__ == "__main__":
-    generate_enterprise_threat_leaderboard(days_delta=30)
+    parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
+    parser.add_argument(
+        "--layer", 
+        choices=["container", "app"], 
+        help="Isolate the dashboard layout by specific infrastructure layer types ('container' or 'app')."
+    )
+    parser.add_argument(
+        "--days", 
+        type=int, 
+        default=30, 
+        help="Lookback delta threshold window size in days (default: 30)."
+    )
+    
+    args = parser.parse_args()
+    generate_enterprise_threat_leaderboard(days_delta=args.days, target_layer=args.layer)
