@@ -47,7 +47,8 @@ import requests
 def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
     """
     Downloads the master database zip from OSV if missing or stale,
-    building a comprehensive local lookup index for root-level advisories.
+    and enriches the local lookup index by classifying the threat type and 
+    detecting whether it is a brand-new entry or an older update.
     """
     master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
     os.makedirs(cache_dir, exist_ok=True)
@@ -83,8 +84,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
             else:
                 return {}
 
-    print("[*] Building global advisory memory index from local archive...")
-    id_to_ecosystems = {}
+    print("[*] Building global advisory memory index & profiling threat lifecycle states...")
+    id_to_meta = {}
     
     try:
         with zipfile.ZipFile(local_zip_path) as z:
@@ -93,24 +94,58 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                     with z.open(file_name) as f:
                         try:
                             vuln_data = json.load(f)
-                            vuln_id = vuln_data.get("id")
+                            vuln_id = vuln_data.get("id", "")
                             
                             ecosystems = set()
+                            has_fixes = False
+                            is_malware = False
+                            
+                            # 1. Determine base context (Malware vs Standard Patch)
+                            if vuln_id.startswith("MAL-") or "malicious" in file_name.lower():
+                                is_malware = True
+                                
+                            summary = vuln_data.get("summary", "").lower()
+                            details = vuln_data.get("details", "").lower()
+                            if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary:
+                                is_malware = True
+
                             for affected in vuln_data.get("affected", []):
                                 eco = affected.get("package", {}).get("ecosystem")
                                 if eco:
                                     ecosystems.add(eco)
+                                for ranges in affected.get("ranges", []):
+                                    for events in ranges.get("events", []):
+                                        if "fixed" in events:
+                                            has_fixes = True
                             
+                            # 2. Lifecycle Evaluation: Determine if it's a Uniquely New Entry
+                            # We normalize string formats to prevent minor offset differences from failing the match
+                            published_str = vuln_data.get("published", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
+                            modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
+                            
+                            is_new_entry = (published_str == modified_str)
+
+                            # 3. Build enriched classification keys
+                            if is_malware:
+                                classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
+                            elif has_fixes:
+                                classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
+                            else:
+                                classification = "Metadata Correction / Adjustments"
+
                             if vuln_id and ecosystems:
-                                id_to_ecosystems[vuln_id] = list(ecosystems)
+                                id_to_meta[vuln_id] = {
+                                    "ecosystems": list(ecosystems),
+                                    "type": classification
+                                }
                         except json.JSONDecodeError:
                             continue 
                             
-        print(f"[+] Successfully indexed {len(id_to_ecosystems):,} global advisory mappings.")
+        print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
     except Exception as e:
         print(f"[-] Failed to read and parse local zip file: {e}")
         
-    return id_to_ecosystems
+    return id_to_meta
 
 def get_artifact_layer(eco_name):
     """Maps ecosystem tags to clear enterprise infrastructure layers."""
@@ -127,20 +162,14 @@ def get_artifact_layer(eco_name):
         return "Global Baseline Noise"
 
 def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: str = None):
-    """
-    Combines streamed log updates with local memory mapping to map
-    both folder-prefixed and root-level records to their clean parent ecosystems.
-    Can be filtered by an isolated structural artifact layer.
-    """
     cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_delta)
     print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
 
-    # Load master mapping translation schema
     ghsa_lookup = build_ghsa_ecosystem_map()
     
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     final_leaderboard = Counter()
-    
+    bucket_counts = Counter()
     total_raw_rows = 0
 
     try:
@@ -162,66 +191,54 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
             
             total_raw_rows += 1
             raw_ecosystems = []
+            update_type = "Metadata Correction / Adjustments"
 
-            # Step 1: Catch explicit colon-delimited paths (e.g. "Root:Ubuntu:22.04")
             if ":" in path:
                 parts = path.split(":")
                 if len(parts) > 1:
                     raw_ecosystems.append(parts[1])
+                    update_type = "Vulnerability Fix (Update)"
                 else:
                     raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
             else:
                 path_parts = path.split('/')
-                
-                # Step 2: Handle Root/Global files lacking clean directory prefixes (e.g. "GHSA-xxxx.json")
                 if len(path_parts) == 1 or path_parts[0].lower() in ['root', '']:
                     osv_id = path_parts[-1].replace(".json", "")
                     if osv_id in ghsa_lookup:
-                        raw_ecosystems.extend(ghsa_lookup[osv_id])
+                        raw_ecosystems.extend(ghsa_lookup[osv_id]["ecosystems"])
+                        update_type = ghsa_lookup[osv_id]["type"]
                     else:
                         raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
-                # Step 3: Handle native directory folder prefixes (e.g. "npm/MAL-xxxx.json")
                 else:
                     raw_ecosystems.append(path_parts[0])
+                    if path_parts[0].lower() in ['npm', 'pypi'] and "mal-" in path_parts[-1].lower():
+                        # For unzipped streaming, fallback to tracking updates unless cataloged natively
+                        update_type = "Malware (New Entry)"
+                    else:
+                        update_type = "Vulnerability Fix (Update)"
 
-            # Step 4: Robust Enterprise Normalization & Map Aggregation
-            # Each increment here represents a localized database mutation (Activity Delta)
+            bucket_counts[update_type] += 1
+
             for eco in raw_ecosystems:
                 eco_clean = eco.strip()
                 eco_lower = eco_clean.lower()
                 
-                if "ubuntu" in eco_lower:
-                    final_leaderboard["Ubuntu"] += 1
-                elif "debian" in eco_lower:
-                    final_leaderboard["Debian"] += 1
-                elif "alpine" in eco_lower:
-                    final_leaderboard["Alpine Linux"] += 1
-                elif "alpaquita" in eco_lower:
-                    final_leaderboard["Alpaquita Linux"] += 1
-                elif "azure linux" in eco_lower or "cbl-mariner" in eco_lower:
-                    final_leaderboard["Azure Linux"] += 1
-                elif "minimos" in eco_lower:
-                    final_leaderboard["MinimOS"] += 1
-                elif "android" in eco_lower:
-                    final_leaderboard["Android"] += 1
-                elif "maven" in eco_lower:
-                    final_leaderboard["Maven (Java)"] += 1
-                elif "packagist" in eco_lower:
-                    final_leaderboard["Packagist (PHP)"] += 1
-                elif eco_lower == "go" or "golang" in eco_lower:
-                    final_leaderboard["Go (Golang)"] += 1
-                elif "npm" in eco_lower:
-                    final_leaderboard["npm"] += 1
-                elif "pypi" in eco_lower:
-                    final_leaderboard["PyPI"] += 1
-                elif "bitnami" in eco_lower:
-                    final_leaderboard["Bitnami"] += 1
-                elif "chainguard" in eco_lower:
-                    final_leaderboard["Chainguard"] += 1
-                elif "echo" in eco_lower:
-                    final_leaderboard["Echo"] += 1
-                elif eco_lower == "git":
-                    final_leaderboard["GIT"] += 1
+                if "ubuntu" in eco_lower: final_leaderboard["Ubuntu"] += 1
+                elif "debian" in eco_lower: final_leaderboard["Debian"] += 1
+                elif "alpine" in eco_lower: final_leaderboard["Alpine Linux"] += 1
+                elif "alpaquita" in eco_lower: final_leaderboard["Alpaquita Linux"] += 1
+                elif "azure linux" in eco_lower or "cbl-mariner" in eco_lower: final_leaderboard["Azure Linux"] += 1
+                elif "minimos" in eco_lower: final_leaderboard["MinimOS"] += 1
+                elif "android" in eco_lower: final_leaderboard["Android"] += 1
+                elif "maven" in eco_lower: final_leaderboard["Maven (Java)"] += 1
+                elif "packagist" in eco_lower: final_leaderboard["Packagist (PHP)"] += 1
+                elif eco_lower == "go" or "golang" in eco_lower: final_leaderboard["Go (Golang)"] += 1
+                elif "npm" in eco_lower: final_leaderboard["npm"] += 1
+                elif "pypi" in eco_lower: final_leaderboard["PyPI"] += 1
+                elif "bitnami" in eco_lower: final_leaderboard["Bitnami"] += 1
+                elif "chainguard" in eco_lower: final_leaderboard["Chainguard"] += 1
+                elif "echo" in eco_lower: final_leaderboard["Echo"] += 1
+                elif eco_lower == "git": final_leaderboard["GIT"] += 1
                 elif eco_clean in ["Untagged Commit Hash/CVE Noise", "OSV Global Meta-Records", "[EMPTY]", ""]:
                     final_leaderboard["Untagged Commit Hash/CVE Noise"] += 1
                 else:
@@ -231,32 +248,22 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
         print(f"[-] Threat ledger stream disrupted: {e}")
         return
 
-    # Build the final filtered list if arguments are supplied
     filtered_results = []
     for eco, count in final_leaderboard.items():
         layer = get_artifact_layer(eco)
-        
-        # Apply layer target formatting criteria
-        if target_layer == "container" and layer != "Container Base Image":
-            continue
-        elif target_layer == "app" and layer != "App Software Registry":
-            continue
-            
+        if target_layer == "container" and layer != "Container Base Image": continue
+        elif target_layer == "app" and layer != "App Software Registry": continue
         filtered_results.append((eco, count, layer))
         
-    # Sort results by threat delta count descending
     filtered_results.sort(key=lambda x: x[1], reverse=True)
 
     if not filtered_results:
         print("[-] No valid delta records compiled for the selected filter.")
         return
 
-    # Setup Dynamic Title
     title = "VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD"
-    if target_layer == "container":
-        title += " (CONTAINER BASE IMAGES ONLY)"
-    elif target_layer == "app":
-        title += " (APP SOFTWARE REGISTRIES ONLY)"
+    if target_layer == "container": title += " (CONTAINER BASE IMAGES ONLY)"
+    elif target_layer == "app": title += " (APP SOFTWARE REGISTRIES ONLY)"
 
     print("\n" + "="*85)
     print(f"  {title} (LAST {days_delta} DAYS)")
@@ -264,29 +271,28 @@ def generate_enterprise_threat_leaderboard(days_delta: int = 30, target_layer: s
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<32} | {'Activity Delta':<14} | {'Artifact Layer'}")
     print("-"*85)
     
-    # Render Top 10 rows cleanly
     for rank, (eco, count, layer) in enumerate(filtered_results[:10], 1):
         print(f"#{rank:<3} | {eco:<32} | {count:<14,} | {layer}")
         
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
-    print("[*] Dashboard Interpretation Guide: Activity Delta = Upstream Registry Churn / Patch Volume.")
-    print("    This does NOT measure raw external intrusion attempts against company infrastructure.\n")
+    
+    total_buckets = sum(bucket_counts.values())
+    if total_buckets > 0:
+        print("\n" + "="*50)
+        print("  DATA ENRICHMENT: THREAT BEHAVIOR PROFILE")
+        print("="*50)
+        for b_type, b_count in bucket_counts.most_common():
+            percentage = (b_count / total_buckets) * 100
+            print(f"-> {b_type:<32} | {b_count:<6,} ({percentage:.1f}%)")
+        print("="*50)
+    print()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
-    parser.add_argument(
-        "--layer", 
-        choices=["container", "app"], 
-        help="Isolate the dashboard layout by specific infrastructure layer types ('container' or 'app')."
-    )
-    parser.add_argument(
-        "--days", 
-        type=int, 
-        default=30, 
-        help="Lookback delta threshold window size in days (default: 30)."
-    )
+    parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
+    parser.add_argument("--days", type=int, default=30, help="Lookback delta window size in days.")
     
     args = parser.parse_args()
     generate_enterprise_threat_leaderboard(days_delta=args.days, target_layer=args.layer)
