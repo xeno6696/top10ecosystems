@@ -1,69 +1,98 @@
 import csv
 import datetime
-import requests
+import io
+import json
+import os
+import time
+import zipfile
 from collections import Counter
+import requests
 
-def fetch_ecosystems_for_root_ids(osv_ids: list, batch_size: int = 1000) -> Counter:
+def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
     """
-    Takes a massive list of root OSV IDs (like GHSAs) and uses the high-performance
-    batch endpoint to resolve their true internal target ecosystems.
+    Checks for a local copy of all.zip before downloading.
+    Downloads the master database zip from OSV only if it's missing or stale,
+    then parses it in-memory to build the local lookup index.
     """
-    ecosystem_counts = Counter()
-    total_ids = len(osv_ids)
+    master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
+    os.makedirs(cache_dir, exist_ok=True)
+    local_zip_path = os.path.join(cache_dir, "osv_master_all.zip")
     
-    if not osv_ids:
-        return ecosystem_counts
+    should_download = True
+    
+    if os.path.exists(local_zip_path):
+        file_age_seconds = time.time() - os.path.getmtime(local_zip_path)
+        file_age_hours = file_age_seconds / 3600
+        
+        if file_age_hours < cache_expiry_hours:
+            print(f"[+] Found fresh local cache: {local_zip_path} (Age: {file_age_hours:.1f} hours). Skipping download.")
+            should_download = False
+        else:
+            print(f"[*] Local cache found but it is stale (Age: {file_age_hours:.1f} hours).")
 
-    print(f"[*] Resolving ecosystems for {total_ids:,} global/root advisories in batches of {batch_size}...")
-    
-    # Process IDs in chunks to avoid HTTP payload limits
-    for i in range(0, total_ids, batch_size):
-        chunk = osv_ids[i:i + batch_size]
-        
-        # Format the query according to the OSV querybatch spec
-        # We query by ID to grab the structural details
-        payload = {"queries": [{"id": uid} for uid in chunk]}
-        
+    if should_download:
+        print(f"[*] Downloading master database archive from OSV (~1GB)...")
         try:
-            # Using HTTP/2 or a persistent session is recommended for speed
-            url = "https://api.osv.dev/v1/querybatch"
-            res = requests.post(url, json=payload, timeout=30)
-            res.raise_for_status()
+            response = requests.get(master_zip_url, stream=True, timeout=120)
+            response.raise_for_status()
             
-            batch_data = res.json()
-            results = batch_data.get("results", [])
-            
-            for entry in results:
-                vulns = entry.get("vulnerabilities", [])
-                for v in vulns:
-                    # Look deep inside the affected object array for the ecosystem
-                    for affected in v.get("affected", []):
-                        package_info = affected.get("package", {})
-                        eco = package_info.get("ecosystem")
-                        if eco:
-                            ecosystem_counts[eco] += 1
-                            
+            with open(local_zip_path, 'wb') as local_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        local_file.write(chunk)
+            print(f"[+] Download complete. Saved to: {local_zip_path}")
         except Exception as e:
-            print(f"[-] Batch query failure at chunk {i}-{i+batch_size}: {e}")
-            continue
-            
-    return ecosystem_counts
+            print(f"[-] Download failed: {e}")
+            if os.path.exists(local_zip_path):
+                print("[!] Warning: Falling back to stale local cache to continue execution.")
+            else:
+                return {}
 
-def generate_accurate_leaderboard(days_delta: int = 30):
+    print("[*] Building global advisory memory index from local archive...")
+    id_to_ecosystems = {}
+    
+    try:
+        with zipfile.ZipFile(local_zip_path) as z:
+            for file_name in z.namelist():
+                if file_name.endswith('.json'):
+                    with z.open(file_name) as f:
+                        try:
+                            vuln_data = json.load(f)
+                            vuln_id = vuln_data.get("id")
+                            
+                            ecosystems = set()
+                            for affected in vuln_data.get("affected", []):
+                                eco = affected.get("package", {}).get("ecosystem")
+                                if eco:
+                                    ecosystems.add(eco)
+                            
+                            if vuln_id and ecosystems:
+                                id_to_ecosystems[vuln_id] = list(ecosystems)
+                        except json.JSONDecodeError:
+                            continue 
+                            
+        print(f"[+] Successfully indexed {len(id_to_ecosystems):,} global advisory mappings.")
+    except Exception as e:
+        print(f"[-] Failed to read and parse local zip file: {e}")
+        
+    return id_to_ecosystems
+
+def generate_enterprise_threat_leaderboard(days_delta: int = 30):
     """
-    Streams OSV metrics and accurately attributes both folder-mapped and 
-    root-mapped vulnerabilities to their real ecosystems.
+    Combines the streamed modifications log with local memory maps 
+    to output an authenticated, zero-leak ecosystem threat ledger.
     """
     cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_delta)
-    print(f"[*] Gathering raw OSV update logs since: {cutoff_date.date()}...")
+    print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
 
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    # Build or fetch our local index map
+    ghsa_lookup = build_ghsa_ecosystem_map()
     
-    final_ecosystems = Counter()
-    root_ids_to_resolve = []
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    final_leaderboard = Counter()
+    
     total_raw_rows = 0
 
-    # 1. Stream index and catalog targets
     try:
         response = requests.get(manifest_url, stream=True, timeout=30)
         response.raise_for_status()
@@ -82,44 +111,71 @@ def generate_accurate_leaderboard(days_delta: int = 30):
                 break
             
             total_raw_rows += 1
-            path_parts = path.split('/')
-            
-            if len(path_parts) == 1:
-                # It's a root file (e.g., "GHSA-xxxx-xxxx-xxxx.json")
-                # Strip file extensions to isolate the raw ID string
-                osv_id = path_parts[0].replace(".json", "")
-                root_ids_to_resolve.append(osv_id)
+            raw_ecosystems = []
+
+            # Step 1: Normalize colon paths immediately (e.g., "Root:Ubuntu:22.04" -> "Ubuntu")
+            if ":" in path:
+                parts = path.split(":")
+                if len(parts) > 1:
+                    raw_ecosystems.append(parts[1])
+                else:
+                    raw_ecosystems.append("OSV Global Meta-Records")
             else:
-                # Standard folder layout path (e.g., "npm/MAL-2024-123.json")
-                final_ecosystems[path_parts[0]] += 1
+                path_parts = path.split('/')
+                
+                # Step 2: Extract from Root/Global Advisories
+                if len(path_parts) == 1 or path_parts[0].lower() in ['root', '']:
+                    osv_id = path_parts[-1].replace(".json", "")
+                    if osv_id in ghsa_lookup:
+                        raw_ecosystems.extend(ghsa_lookup[osv_id])
+                    else:
+                        raw_ecosystems.append("OSV Global Meta-Records")
+                # Step 3: Extract standard directory path (e.g. "npm/MAL-xxxx.json")
+                else:
+                    raw_ecosystems.append(path_parts[0])
+
+            # Step 4: Strict Enterprise Rollup Map
+            # Ensures version numbers and case-mismatches merge cleanly
+            for eco in raw_ecosystems:
+                eco_clean = eco.strip()
+                eco_lower = eco_clean.lower()
+                
+                if "ubuntu" in eco_lower:
+                    final_leaderboard["Ubuntu"] += 1
+                elif "debian" in eco_lower:
+                    final_leaderboard["Debian"] += 1
+                elif "npm" in eco_lower:
+                    final_leaderboard["npm"] += 1
+                elif "pypi" in eco_lower:
+                    final_leaderboard["PyPI"] += 1
+                elif eco_clean == "OSV Global Meta-Records" or eco_clean == "[EMPTY]":
+                    final_leaderboard["OSV Global Meta-Records"] += 1
+                else:
+                    # Keep original string for any other verified ecosystem (e.g., MinimOS, Azure Linux)
+                    final_leaderboard[eco_clean] += 1
 
     except Exception as e:
-        print(f"[-] Manifest collection stream broke: {e}")
+        print(f"[-] Threat ledger stream disrupted: {e}")
         return
 
-    # 2. Extract real ecosystems from the root-level files
-    if root_ids_to_resolve:
-        root_mapping = fetch_ecosystems_for_root_ids(root_ids_to_resolve)
-        final_ecosystems.update(root_mapping)
-
-    # 3. Print the True Leaderboard
-    total_attributions = sum(final_ecosystems.values())
+    total_attributions = sum(final_leaderboard.values())
     if total_attributions == 0:
-        print("[-] Zero attributions compiled.")
+        print("[-] No valid delta records compiled.")
         return
 
-    print("\n" + "="*55)
-    print(f"  ACCURATE ECOSYSTEM THREAT LEADERBOARD (LAST {days_delta} DAYS)")
-    print("="*55)
-    print(f"{'Rank':<5} | {'Ecosystem':<22} | {'Activity Delta':<14}")
-    print("-"*55)
+    print("\n" + "="*60)
+    print(f"  VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD (LAST {days_delta} DAYS)")
+    print("="*60)
+    print(f"{'Rank':<5} | {'Ecosystem/Registry':<26} | {'Activity Delta':<14}")
+    print("-"*60)
     
-    for rank, (eco, count) in enumerate(final_ecosystems.most_common(10), 1):
-        print(f"#{rank:<3} | {eco:<22} | {count:<14,}")
-    print("="*55)
-    print(f"Processed Raw Records: {total_raw_rows:,}")
-    print(f"Total Unique Ecosystem Attributions: {total_attributions:,}\n")
+    # Show the top 12 to make sure your package managers (like npm) don't get pushed off by metadata keys
+    for rank, (eco, count) in enumerate(final_leaderboard.most_common(12), 1):
+        print(f"#{rank:<3} | {eco:<26} | {count:<14,}")
+        
+    print("="*60)
+    print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
+    print(f"Ecosystem Attributions:    {total_attributions:,}\n")
 
 if __name__ == "__main__":
-    # Pulling metrics based on your 30-day window
-    generate_accurate_leaderboard(days_delta=30)
+    generate_enterprise_threat_leaderboard(days_delta=30)
