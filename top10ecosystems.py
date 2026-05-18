@@ -18,6 +18,8 @@ A single unit added to the Activity Delta column indicates one of three events:
      expand/contract affected version ranges, or to inject newly patched versions.
   3. Metadata Correction: Minor back-end adjustments, such as updating CVSS 
      severity ratings or updating vendor description logs.
+     
+     
 
 Why Operating Systems (Debian/Ubuntu) volume dwarfs Application Registries (npm):
 ---------------------------------------------------------------------------------
@@ -30,6 +32,20 @@ database spikes.
 Conversely, Application Registry spikes (like npm) are heavily driven by active, 
 targeted software supply chain injections, malicious packages, or distinct library 
 vulnerabilities impacting application runtime code.
+
+WARNING ON LAYER FILTERING & MALWARE METRICS BEHAVIOR:
+---------------------------------------------------------------------------------
+Virtually 100% of cataloged open-source malware payloads live natively within 
+Application Layer registries (npm/PyPI). Operating system distributions track 
+vulnerabilities strictly as system CVEs (Vulnerability Fixes/Updates). 
+
+As a result:
+  - Running the script with '--layer app' yields malware vector counts that are 
+    IDENTICAL to a default run, because no malware data is omitted by removing 
+    containers. However, the Layer Threat Profile percentages will correctly scale
+    upward to reflect malware's true dominance over application-only churn.
+  - Running the script with '--layear container' suppresses the "MALWARE ATTACK 
+    VECTOR ANALYSIS" panel entirely, as the targeted malware metrics drop to zero.
 =================================================================================
 """
 
@@ -47,8 +63,8 @@ import requests
 def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
     """
     Downloads the master database zip from OSV if missing or stale,
-    and enriches the local lookup index by classifying the threat type and 
-    detecting whether it is a brand-new entry or an older update.
+    and enriches the local lookup index by classifying the threat type, 
+    lifecycle status, and explicit malware attack mechanics.
     """
     master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
     os.makedirs(cache_dir, exist_ok=True)
@@ -104,6 +120,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                 is_malware = True
                                 
                             summary = vuln_data.get("summary", "").lower()
+                            details = vuln_data.get("details", "").lower()
+                            
                             if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary:
                                 is_malware = True
 
@@ -118,8 +136,19 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             
                             published_str = vuln_data.get("published", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
-                            
                             is_new_entry = (published_str == modified_str)
+
+                            # MALWARE TYPE ANALYSIS ENGINE
+                            malware_vector = "Unclassified Malicious Payload"
+                            if is_malware:
+                                if "typosquat" in summary or "typosquat" in details:
+                                    malware_vector = "Typosquatting / Brand Hijacking"
+                                elif "dependency confusion" in summary or "dependency confusion" in details:
+                                    malware_vector = "Dependency Confusion Campaign"
+                                elif any(x in summary or x in details for x in ["exfiltrat", "token", "credential", "steal"]):
+                                    malware_vector = "Data Exfiltration / Credential Stealer"
+                                elif any(x in summary or x in details for x in ["reverse shell", "backdoor", "remote code"]):
+                                    malware_vector = "Persistent Backdoor / Execution Shell"
 
                             if is_malware:
                                 classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
@@ -131,7 +160,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             if vuln_id and ecosystems:
                                 id_to_meta[vuln_id] = {
                                     "ecosystems": list(ecosystems),
-                                    "type": classification
+                                    "type": classification,
+                                    "vector": malware_vector
                                 }
                         except json.JSONDecodeError:
                             continue 
@@ -201,11 +231,17 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         })
 
     bucket_counts = Counter({
-        "Malware (New Entry)": 0,
-        "Malware (Incremental Update)": 0,
-        "Vulnerability Fix (New Entry)": 0,
-        "Vulnerability Fix (Update)": 0,
+        "Malware (New Entry)": 0, "Malware (Incremental Update)": 0,
+        "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0,
         "Metadata Correction / Adjustments": 0
+    })
+    
+    malware_vector_counts = Counter({
+        "Typosquatting / Brand Hijacking": 0,
+        "Dependency Confusion Campaign": 0,
+        "Data Exfiltration / Credential Stealer": 0,
+        "Persistent Backdoor / Execution Shell": 0,
+        "Unclassified Malicious Payload": 0
     })
 
     try:
@@ -228,6 +264,7 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
             total_raw_rows += 1
             raw_ecosystems = []
             update_type = "Metadata Correction / Adjustments"
+            current_vector = None
 
             if ":" in path:
                 parts = path.split(":")
@@ -243,12 +280,16 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                     if osv_id in ghsa_lookup:
                         raw_ecosystems.extend(ghsa_lookup[osv_id]["ecosystems"])
                         update_type = ghsa_lookup[osv_id]["type"]
+                        if "Malware" in update_type:
+                            current_vector = ghsa_lookup[osv_id]["vector"]
                     else:
                         raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
                 else:
                     raw_ecosystems.append(path_parts[0])
                     if path_parts[0].lower() in ['npm', 'pypi'] and "mal-" in path_parts[-1].lower():
                         update_type = "Malware (New Entry)"
+                        osv_id = path_parts[-1].replace(".json", "")
+                        current_vector = ghsa_lookup.get(osv_id, {}).get("vector", "Unclassified Malicious Payload")
                     else:
                         update_type = "Vulnerability Fix (Update)"
 
@@ -262,11 +303,9 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                 elif "conan" in eco_lower: eco_clean = "ConanCenter"
                 elif "swift" in eco_lower: eco_clean = "SwiftURL"
 
-                # Normalize unmappable variants up front
                 if eco_clean in ["OSV Global Meta-Records", "[EMPTY]", ""]:
                     eco_clean = "Untagged Commit Hash/CVE Noise"
 
-                # FIXED LOGIC GATE: Intercept noise entries completely if --debug isn't supplied
                 if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode:
                     continue
 
@@ -277,6 +316,8 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                     continue
 
                 bucket_counts[update_type] += 1
+                if "Malware" in update_type and current_vector:
+                    malware_vector_counts[current_vector] += 1
 
                 if "ubuntu" in eco_lower: final_leaderboard["Ubuntu"] += 1
                 elif "debian" in eco_lower: final_leaderboard["Debian"] += 1
@@ -335,9 +376,6 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
-    
-    if debug_mode:
-        print("\n[*] DEBUG NOTE: 'Untagged Commit Hash/CVE Noise' is visible.")
 
     total_buckets = sum(bucket_counts.values())
     
@@ -349,6 +387,16 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         percentage = (b_count / total_buckets) * 100 if total_buckets > 0 else 0.0
         print(f"-> {b_type:<32} | {b_count:<6,} ({percentage:.1f}%)")
     print("="*50)
+
+    total_malware_signals = sum(malware_vector_counts.values())
+    if total_malware_signals > 0:
+        print("\n" + "="*50)
+        print("  DEEP DIVE: MALWARE ATTACK VECTOR ANALYSIS")
+        print("="*50)
+        for vector_name, vector_count in malware_vector_counts.most_common():
+            v_p = (vector_count / total_malware_signals) * 100 if total_malware_signals > 0 else 0.0
+            print(f"-> {vector_name:<38} | {vector_count:<4,} ({v_p:.1f}%)")
+        print("="*50)
     print()
 
 if __name__ == "__main__":
