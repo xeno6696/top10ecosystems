@@ -49,6 +49,21 @@ As a result:
 =================================================================================
 """
 
+"""
+OSV Threat Stream Campaign Dashboard Indicator
+=================================================================================
+A security engineering tool designed to track software supply chain fluctuations 
+by aggregating upstream vulnerability mutations from the Open Source Vulnerability 
+(OSV) database.
+
+CRITICAL ARCHITECTURAL NOTE ON METRICS:
+---------------------------------------------------------------------------------
+The "Activity Delta" column DOES NOT measure individual, real-world exploit attacks.
+Instead, it measures upstream VULNERABILITY DATABASE CHURN (mutations) over a 
+user-defined day window. 
+=================================================================================
+"""
+
 import csv
 import datetime
 import io
@@ -59,6 +74,13 @@ import zipfile
 import argparse
 from collections import Counter
 import requests
+
+# ANSI Color Codes for Scannable Shell Output
+GREEN = "\033[92m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
 
 def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
     """
@@ -138,6 +160,7 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
                             is_new_entry = (published_str == modified_str)
 
+                            # MALWARE TYPE ANALYSIS ENGINE
                             malware_vector = "Unclassified Malicious Payload"
                             if is_malware:
                                 if "typosquat" in summary or "typosquat" in details:
@@ -188,6 +211,122 @@ def get_artifact_layer(eco_name):
     else:
         return "Global Baseline Noise"
 
+def compare_snapshots(file_base: str, file_current: str):
+    """
+    Parses two local snapshot files, aggregates dynamic subfolder leakage on the fly,
+    generates trend metrics, and prints an ANSI-colored delta report.
+    """
+    try:
+        with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
+            base = json.load(f1)
+            current = json.load(f2)
+    except Exception as e:
+        print(f"[-] Snapshot comparison failed. Error loading files: {e}")
+        return
+
+    print("\n" + "="*85)
+    print(f"  {BOLD}SECURITY THREAT INTELLIGENCE STREAM MOVEMENT COMPARISON{RESET}")
+    print("="*85)
+    print(f"Base Document:    {file_base} (Generated: {base['metadata']['generated_at'][:10]})")
+    print(f"Current Document: {file_current} (Generated: {current['metadata']['generated_at'][:10]})")
+    print("="*85)
+
+    # DYNAMIC ON-THE-FLY ROLLUP SANITIZATION: Intercept legacy snapshot data fields
+    known_clean_keys = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", 
+                        "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL", "Debian", "Ubuntu", "MinimOS", 
+                        "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "GIT",
+                        "Android", "Untagged Commit Hash/CVE Noise"]
+
+    sanitized_base_leaderboard = Counter()
+    for eco, count in base["leaderboard"].items():
+        clean_name = "Android" if eco not in known_clean_keys else eco
+        sanitized_base_leaderboard[clean_name] += count
+
+    sanitized_curr_leaderboard = Counter()
+    for eco, count in current["leaderboard"].items():
+        clean_name = "Android" if eco not in known_clean_keys else eco
+        sanitized_curr_leaderboard[clean_name] += count
+
+    base_sorted = sorted(sanitized_base_leaderboard.items(), key=lambda x: x[1], reverse=True)
+    curr_sorted = sorted(sanitized_curr_leaderboard.items(), key=lambda x: x[1], reverse=True)
+
+    base_rank_map = {item[0]: rank for rank, item in enumerate(base_sorted, 1) if item[1] > 0}
+    curr_rank_map = {item[0]: rank for rank, item in enumerate(curr_sorted, 1) if item[1] > 0}
+
+    print(f"\n{BOLD}I. ECOSYSTEM ACTIVITY & RANK SHIFTS:{RESET}")
+    print("-"*85)
+    print(f"{'Ecosystem / Registry':<28} | {'Base Vol':<10} | {'Current Vol':<12} | {'Volume Delta':<14} | {'Rank Shift'}")
+    print("-"*85)
+
+    all_ecosystems = sorted(list(set(sanitized_base_leaderboard.keys()).union(set(sanitized_curr_leaderboard.keys()))))
+    
+    for eco in all_ecosystems:
+        v1 = sanitized_base_leaderboard.get(eco, 0)
+        v2 = sanitized_curr_leaderboard.get(eco, 0)
+        v_diff = v2 - v1
+        
+        if v_diff > 0:
+            v_str = f"{GREEN}+{v_diff:,}{RESET}"
+        elif v_diff < 0:
+            v_str = f"{RED}{v_diff:,}{RESET}"
+        else:
+            v_str = "0"
+
+        r1 = base_rank_map.get(eco, None)
+        r2 = curr_rank_map.get(eco, None)
+        
+        if r1 and r2:
+            r_diff = r1 - r2
+            if r_diff > 0:
+                r_str = f"{GREEN}Moved up {r_diff} spots (#{r1} -> #{r2}){RESET}"
+            elif r_diff < 0:
+                r_str = f"{RED}Moved down {abs(r_diff)} spots (#{r1} -> #{r2}){RESET}"
+            else:
+                r_str = f"No Change (#{r2})"
+        elif not r1 and r2:
+            r_str = f"{GREEN}New Entry To Rank (#{r2}){RESET}"
+        elif r1 and not r2:
+            r_str = f"{RED}Dropped Out of Active Rankings (Was #{r1}){RESET}"
+        else:
+            r_str = "Inactive / Zero Activity Trace"
+
+        print(f"{eco:<28} | {v1:<10,} | {v2:<12,} | {v_str:<23} | {r_str}")
+
+    print(f"\n{BOLD}II. THREAT BEHAVIOR VARIANCE:{RESET}")
+    print("-"*85)
+    for category in base["threat_profile"].keys():
+        b_count = base["threat_profile"].get(category, 0)
+        c_count = current["threat_profile"].get(category, 0)
+        diff = c_count - b_count
+        
+        if diff > 0:
+            diff_str = f"{GREEN}+{diff:,}{RESET}"
+        elif diff < 0:
+            diff_str = f"{RED}{diff:,}{RESET}"
+        else:
+            diff_str = "0"
+            
+        print(f"-> {category:<35} | Base: {b_count:<6,} | Current: {c_count:<6,} | Delta: {diff_str}")
+
+    if base.get("malware_vectors") or current.get("malware_vectors"):
+        print(f"\n{BOLD}III. MALWARE VECTOR ATTACK MATRIX SHIFTS:{RESET}")
+        print("-"*85)
+        all_vectors = sorted(list(set(base.get("malware_vectors", {}).keys()).union(set(current.get("malware_vectors", {}).keys()))))
+        for vec in all_vectors:
+            b_v = base.get("malware_vectors", {}).get(vec, 0)
+            c_v = current.get("malware_vectors", {}).get(vec, 0)
+            v_diff = c_v - b_v
+            
+            if v_diff > 0:
+                v_diff_str = f"{GREEN}+{v_diff:,}{RESET}"
+            elif v_diff < 0:
+                v_diff_str = f"{RED}{v_diff:,}{RESET}"
+            else:
+                v_diff_str = "0"
+                
+            print(f"-> {vec:<38} | Base: {b_v:<5,} | Current: {c_v:<5,} | Delta: {v_diff_str}")
+    print("="*85 + "\n")
+
 def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False, export_path: str = None):
     now = datetime.datetime.now(datetime.timezone.utc)
     
@@ -213,17 +352,13 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
     final_leaderboard = Counter()
     total_raw_rows = 0
 
+    known_containers = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
+    known_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
+
     if target_layer == "app":
-        final_leaderboard.update({
-            "npm": 0, "PyPI": 0, "Maven (Java)": 0, "Go (Golang)": 0, "NuGet": 0, 
-            "Packagist (PHP)": 0, "RubyGems": 0, "Crates.io": 0, "Hex": 0, "Pub": 0,
-            "ConanCenter": 0, "SwiftURL": 0
-        })
+        final_leaderboard.update({k: 0 for k in known_registries})
     elif target_layer == "container":
-        final_leaderboard.update({
-            "Debian": 0, "Ubuntu": 0, "Alpine Linux": 0, "Alpaquita Linux": 0,
-            "Azure Linux": 0, "MinimOS": 0, "Chainguard": 0, "Bitnami": 0
-        })
+        final_leaderboard.update({k: 0 for k in known_containers})
 
     bucket_counts = Counter({
         "Malware (New Entry)": 0, "Malware (Incremental Update)": 0,
@@ -298,6 +433,11 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                 elif "conan" in eco_lower: eco_clean = "ConanCenter"
                 elif "swift" in eco_lower: eco_clean = "SwiftURL"
 
+                is_explicit_match = any(eco_clean == k or eco_lower in k.lower() for k in (known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise"]))
+                if not is_explicit_match:
+                    eco_clean = "Android"
+                    eco_lower = "android"
+
                 if eco_clean in ["OSV Global Meta-Records", "[EMPTY]", ""]:
                     eco_clean = "Untagged Commit Hash/CVE Noise"
 
@@ -371,6 +511,9 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
+    
+    if debug_mode:
+        print("\n[*] DEBUG NOTE: 'Untagged Commit Hash/CVE Noise' is visible.")
 
     total_buckets = sum(bucket_counts.values())
     
@@ -394,7 +537,6 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         print("="*50)
     print()
 
-    # OUTPUT EXPORT MECHANISM FOR MONTHLY DIFF REPORTING
     if export_path:
         export_payload = {
             "metadata": {
@@ -411,7 +553,7 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         try:
             with open(export_path, 'w', encoding='utf-8') as ef:
                 json.dump(export_payload, ef, indent=4)
-            print(f"[+] Snapshot file successfully saved for monthly delta comparisons: {export_path}")
+            print(f"[Static Snapshot Saved]: {export_path}")
         except Exception as e:
             print(f"[-] Snapshot export failed to write to file: {e}")
 
@@ -420,12 +562,22 @@ if __name__ == "__main__":
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=str, default="30", help="The lookback window string parameters.")
     parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
-    parser.add_argument("--export", type=str, help="Specify a filename to export a static JSON data snapshot (e.g., 'snapshot_may.json').")
+    parser.add_argument("--export", type=str, help="Specify a filename to export a static JSON data snapshot.")
+    parser.add_argument(
+        "--compare", 
+        nargs=2, 
+        metavar=('BASE_JSON', 'CURRENT_JSON'),
+        help="Provide exactly two exported snapshot files to run an internal trends comparison delta report."
+    )
     
     args = parser.parse_args()
-    generate_enterprise_threat_leaderboard(
-        time_boundary_str=args.days, 
-        target_layer=args.layer, 
-        debug_mode=args.debug,
-        export_path=args.export
-    )
+    
+    if args.compare:
+        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1])
+    else:
+        generate_enterprise_threat_leaderboard(
+            time_boundary_str=args.days, 
+            target_layer=args.layer, 
+            debug_mode=args.debug,
+            export_path=args.export
+        )
