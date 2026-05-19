@@ -1,4 +1,6 @@
-﻿"""
+﻿#!/usr/bin/env python3
+
+"""
 OSV Threat Stream Campaign Dashboard Indicator
 =================================================================================
 A security engineering tool designed to track software supply chain fluctuations 
@@ -48,7 +50,7 @@ As a result:
     VECTOR ANALYSIS" panel entirely, as the targeted malware metrics drop to zero.
 =================================================================================
 """
-
+#!/usr/bin/env python3
 """
 OSV Threat Stream Campaign Dashboard Indicator
 =================================================================================
@@ -86,7 +88,7 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
     """
     Downloads the master database zip from OSV if missing or stale,
     and enriches the local lookup index by classifying the threat type, 
-    lifecycle status, and explicit malware attack mechanics.
+    lifecycle status, explicit malware attack mechanics, and blast radius profiles.
     """
     master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
     os.makedirs(cache_dir, exist_ok=True)
@@ -147,17 +149,32 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary:
                                 is_malware = True
 
+                            max_versions_found = 0
                             for affected in vuln_data.get("affected", []):
                                 eco = affected.get("package", {}).get("ecosystem")
                                 if eco:
                                     ecosystems.add(eco)
+                                
+                                v_len = len(affected.get("versions", []))
+                                if v_len > max_versions_found:
+                                    max_versions_found = v_len
+
                                 for ranges in affected.get("ranges", []):
                                     for events in ranges.get("events", []):
                                         if "fixed" in events:
                                             has_fixes = True
                             
-                            published_str = vuln_data.get("published", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
-                            modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
+                            published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
+                            modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
+                            
+                            dwell_days = 0.0
+                            try:
+                                p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+                                m_dt = datetime.datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
+                                dwell_days = max(0.0, (m_dt - p_dt).days)
+                            except ValueError:
+                                pass
+
                             is_new_entry = (published_str == modified_str)
 
                             # MALWARE TYPE ANALYSIS ENGINE
@@ -183,7 +200,9 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                 id_to_meta[vuln_id] = {
                                     "ecosystems": list(ecosystems),
                                     "type": classification,
-                                    "vector": malware_vector
+                                    "vector": malware_vector,
+                                    "dwell_days": dwell_days,
+                                    "blast_radius": max_versions_found
                                 }
                         except json.JSONDecodeError:
                             continue 
@@ -212,10 +231,7 @@ def get_artifact_layer(eco_name):
         return "Global Baseline Noise"
 
 def compare_snapshots(file_base: str, file_current: str):
-    """
-    Parses two local snapshot files, aggregates dynamic subfolder leakage on the fly,
-    generates trend metrics, and prints an ANSI-colored delta report with fixed column alignment.
-    """
+    """Parses two snapshots to generate dynamic colored delta trend reports across all 4 logical sections."""
     try:
         with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
             base = json.load(f1)
@@ -264,7 +280,6 @@ def compare_snapshots(file_base: str, file_current: str):
         v2 = sanitized_curr_leaderboard.get(eco, 0)
         v_diff = v2 - v1
         
-        # Right justify raw number first, then wrap with color boundary codes
         raw_v_str = f"{v_diff:+,}" if v_diff != 0 else "0"
         padded_v_str = f"{raw_v_str:>14}"
         
@@ -302,7 +317,6 @@ def compare_snapshots(file_base: str, file_current: str):
         c_count = current["threat_profile"].get(category, 0)
         diff = c_count - b_count
         
-        # Pad strings gracefully before color interpolation to lock margins
         raw_diff_str = f"{diff:+,}" if diff != 0 else "0"
         padded_diff_str = f"{raw_diff_str:>10}"
         
@@ -335,9 +349,123 @@ def compare_snapshots(file_base: str, file_current: str):
                 v_diff_str = padded_v_diff_str
                 
             print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
+
+    # ==============================================================================
+    # COMPARISON ENGINE: SECTION IV METRICS SHIFTS (IF DATA IS PRESENT IN PAYLOADS)
+    # ==============================================================================
+    if "profile_matrix" in base and "profile_matrix" in current:
+        print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS baseline SHIFTS:{RESET}")
+        print("-"*95)
+        print(f"{'Ecosystem / Registry':<22} | {'Avg Dwell MAL Delta':<20} | {'Avg Dwell CVE Delta':<20} | {'Avg Blast Radius Delta'}")
+        print("-"*95)
+        
+        for eco in sorted(list(set(base["profile_matrix"].keys()).union(set(current["profile_matrix"].keys())))):
+            b_mat = base["profile_matrix"].get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+            c_mat = current["profile_matrix"].get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+            
+            dm_diff = c_mat["avg_dwell_mal"] - b_mat["avg_dwell_mal"]
+            dc_diff = c_mat["avg_dwell_cve"] - b_mat["avg_dwell_cve"]
+            br_diff = c_mat["avg_blast_radius"] - b_mat["avg_blast_radius"]
+            
+            def format_delta_str(diff, suffix=""):
+                if diff > 0: return f"{GREEN}+{diff:.1f}{suffix}{RESET}"
+                elif diff < 0: return f"{RED}{diff:.1f}{suffix}{RESET}"
+                return f"{diff:.1f}{suffix}"
+
+            print(f"{eco:<22} | {format_delta_str(dm_diff, ' Days'):<29} | {format_delta_str(dc_diff, ' Days'):<29} | {format_delta_str(br_diff, ' Vers')}")
+        print("-"*95)
+
+        # Highlight new massive anomalies tracking arrivals
+        print(f"\n{BOLD}V. NEW CRITICAL OUTLIER ADVISORY ARRIVALS (NOT DETECTED IN BASE TIMELINE):{RESET}")
+        print("-"*95)
+        print(f"{'Ecosystem':<15} | {'Advisory ID':<20} | {'Impacted Versions':<20} | {'Threat Profile Type'}")
+        print("-"*95)
+        
+        new_arrivals_found = False
+        for eco, pool in current.get("outliers_leaderboards", {}).items():
+            base_pool = base.get("outliers_leaderboards", {}).get(eco, {})
+            for r_id, (radius, u_type) in pool.items():
+                if r_id not in base_pool:
+                    new_arrivals_found = True
+                    print(f"{eco:<15} | {r_id:<20} | {radius:<20,} | {u_type}")
+                    
+        if not new_arrivals_found:
+            print(f" -> No new maximum blast radius outliers added inside this comparison delta frame.")
+        print("-"*95)
+        
     print("="*85 + "\n")
 
-def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False, export_path: str = None):
+# ==============================================================================
+# OPTIMIZED SPEEDWAY TIMELINE ENGINE
+# ==============================================================================
+def render_speedway_timeline(cutoff_date, target_layer, debug_mode):
+    """Isolated Speedway tracking engine utilizing the streaming ledger channel."""
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    hourly_buckets = Counter()
+    total_processed = 0
+
+    print("[*] Streaming timeline modifications from live ledger stream...")
+    try:
+        response = requests.get(manifest_url, stream=True, timeout=30)
+        response.raise_for_status()
+        
+        lines = (line.decode('utf-8') for line in response.iter_lines())
+        reader = csv.reader(lines)
+        
+        for row in reader:
+            if not row: continue
+            
+            mod_time_str, path = row[0], row[1]
+            mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
+            
+            if mod_time < cutoff_date:
+                break
+
+            eco_clean = "Untagged Commit Hash/CVE Noise"
+            if ":" in path:
+                parts = path.split(":")
+                if len(parts) > 1: eco_clean = parts[1].strip()
+            else:
+                path_parts = path.split('/')
+                if len(path_parts) > 1 and path_parts[0].lower() not in ['root', '']:
+                    eco_clean = path_parts[0].strip()
+
+            if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode:
+                continue
+
+            layer = get_artifact_layer(eco_clean)
+            if target_layer == "container" and layer != "Container Base Image": continue
+            elif target_layer == "app" and layer != "App Software Registry": continue
+
+            hourly_buckets[mod_time.hour] += 1
+            total_processed += 1
+
+    except Exception as e:
+        print(f"[-] Speedway stream visualization tracking disrupted: {e}")
+        return
+
+    if total_processed == 0:
+        print("\n[!] Zero records tracked matching layer constraints inside timeline window.")
+        return
+
+    max_count = max(hourly_buckets.values()) if hourly_buckets else 1
+    scale_factor = max(1, max_count // 50)
+
+    print("\n" + "="*85)
+    print(f"  GLOBAL OSV STREAM: 24-HOUR TRAFFIC ACCELERATION (UTC)")
+    print(f"  Target Filter Scope Layer: {target_layer if target_layer else 'all'}")
+    print(f"  Total Processed Window Events: {total_processed:,}")
+    print("="*85)
+    
+    for hour in range(24):
+        count = hourly_buckets[hour]
+        bar = "█" * (count // scale_factor) if count > 0 else ""
+        alert_tag = f" {RED}[!] ACCELERATION SPIKE{RESET}" if count > 10 and count >= (max_count * 0.8) else ""
+        print(f"{hour:02d}:00 | {count:5d} entries {bar}{alert_tag}")
+    print("="*85 + "\n")
+
+
+def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False):
     now = datetime.datetime.now(datetime.timezone.utc)
     
     if time_boundary_str.isdigit():
@@ -353,6 +481,11 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         except ValueError:
             print(f"[-] Format error: '{time_boundary_str}' must be an integer or a valid YYYY-MM-DD date string.")
             return
+
+    if run_speedway:
+        print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
+        render_speedway_timeline(cutoff_date, target_layer, debug_mode)
+        return
 
     print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
 
@@ -384,6 +517,11 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         "Unclassified Malicious Payload": 0
     })
 
+    spatial_dwell_malware = {k: [] for k in (known_containers + known_registries + ["Android"])}
+    spatial_dwell_cve = {k: [] for k in (known_containers + known_registries + ["Android"])}
+    spatial_blast_radius = {k: [] for k in (known_containers + known_registries + ["Android"])}
+    ecosystem_outlier_pools = {k: {} for k in (known_containers + known_registries + ["Android"])}
+
     try:
         response = requests.get(manifest_url, stream=True, timeout=30)
         response.raise_for_status()
@@ -405,11 +543,13 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
             raw_ecosystems = []
             update_type = "Metadata Correction / Adjustments"
             current_vector = None
+            current_id = "N/A"
 
             if ":" in path:
                 parts = path.split(":")
                 if len(parts) > 1:
-                    raw_ecosystems.append(parts[1])
+                    current_id = parts[0].strip()
+                    raw_ecosystems.append(parts[1].strip())
                     update_type = "Vulnerability Fix (Update)"
                 else:
                     raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
@@ -417,6 +557,7 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                 path_parts = path.split('/')
                 if len(path_parts) == 1 or path_parts[0].lower() in ['root', '']:
                     osv_id = path_parts[-1].replace(".json", "")
+                    current_id = osv_id
                     if osv_id in ghsa_lookup:
                         raw_ecosystems.extend(ghsa_lookup[osv_id]["ecosystems"])
                         update_type = ghsa_lookup[osv_id]["type"]
@@ -426,9 +567,10 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                         raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
                 else:
                     raw_ecosystems.append(path_parts[0])
+                    osv_id = path_parts[-1].replace(".json", "")
+                    current_id = osv_id
                     if path_parts[0].lower() in ['npm', 'pypi'] and "mal-" in path_parts[-1].lower():
                         update_type = "Malware (New Entry)"
-                        osv_id = path_parts[-1].replace(".json", "")
                         current_vector = ghsa_lookup.get(osv_id, {}).get("vector", "Unclassified Malicious Payload")
                     else:
                         update_type = "Vulnerability Fix (Update)"
@@ -463,6 +605,20 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
                 bucket_counts[update_type] += 1
                 if "Malware" in update_type and current_vector:
                     malware_vector_counts[current_vector] += 1
+
+                if current_id in ghsa_lookup:
+                    meta_entry = ghsa_lookup[current_id]
+                    if "Malware" in update_type:
+                        spatial_dwell_malware[eco_clean].append(meta_entry["dwell_days"])
+                    else:
+                        spatial_dwell_cve[eco_clean].append(meta_entry["dwell_days"])
+                    
+                    spatial_blast_radius[eco_clean].append(meta_entry["blast_radius"])
+                    
+                    if meta_entry["blast_radius"] > 0:
+                        pool = ecosystem_outlier_pools[eco_clean]
+                        if current_id not in pool or meta_entry["blast_radius"] > pool[current_id][0]:
+                            pool[current_id] = (meta_entry["blast_radius"], update_type)
 
                 if "ubuntu" in eco_lower: final_leaderboard["Ubuntu"] += 1
                 elif "debian" in eco_lower: final_leaderboard["Debian"] += 1
@@ -521,9 +677,6 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
-    
-    if debug_mode:
-        print("\n[*] DEBUG NOTE: 'Untagged Commit Hash/CVE Noise' is visible.")
 
     total_buckets = sum(bucket_counts.values())
     
@@ -545,9 +698,76 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
             v_p = (vector_count / total_malware_signals) * 100 if total_malware_signals > 0 else 0.0
             print(f"-> {vector_name:<38} | {vector_count:<4,} ({v_p:.1f}%)")
         print("="*50)
+
+    # Dictionary targets to capture for the hybrid export engine schema mapping
+    export_profile_matrix = {}
+    export_outliers_leaderboards = {}
+
+    active_matrix_ecosystems = [eco for eco, count, _ in filtered_results[:10] if eco != "Untagged Commit Hash/CVE Noise" and count > 0]
+    if active_matrix_ecosystems:
+        print("\n" + "="*95)
+        print("  IV. ECOSYSTEM THREAT DWELL TIME & BLAST RADIUS PROFILE MATRIX")
+        print("="*95)
+        print(f"{'Ecosystem/Registry':<22} | {'Avg Dwell (Malware)':<20} | {'Avg Dwell (CVE)':<16} | {'Avg Blast Radius'}")
+        print("-"*95)
+        
+        for eco in active_matrix_ecosystems:
+            m_list = spatial_dwell_malware.get(eco, [])
+            c_list = spatial_dwell_cve.get(eco, [])
+            r_list = spatial_blast_radius.get(eco, [])
+            
+            raw_avg_m = sum(m_list)/len(m_list) if m_list else 0.0
+            raw_avg_c = sum(c_list)/len(c_list) if c_list else 0.0
+            raw_avg_r = sum(r_list)/len(r_list) if r_list else 0.0
+
+            export_profile_matrix[eco] = {
+                "avg_dwell_mal": raw_avg_m,
+                "avg_dwell_cve": raw_avg_c,
+                "avg_blast_radius": raw_avg_r
+            }
+
+            avg_m = f"{raw_avg_m:.1f} Days" if m_list else "0.0 Days"
+            avg_c = f"{raw_avg_c:.1f} Days" if c_list else "0.0 Days"
+            avg_r = f"{raw_avg_r:.1f} Versions Affected" if r_list else "0.0 Versions Affected"
+            
+            print(f"{eco:<22} | {avg_m:<20} | {avg_c:<16} | {avg_r}")
+        print("="*95)
+
+        print("\n" + "="*95)
+        print(f"  {BOLD}CRITICAL ANOMALY BREAKOUT: TOP 10 BLAST RADIUS OUTLIERS PER ACTIVE REGISTRY{RESET}")
+        print("="*95)
+        
+        for eco in active_matrix_ecosystems:
+            pool = ecosystem_outlier_pools.get(eco, {})
+            sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)
+            
+            if not sorted_pool:
+                continue
+                
+            export_outliers_leaderboards[eco] = {r_id: list(data) for r_id, data in sorted_pool[:10]}
+
+            print(f"\n[+] Active Telemetry Focus: {BOLD}{eco}{RESET}")
+            print("-"*95)
+            print(f"{'Rank':<5} | {'Advisory ID':<20} | {'Versions Impacted':<22} | {'Threat Classification'}")
+            print("-"*95)
+            
+            for idx, (r_id, (radius, u_type)) in enumerate(sorted_pool[:10], 1):
+                clean_type = u_type.split("(")[0].strip() if "(" in u_type else u_type
+                print(f"#{idx:<3} | {r_id:<20} | {radius:<22,} | {clean_type}")
+            print("-"*95)
     print()
 
-    if export_path:
+    # ==============================================================================
+    # DYNAMIC METRICS SNAPSHOT EXPORT HARVESTER
+    # ==============================================================================
+    if custom_export_arg:
+        if isinstance(custom_export_arg, str):
+            export_path = custom_export_arg
+        else:
+            date_str = now.strftime("%d-%m-%y")
+            layer_str = target_layer if target_layer else "all"
+            export_path = f"{date_str}{layer_str}.json"
+
         export_payload = {
             "metadata": {
                 "generated_at": now.isoformat(),
@@ -558,7 +778,10 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
             },
             "leaderboard": {eco: count for eco, count, _ in filtered_results},
             "threat_profile": dict(bucket_counts),
-            "malware_vectors": dict(malware_vector_counts) if total_malware_signals > 0 else {}
+            "malware_vectors": dict(malware_vector_counts) if total_malware_signals > 0 else {},
+            # Appending Sections IV and V data objects cleanly into the export snapshot layer
+            "profile_matrix": export_profile_matrix,
+            "outliers_leaderboards": export_outliers_leaderboards
         }
         try:
             with open(export_path, 'w', encoding='utf-8') as ef:
@@ -572,13 +795,22 @@ if __name__ == "__main__":
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=str, default="30", help="The lookback window string parameters.")
     parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
-    parser.add_argument("--export", type=str, help="Specify a filename to export a static JSON data snapshot.")
+    
+    parser.add_argument(
+        "--export", 
+        nargs='?', 
+        const=True, 
+        default=False, 
+        help="Pass a custom filename string, or leave empty to auto-generate a dd-mm-yylayer.json snapshot."
+    )
+    
     parser.add_argument(
         "--compare", 
         nargs=2, 
         metavar=('BASE_JSON', 'CURRENT_JSON'),
         help="Provide exactly two exported snapshot files to run an internal trends comparison delta report."
     )
+    parser.add_argument("--speedway", action="store_true", help="Analyze unified stream timeline velocity distribution.")
     
     args = parser.parse_args()
     
@@ -589,5 +821,6 @@ if __name__ == "__main__":
             time_boundary_str=args.days, 
             target_layer=args.layer, 
             debug_mode=args.debug,
-            export_path=args.export
+            custom_export_arg=args.export,
+            run_speedway=args.speedway
         )
