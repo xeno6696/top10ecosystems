@@ -138,7 +138,6 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z").replace("Z", "+00:00")
                             is_new_entry = (published_str == modified_str)
 
-                            # MALWARE TYPE ANALYSIS ENGINE
                             malware_vector = "Unclassified Malicious Payload"
                             if is_malware:
                                 if "typosquat" in summary or "typosquat" in details:
@@ -189,11 +188,7 @@ def get_artifact_layer(eco_name):
     else:
         return "Global Baseline Noise"
 
-def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False):
-    """
-    Parses dynamic lookback parameters (either an integer or a YYYY-MM-DD date)
-    and processes streamed log entries matching that timeframe.
-    """
+def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False, export_path: str = None):
     now = datetime.datetime.now(datetime.timezone.utc)
     
     if time_boundary_str.isdigit():
@@ -399,11 +394,38 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
         print("="*50)
     print()
 
+    # OUTPUT EXPORT MECHANISM FOR MONTHLY DIFF REPORTING
+    if export_path:
+        export_payload = {
+            "metadata": {
+                "generated_at": now.isoformat(),
+                "time_boundary": time_boundary_str,
+                "cutoff_date": cutoff_date.date().isoformat(),
+                "target_layer_filter": target_layer if target_layer else "all",
+                "total_raw_rows_processed": total_raw_rows
+            },
+            "leaderboard": {eco: count for eco, count, _ in filtered_results},
+            "threat_profile": dict(bucket_counts),
+            "malware_vectors": dict(malware_vector_counts) if total_malware_signals > 0 else {}
+        }
+        try:
+            with open(export_path, 'w', encoding='utf-8') as ef:
+                json.dump(export_payload, ef, indent=4)
+            print(f"[+] Snapshot file successfully saved for monthly delta comparisons: {export_path}")
+        except Exception as e:
+            print(f"[-] Snapshot export failed to write to file: {e}")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=str, default="30", help="The lookback window string parameters.")
     parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
+    parser.add_argument("--export", type=str, help="Specify a filename to export a static JSON data snapshot (e.g., 'snapshot_may.json').")
     
     args = parser.parse_args()
-    generate_enterprise_threat_leaderboard(time_boundary_str=args.days, target_layer=args.layer, debug_mode=args.debug)
+    generate_enterprise_threat_leaderboard(
+        time_boundary_str=args.days, 
+        target_layer=args.layer, 
+        debug_mode=args.debug,
+        export_path=args.export
+    )
