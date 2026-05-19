@@ -214,7 +214,7 @@ def get_artifact_layer(eco_name):
 def compare_snapshots(file_base: str, file_current: str):
     """
     Parses two local snapshot files, aggregates dynamic subfolder leakage on the fly,
-    generates trend metrics, and prints an ANSI-colored delta report.
+    generates trend metrics, and prints an ANSI-colored delta report with fixed column alignment.
     """
     try:
         with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
@@ -231,7 +231,6 @@ def compare_snapshots(file_base: str, file_current: str):
     print(f"Current Document: {file_current} (Generated: {current['metadata']['generated_at'][:10]})")
     print("="*85)
 
-    # DYNAMIC ON-THE-FLY ROLLUP SANITIZATION: Intercept legacy snapshot data fields
     known_clean_keys = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", 
                         "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL", "Debian", "Ubuntu", "MinimOS", 
                         "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "GIT",
@@ -265,12 +264,16 @@ def compare_snapshots(file_base: str, file_current: str):
         v2 = sanitized_curr_leaderboard.get(eco, 0)
         v_diff = v2 - v1
         
+        # Right justify raw number first, then wrap with color boundary codes
+        raw_v_str = f"{v_diff:+,}" if v_diff != 0 else "0"
+        padded_v_str = f"{raw_v_str:>14}"
+        
         if v_diff > 0:
-            v_str = f"{GREEN}+{v_diff:,}{RESET}"
+            v_str = f"{GREEN}{padded_v_str}{RESET}"
         elif v_diff < 0:
-            v_str = f"{RED}{v_diff:,}{RESET}"
+            v_str = f"{RED}{padded_v_str}{RESET}"
         else:
-            v_str = "0"
+            v_str = padded_v_str
 
         r1 = base_rank_map.get(eco, None)
         r2 = curr_rank_map.get(eco, None)
@@ -290,7 +293,7 @@ def compare_snapshots(file_base: str, file_current: str):
         else:
             r_str = "Inactive / Zero Activity Trace"
 
-        print(f"{eco:<28} | {v1:<10,} | {v2:<12,} | {v_str:<23} | {r_str}")
+        print(f"{eco:<28} | {v1:<10,} | {v2:<12,} | {v_str} | {r_str}")
 
     print(f"\n{BOLD}II. THREAT BEHAVIOR VARIANCE:{RESET}")
     print("-"*85)
@@ -299,14 +302,18 @@ def compare_snapshots(file_base: str, file_current: str):
         c_count = current["threat_profile"].get(category, 0)
         diff = c_count - b_count
         
+        # Pad strings gracefully before color interpolation to lock margins
+        raw_diff_str = f"{diff:+,}" if diff != 0 else "0"
+        padded_diff_str = f"{raw_diff_str:>10}"
+        
         if diff > 0:
-            diff_str = f"{GREEN}+{diff:,}{RESET}"
+            diff_str = f"{GREEN}{padded_diff_str}{RESET}"
         elif diff < 0:
-            diff_str = f"{RED}{diff:,}{RESET}"
+            diff_str = f"{RED}{padded_diff_str}{RESET}"
         else:
-            diff_str = "0"
+            diff_str = padded_diff_str
             
-        print(f"-> {category:<35} | Base: {b_count:<6,} | Current: {c_count:<6,} | Delta: {diff_str}")
+        print(f"-> {category:<35} | Base: {b_count:<7,} | Current: {c_count:<7,} | Delta: {diff_str}")
 
     if base.get("malware_vectors") or current.get("malware_vectors"):
         print(f"\n{BOLD}III. MALWARE VECTOR ATTACK MATRIX SHIFTS:{RESET}")
@@ -317,14 +324,17 @@ def compare_snapshots(file_base: str, file_current: str):
             c_v = current.get("malware_vectors", {}).get(vec, 0)
             v_diff = c_v - b_v
             
+            raw_v_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
+            padded_v_diff_str = f"{raw_v_diff_str:>10}"
+            
             if v_diff > 0:
-                v_diff_str = f"{GREEN}+{v_diff:,}{RESET}"
+                v_diff_str = f"{GREEN}{padded_v_diff_str}{RESET}"
             elif v_diff < 0:
-                v_diff_str = f"{RED}{v_diff:,}{RESET}"
+                v_diff_str = f"{RED}{padded_v_diff_str}{RESET}"
             else:
-                v_diff_str = "0"
+                v_diff_str = padded_v_diff_str
                 
-            print(f"-> {vec:<38} | Base: {b_v:<5,} | Current: {c_v:<5,} | Delta: {v_diff_str}")
+            print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
     print("="*85 + "\n")
 
 def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False, export_path: str = None):
