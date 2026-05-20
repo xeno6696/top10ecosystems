@@ -231,7 +231,7 @@ def get_artifact_layer(eco_name):
         return "Global Baseline Noise"
 
 def compare_snapshots(file_base: str, file_current: str):
-    """Parses two snapshots to generate dynamic colored delta trend reports across all 4 logical sections."""
+    """Parses two snapshots to generate dynamic colored delta trend reports across all sections."""
     try:
         with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
             base = json.load(f1)
@@ -296,15 +296,15 @@ def compare_snapshots(file_base: str, file_current: str):
         if r1 and r2:
             r_diff = r1 - r2
             if r_diff > 0:
-                r_str = f"{GREEN}Moved up {r_diff} spots (#{r1} -> #{r2}){RESET}"
+                r_str = f"{GREEN}Moved up {r_diff} spots ({r1} -> {r2}){RESET}"
             elif r_diff < 0:
-                r_str = f"{RED}Moved down {abs(r_diff)} spots (#{r1} -> #{r2}){RESET}"
+                r_str = f"{RED}Moved down {abs(r_diff)} spots ({r1} -> {r2}){RESET}"
             else:
-                r_str = f"No Change (#{r2})"
+                r_str = f"No Change ({r2})"
         elif not r1 and r2:
-            r_str = f"{GREEN}New Entry To Rank (#{r2}){RESET}"
+            r_str = f"{GREEN}New Entry To Rank ({r2}){RESET}"
         elif r1 and not r2:
-            r_str = f"{RED}Dropped Out of Active Rankings (Was #{r1}){RESET}"
+            r_str = f"{RED}Dropped Out of Active Rankings (Was {r1}){RESET}"
         else:
             r_str = "Inactive / Zero Activity Trace"
 
@@ -350,11 +350,8 @@ def compare_snapshots(file_base: str, file_current: str):
                 
             print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
 
-    # ==============================================================================
-    # COMPARISON ENGINE: SECTION IV METRICS SHIFTS (IF DATA IS PRESENT IN PAYLOADS)
-    # ==============================================================================
     if "profile_matrix" in base and "profile_matrix" in current:
-        print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS baseline SHIFTS:{RESET}")
+        print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
         print("-"*95)
         print(f"{'Ecosystem / Registry':<22} | {'Avg Dwell MAL Delta':<20} | {'Avg Dwell CVE Delta':<20} | {'Avg Blast Radius Delta'}")
         print("-"*95)
@@ -375,7 +372,6 @@ def compare_snapshots(file_base: str, file_current: str):
             print(f"{eco:<22} | {format_delta_str(dm_diff, ' Days'):<29} | {format_delta_str(dc_diff, ' Days'):<29} | {format_delta_str(br_diff, ' Vers')}")
         print("-"*95)
 
-        # Highlight new massive anomalies tracking arrivals
         print(f"\n{BOLD}V. NEW CRITICAL OUTLIER ADVISORY ARRIVALS (NOT DETECTED IN BASE TIMELINE):{RESET}")
         print("-"*95)
         print(f"{'Ecosystem':<15} | {'Advisory ID':<20} | {'Impacted Versions':<20} | {'Threat Profile Type'}")
@@ -396,10 +392,10 @@ def compare_snapshots(file_base: str, file_current: str):
     print("="*85 + "\n")
 
 # ==============================================================================
-# OPTIMIZED SPEEDWAY TIMELINE ENGINE
+# OPTIMIZED SPEEDWAY TIMELINE ENGINE (BOUNDED INTERVAL VERSION)
 # ==============================================================================
-def render_speedway_timeline(cutoff_date, target_layer, debug_mode):
-    """Isolated Speedway tracking engine utilizing the streaming ledger channel."""
+def render_speedway_timeline(start_date, end_date, target_layer, debug_mode):
+    """Isolated Speedway tracking engine utilizing dual chronological box boundaries."""
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     hourly_buckets = Counter()
     total_processed = 0
@@ -418,7 +414,12 @@ def render_speedway_timeline(cutoff_date, target_layer, debug_mode):
             mod_time_str, path = row[0], row[1]
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             
-            if mod_time < cutoff_date:
+            # Bound 1: If entry is newer than our cap, skip past it to reach the target interval
+            if mod_time > end_date:
+                continue
+                
+            # Bound 2: If entry is older than our floor, stop stream parsing entirely
+            if mod_time < start_date:
                 break
 
             eco_clean = "Untagged Commit Hash/CVE Noise"
@@ -453,6 +454,7 @@ def render_speedway_timeline(cutoff_date, target_layer, debug_mode):
 
     print("\n" + "="*85)
     print(f"  GLOBAL OSV STREAM: 24-HOUR TRAFFIC ACCELERATION (UTC)")
+    print(f"  Window Frame: {start_date.date()} -> {end_date.date()}")
     print(f"  Target Filter Scope Layer: {target_layer if target_layer else 'all'}")
     print(f"  Total Processed Window Events: {total_processed:,}")
     print("="*85)
@@ -465,29 +467,13 @@ def render_speedway_timeline(cutoff_date, target_layer, debug_mode):
     print("="*85 + "\n")
 
 
-def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False):
+def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False):
     now = datetime.datetime.now(datetime.timezone.utc)
-    
-    if time_boundary_str.isdigit():
-        days_delta = int(time_boundary_str)
-        cutoff_date = now - datetime.timedelta(days=days_delta)
-        time_label = f"LAST {days_delta} DAYS"
-    else:
-        try:
-            parsed_date = datetime.date.fromisoformat(time_boundary_str)
-            cutoff_date = datetime.datetime.combine(parsed_date, datetime.time.min, tzinfo=datetime.timezone.utc)
-            days_delta = (now.date() - parsed_date).days
-            time_label = f"SINCE {time_boundary_str} ({days_delta} DAYS AGO)"
-        except ValueError:
-            print(f"[-] Format error: '{time_boundary_str}' must be an integer or a valid YYYY-MM-DD date string.")
-            return
-
     if run_speedway:
-        print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
-        render_speedway_timeline(cutoff_date, target_layer, debug_mode)
+        render_speedway_timeline(start_date, end_date, target_layer, debug_mode)
         return
 
-    print(f"[*] Analyzing live threat stream logs since: {cutoff_date.date()}...")
+    print(f"[*] Analyzing live threat stream logs within window: {start_date.date()} to {end_date.date()}...")
 
     ghsa_lookup = build_ghsa_ecosystem_map()
     
@@ -536,7 +522,10 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
             mod_time_str, path = row[0], row[1]
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             
-            if mod_time < cutoff_date:
+            # Bounded Interval Execution Gateways
+            if mod_time > end_date:
+                continue
+            if mod_time < start_date:
                 break
             
             total_raw_rows += 1
@@ -666,7 +655,8 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
     elif target_layer == "app": title += " (APP SOFTWARE REGISTRIES ONLY)"
 
     print("\n" + "="*85)
-    print(f"  {title} ({time_label})")
+    print(f"  {title}")
+    print(f"  Chronological Box: {start_date.date()} to {end_date.date()}")
     print("="*85)
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<32} | {'Activity Delta':<14} | {'Artifact Layer'}")
     print("-"*85)
@@ -699,7 +689,6 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
             print(f"-> {vector_name:<38} | {vector_count:<4,} ({v_p:.1f}%)")
         print("="*50)
 
-    # Dictionary targets to capture for the hybrid export engine schema mapping
     export_profile_matrix = {}
     export_outliers_leaderboards = {}
 
@@ -758,28 +747,29 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
     print()
 
     # ==============================================================================
-    # DYNAMIC METRICS SNAPSHOT EXPORT HARVESTER
+    # INTERVAL SNAPSHOT EXPORT WRAPPER
     # ==============================================================================
     if custom_export_arg:
         if isinstance(custom_export_arg, str):
             export_path = custom_export_arg
         else:
-            date_str = now.strftime("%d-%m-%y")
+            # Automatic filename signature now matches the dual boundaries perfectly
+            from_str = start_date.strftime("%d-%m-%y")
+            to_str = end_date.strftime("%d-%m-%y")
             layer_str = target_layer if target_layer else "all"
-            export_path = f"{date_str}{layer_str}.json"
+            export_path = f"{from_str}_to_{to_str}_{layer_str}.json"
 
         export_payload = {
             "metadata": {
                 "generated_at": now.isoformat(),
-                "time_boundary": time_boundary_str,
-                "cutoff_date": cutoff_date.date().isoformat(),
+                "interval_from": start_date.date().isoformat(),
+                "interval_to": end_date.date().isoformat(),
                 "target_layer_filter": target_layer if target_layer else "all",
                 "total_raw_rows_processed": total_raw_rows
             },
             "leaderboard": {eco: count for eco, count, _ in filtered_results},
             "threat_profile": dict(bucket_counts),
             "malware_vectors": dict(malware_vector_counts) if total_malware_signals > 0 else {},
-            # Appending Sections IV and V data objects cleanly into the export snapshot layer
             "profile_matrix": export_profile_matrix,
             "outliers_leaderboards": export_outliers_leaderboards
         }
@@ -793,7 +783,9 @@ def generate_enterprise_threat_leaderboard(time_boundary_str: str, target_layer:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
-    parser.add_argument("--days", type=str, default="30", help="The lookback window string parameters.")
+    parser.add_argument("--days", type=int, help="Relative lookback day window shortcut from today.")
+    parser.add_argument("--from", metavar="YYYY-MM-DD", help="Explicit chronological interval starting boundary.")
+    parser.add_argument("--to", metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary.")
     parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
     
     parser.add_argument(
@@ -801,7 +793,7 @@ if __name__ == "__main__":
         nargs='?', 
         const=True, 
         default=False, 
-        help="Pass a custom filename string, or leave empty to auto-generate a dd-mm-yylayer.json snapshot."
+        help="Pass a custom filename string, or leave empty to auto-generate a boxed interval snapshot."
     )
     
     parser.add_argument(
@@ -812,13 +804,43 @@ if __name__ == "__main__":
     )
     parser.add_argument("--speedway", action="store_true", help="Analyze unified stream timeline velocity distribution.")
     
-    args = parser.parse_args()
+    args = getattr(parser, 'parse_args')()
     
     if args.compare:
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1])
     else:
+        # Chronological Engine Core Alignment
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if args.__dict__["from"]:
+            try:
+                p_from = datetime.date.fromisoformat(args.__dict__["from"])
+                calculated_start = datetime.datetime.combine(p_from, datetime.time.min, tzinfo=datetime.timezone.utc)
+            except ValueError:
+                print("[-] Format error: `--from` must use YYYY-MM-DD template.")
+                exit(1)
+        elif args.days:
+            calculated_start = now_utc - datetime.timedelta(days=args.days)
+        else:
+            calculated_start = now_utc - datetime.timedelta(days=30) # Default baseline fallback
+
+        if args.to:
+            try:
+                p_to = datetime.date.fromisoformat(args.to)
+                calculated_end = datetime.datetime.combine(p_to, datetime.time.max, tzinfo=datetime.timezone.utc)
+            except ValueError:
+                print("[-] Format error: `--to` must use YYYY-MM-DD template.")
+                exit(1)
+        else:
+            calculated_end = now_utc # Default to this exact second
+
+        if calculated_start > calculated_end:
+            print("[-] Interval Constraint Error: Logical clash. Start parameter cannot exist ahead of End parameter.")
+            exit(1)
+
         generate_enterprise_threat_leaderboard(
-            time_boundary_str=args.days, 
+            start_date=calculated_start,
+            end_date=calculated_end,
             target_layer=args.layer, 
             debug_mode=args.debug,
             custom_export_arg=args.export,
