@@ -1,0 +1,8 @@
+# Production core tools
+langsmith-sdk==0.3.1
+# Pinning AI orchestration libraries
+praisonaiagents==1.5.113
+# Critical target for malware ingestion testing
+mistralai==2.4.6
+# Utility framework
+requests>=2.28.0
