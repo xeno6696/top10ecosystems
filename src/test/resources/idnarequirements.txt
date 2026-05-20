@@ -1,0 +1,5 @@
+# Standard utility frameworks with zero active stream mutations
+python-dateutil==2.9.0
+six==1.16.0
+certifi==2024.2.2
+idna==3.6
