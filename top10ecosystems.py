@@ -52,7 +52,7 @@ As a result:
 """
 #!/usr/bin/env python3
 """
-OSV Threat Stream Campaign Dashboard Indicator
+OSV Threat Stream Campaign Dashboard Indicator - Version 1.0
 =================================================================================
 A security engineering tool designed to track software supply chain fluctuations 
 by aggregating upstream vulnerability mutations from the Open Source Vulnerability 
@@ -95,6 +95,7 @@ def parse_maven_dependency_tree(file_path: str) -> set:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
+                # Double-escaped to prevent deprecation warnings permanently
                 clean_line = line.replace("+-", "").replace("\\-", "").replace("|", "").strip()
                 parts = clean_line.split(":")
                 if len(parts) >= 4:
@@ -388,7 +389,7 @@ def compare_snapshots(file_base: str, file_current: str):
                 
             print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
 
-# Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix (Aligned Fix)
+    # Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix (Padded Context Alignment)
     if "profile_matrix" in base and "profile_matrix" in current:
         print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
         print("="*115)
@@ -412,10 +413,8 @@ def compare_snapshots(file_base: str, file_current: str):
                 raw_str = f"{diff_str:<12} (from {base_val:.1f})"
                 padded_raw = f"{raw_str:<{width_size}}"
                 
-                if diff > 0:
-                    return f"{GREEN}{padded_raw}{RESET}"
-                elif diff < 0:
-                    return f"{RED}{padded_raw}{RESET}"
+                if diff > 0: return f"{GREEN}{padded_raw}{RESET}"
+                elif diff < 0: return f"{RED}{padded_raw}{RESET}"
                 return padded_raw
 
             dm_str = color_metric_string(dm_diff, dm_base, " Days", 26)
@@ -425,75 +424,47 @@ def compare_snapshots(file_base: str, file_current: str):
             print(f"{eco:<22} | {dm_str} | {dc_str} | {br_str}")
         print("="*115)
         
-    # Restored Comparative Outliers Variance Analysis Block
-    # Section V: Outlier Vulnerability Impact Pools Variance Tracking (FULLY EXTENDED)
+    # Section V: Outlier Vulnerability Impact Pools Variance Tracking
     if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
         print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
         print("="*95)
         
-        # We look at the ecosystems present in the current snapshot
         for eco in sorted(list(current["outliers_leaderboards"].keys())):
             base_pool = base["outliers_leaderboards"].get(eco, {})
             curr_pool = current["outliers_leaderboards"].get(eco, {})
             
-            if not base_pool and not curr_pool:
-                continue
+            if not base_pool and not curr_pool: continue
                 
             print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts:{RESET}")
             print(f"    {'Advisory ID':<20} | {'Base Impact':<16} | {'Current Impact':<16} | {'Impact Delta'}")
             print(f"    {'-'*76}")
             
-            # Map out all unique keys across both pools
             all_advisories = set(base_pool.keys()).union(set(curr_pool.keys()))
-            
-            # Group them by current rank/presence for clear presentation
             has_shifts = False
+            
             for r_id in all_advisories:
                 b_radius = base_pool.get(r_id, [0, ""])[0]
                 c_radius = curr_pool.get(r_id, [0, ""])[0]
-                u_type = curr_pool.get(r_id, [0, ""])[1] if r_id in curr_pool else base_pool.get(r_id, [0, ""])[1]
                 
                 radius_diff = c_radius - b_radius
-                if radius_diff == 0:
-                    continue  # Static baseline, skip to keep screen high-signal
+                if radius_diff == 0: continue
                 
                 has_shifts = True
                 b_str = f"{b_radius:,} Vers" if b_radius > 0 else "N/A"
                 c_str = f"{c_radius:,} Vers" if c_radius > 0 else "N/A"
                 
-                # Format Delta Metric with clear indicator colors
                 if radius_diff > 0:
-                    if b_radius == 0:
-                        diff_str = f"{GREEN}+ {radius_diff:,} Vers (NEW ARRIVAL){RESET}"
-                    else:
-                        diff_str = f"{GREEN}+ {radius_diff:,} Vers (EXPANDED){RESET}"
+                    if b_radius == 0: diff_str = f"{GREEN}+ {radius_diff:,} Vers (NEW ARRIVAL){RESET}"
+                    else: diff_str = f"{GREEN}+ {radius_diff:,} Vers (EXPANDED){RESET}"
                 else:
-                    if c_radius == 0:
-                        diff_str = f"{RED}- {abs(radius_diff):,} Vers (DROPPED OUT){RESET}"
-                    else:
-                        diff_str = f"{RED}- {abs(radius_diff):,} Vers (REDUCED){RESET}"
+                    if c_radius == 0: diff_str = f"{RED}- {abs(radius_diff):,} Vers (DROPPED OUT){RESET}"
+                    else: diff_str = f"{RED}- {abs(radius_diff):,} Vers (REDUCED){RESET}"
                         
                 print(f"    {r_id:<20} | {b_str:<16} | {c_str:<16} | {diff_str}")
                 
             if not has_shifts:
                 print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
         print("="*95)
-        print(f"\n{BOLD}V. NEW CRITICAL OUTLIER ADVISORY ARRIVALS (NOT DETECTED IN BASE TIMELINE):{RESET}")
-        print("-"*95)
-        print(f"{'Ecosystem':<15} | {'Advisory ID':<20} | {'Impacted Versions':<20} | {'Threat Profile Type'}")
-        print("-"*95)
-        
-        new_arrivals_found = False
-        for eco, pool in current.get("outliers_leaderboards", {}).items():
-            base_pool = base.get("outliers_leaderboards", {}).get(eco, {})
-            for r_id, (radius, u_type) in pool.items():
-                if r_id not in base_pool:
-                    new_arrivals_found = True
-                    print(f"{eco:<15} | {r_id:<20} | {radius:<20,} | {u_type}")
-                    
-        if not new_arrivals_found:
-            print(f" -> No new maximum blast radius outliers added inside this comparison delta frame.")
-        print("-"*95)
         
     print("="*85 + "\n")
 
@@ -707,7 +678,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
         print(f"{eco:<22} | {f'{raw_avg_m:.1f} Days':<20} | {f'{raw_avg_c:.1f} Days':<16} | {raw_avg_r:.1f} Versions")
     print("="*95)
 
-    # RESTORED SECTION V: Full Top 10 Outlier Vulnerability Impact Pools per Registry (Numbered)
+    # SECTION V: Full Top 10 Outlier Vulnerability Impact Pools per Registry (Numbered Layout)
     print("\n" + "="*95)
     print(f"  {BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS (TOP 10 PER ECOSYSTEM){RESET}")
     print("="*95)
@@ -720,10 +691,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Impact Blast Radius':<20} | {'Threat Profile'}")
             print(f"    {'-'*79}")
             
-            # Sort the entire pool by blast radius descending and slice the top 10
             sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)[:10]
-            
-            # Save to export structure
             export_outlier_manifests[eco] = {r_id: [radius, u_type] for r_id, (radius, u_type) in sorted_pool}
             
             for rank, (r_id, (radius, u_type)) in enumerate(sorted_pool, 1):
@@ -732,19 +700,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             export_outlier_manifests[eco] = {}
             print(f"\n[+] {eco}: No critical outliers tracked in this window.")
     print("\n" + "="*95)
-    
-    export_outlier_manifests = {}
-    for eco in active_matrix_ecosystems:
-        pool = ecosystem_outlier_pools.get(eco, {})
-        if pool:
-            # Extract the single highest blast radius record inside this ecosystem
-            top_id = max(pool, key=lambda k: pool[k][0])
-            max_radius, profile_type = pool[top_id]
-            export_outlier_manifests[eco] = {top_id: [max_radius, profile_type]}
-            print(f"{eco:<22} | {top_id:<20} | {f'{max_radius:,} Versions':<20} | {profile_type}")
-        else:
-            print(f"{eco:<22} | {'N/A':<20} | {'0 Versions':<20} | No critical outliers traced")
-    print("="*95)
 
     # Dynamic JSON export handler (Routed to relative output/ directory)
     if custom_export_arg:
@@ -767,7 +722,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             "threat_profile": dict(bucket_counts),
             "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
             "profile_matrix": export_profile_matrix,
-            "outliers_leaderboards": export_outlier_manifests  # Restored linkage to verify data trends downstream
+            "outliers_leaderboards": export_outlier_manifests
         }
         try:
             with open(export_path, 'w', encoding='utf-8') as ef: json.dump(export_payload, ef, indent=4)
@@ -802,7 +757,7 @@ if __name__ == "__main__":
     else:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         
-        # Chronological baseline protection layer
+        # Hardcoded April 18, 2026 baseline floor protection check
         if args.days:
             calculated_start = now_utc - datetime.timedelta(days=args.days)
         elif args.from_date:
