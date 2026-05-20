@@ -388,35 +388,42 @@ def compare_snapshots(file_base: str, file_current: str):
                 
             print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
 
-    # Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix
+# Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix (Aligned Fix)
     if "profile_matrix" in base and "profile_matrix" in current:
         print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
-        print("="*95)
-        print(f"{'Ecosystem / Registry':<22} | {'Avg Dwell MAL Delta':<20} | {'Avg Dwell CVE Delta':<20} | {'Avg Blast Radius Delta'}")
-        print("-"*95)
+        print("="*115)
+        print(f"{'Ecosystem / Registry':<22} | {'Avg Dwell MAL Delta':<26} | {'Avg Dwell CVE Delta':<26} | {'Avg Blast Radius Delta'}")
+        print("-"*115)
         
         for eco in sorted(list(set(base["profile_matrix"].keys()).union(set(current["profile_matrix"].keys())))):
             b_mat = base["profile_matrix"].get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
             c_mat = current["profile_matrix"].get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
             
-            dm_diff = c_mat["avg_dwell_mal"] - b_mat["avg_dwell_mal"]
-            dc_diff = c_mat["avg_dwell_cve"] - b_mat["avg_dwell_cve"]
-            br_diff = c_mat["avg_blast_radius"] - b_mat["avg_blast_radius"]
+            dm_base = b_mat.get("avg_dwell_mal", 0.0)
+            dc_base = b_mat.get("avg_dwell_cve", 0.0)
+            br_base = b_mat.get("avg_blast_radius", 0.0)
             
-            def color_metric_string(diff, suffix, width_size):
-                raw_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
+            dm_diff = c_mat["avg_dwell_mal"] - dm_base
+            dc_diff = c_mat["avg_dwell_cve"] - dc_base
+            br_diff = c_mat["avg_blast_radius"] - br_base
+            
+            def color_metric_string(diff, base_val, suffix, width_size):
+                diff_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
+                raw_str = f"{diff_str:<12} (from {base_val:.1f})"
                 padded_raw = f"{raw_str:<{width_size}}"
                 
-                if diff > 0: return f"{GREEN}{padded_raw}{RESET}"
-                elif diff < 0: return f"{RED}{padded_raw}{RESET}"
+                if diff > 0:
+                    return f"{GREEN}{padded_raw}{RESET}"
+                elif diff < 0:
+                    return f"{RED}{padded_raw}{RESET}"
                 return padded_raw
 
-            dm_str = color_metric_string(dm_diff, " Days", 20)
-            dc_str = color_metric_string(dc_diff, " Days", 20)
-            br_str = color_metric_string(br_diff, " Vers", 22)
+            dm_str = color_metric_string(dm_diff, dm_base, " Days", 26)
+            dc_str = color_metric_string(dc_diff, dc_base, " Days", 26)
+            br_str = color_metric_string(br_diff, br_base, " Vers", 26)
 
             print(f"{eco:<22} | {dm_str} | {dc_str} | {br_str}")
-        print("="*95)
+        print("="*115)
         
     # Restored Comparative Outliers Variance Analysis Block
     # Section V: Outlier Vulnerability Impact Pools Variance Tracking (FULLY EXTENDED)
