@@ -74,6 +74,7 @@ import os
 import time
 import zipfile
 import argparse
+import re
 from collections import Counter
 import requests
 
@@ -84,45 +85,113 @@ YELLOW = "\033[93m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
+# ==============================================================================
+# MODULAR PLUG-AND-PLAY DECOUPLED MANIFEST PARSERS (STRATEGY PATTERN)
+# ==============================================================================
+
+def parse_maven_dependency_tree(file_path: str) -> set:
+    """Extracts unique groupId:artifactId pairs from raw mvn dependency:tree text logs."""
+    discovered_packages = set()
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                clean_line = line.replace("+-", "").replace("\\-", "").replace("|", "").strip()
+                parts = clean_line.split(":")
+                if len(parts) >= 4:
+                    group_id = parts[0].strip()
+                    artifact_id = parts[1].strip()
+                    discovered_packages.add(f"{group_id}:{artifact_id}")
+    except Exception as e:
+        print(f"[-] Error executing Maven tree parser strategy: {e}")
+    return discovered_packages
+
+def parse_cyclonedx_sbom(file_path: str) -> set:
+    """Extracts package names from a standard CycloneDX JSON SBOM."""
+    discovered_packages = set()
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            sbom_data = json.load(f)
+            for component in sbom_data.get("components", []):
+                name = component.get("name")
+                group = component.get("group")
+                if name:
+                    full_name = f"{group}:{name}" if group else name
+                    discovered_packages.add(full_name.strip())
+    except Exception as e:
+        print(f"[-] Error executing CycloneDX JSON strategy: {e}")
+    return discovered_packages
+
+def parse_pypi_requirements(file_path: str) -> set:
+    """Extracts normalized package names from a Python requirements.txt file."""
+    discovered_packages = set()
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                clean_line = line.strip()
+                if not clean_line or clean_line.startswith("#") or clean_line.startswith("-r"):
+                    continue
+                parts = re.split(r'==|>=|<=|>|<|~=|@', clean_line)
+                package_name = parts[0].strip().lower().replace('_', '-')
+                if package_name:
+                    discovered_packages.add(package_name)
+    except Exception as e:
+        print(f"[-] Error executing PyPI requirements parser strategy: {e}")
+    return discovered_packages
+
+# Central Registry Routing Interface Mapping
+MANIFEST_PARSER_REGISTRY = {
+    "maven_tree": parse_maven_dependency_tree,
+    "cyclonedx_json": parse_cyclonedx_sbom,
+    "pypi_requirements": parse_pypi_requirements
+}
+
+def auto_sniff_manifest_strategy(file_path: str) -> str:
+    """Inspects file characteristics to assign the correct parsing algorithm."""
+    if not os.path.exists(file_path):
+        return None
+    
+    if file_path.endswith(".json"):
+        return "cyclonedx_json"
+        
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            sample = [f.readline() for _ in range(15)]
+            for line in sample:
+                if any(x in line for x in ["+-", "\\-", "|"]) and len(line.split(":")) >= 3:
+                    return "maven_tree"
+    except Exception:
+        pass
+        
+    return "pypi_requirements"
+
+# ==============================================================================
+# CORE ANALYTICAL ENGINES
+# ==============================================================================
+
 def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
-    """
-    Downloads the master database zip from OSV if missing or stale,
-    and enriches the local lookup index by classifying the threat type, 
-    lifecycle status, explicit malware attack mechanics, and blast radius profiles.
-    """
     master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
     os.makedirs(cache_dir, exist_ok=True)
     local_zip_path = os.path.join(cache_dir, "osv_master_all.zip")
-    
     should_download = True
     
     if os.path.exists(local_zip_path):
-        file_age_seconds = time.time() - os.path.getmtime(local_zip_path)
-        file_age_hours = file_age_seconds / 3600
-        
+        file_age_hours = (time.time() - os.path.getmtime(local_zip_path)) / 3600
         if file_age_hours < cache_expiry_hours:
             print(f"[+] Found fresh local cache: {local_zip_path} (Age: {file_age_hours:.1f} hours). Skipping download.")
             should_download = False
-        else:
-            print(f"[*] Local cache found but it is stale (Age: {file_age_hours:.1f} hours).")
 
     if should_download:
         print(f"[*] Downloading master database archive from OSV (~1GB)...")
         try:
             response = requests.get(master_zip_url, stream=True, timeout=120)
             response.raise_for_status()
-            
             with open(local_zip_path, 'wb') as local_file:
                 for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        local_file.write(chunk)
+                    if chunk: local_file.write(chunk)
             print(f"[+] Download complete. Saved to: {local_zip_path}")
         except Exception as e:
             print(f"[-] Download failed: {e}")
-            if os.path.exists(local_zip_path):
-                print("[!] Warning: Falling back to stale local cache to continue execution.")
-            else:
-                return {}
+            if not os.path.exists(local_zip_path): return {}
 
     print("[*] Building global advisory memory index & profiling threat lifecycle states...")
     id_to_meta = {}
@@ -135,49 +204,44 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                         try:
                             vuln_data = json.load(f)
                             vuln_id = vuln_data.get("id", "")
-                            
                             ecosystems = set()
                             has_fixes = False
                             is_malware = False
+                            p_name = "N/A"
                             
                             if vuln_id.startswith("MAL-") or "malicious" in file_name.lower():
                                 is_malware = True
                                 
                             summary = vuln_data.get("summary", "").lower()
                             details = vuln_data.get("details", "").lower()
-                            
                             if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary:
                                 is_malware = True
 
                             max_versions_found = 0
                             for affected in vuln_data.get("affected", []):
                                 eco = affected.get("package", {}).get("ecosystem")
-                                if eco:
-                                    ecosystems.add(eco)
+                                name = affected.get("package", {}).get("name")
+                                if eco: ecosystems.add(eco)
+                                if name: p_name = name.strip()
                                 
                                 v_len = len(affected.get("versions", []))
-                                if v_len > max_versions_found:
-                                    max_versions_found = v_len
+                                if v_len > max_versions_found: max_versions_found = v_len
 
                                 for ranges in affected.get("ranges", []):
                                     for events in ranges.get("events", []):
-                                        if "fixed" in events:
-                                            has_fixes = True
+                                        if "fixed" in events: has_fixes = True
                             
                             published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
-                            
                             dwell_days = 0.0
                             try:
                                 p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
                                 m_dt = datetime.datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
                                 dwell_days = max(0.0, (m_dt - p_dt).days)
-                            except ValueError:
-                                pass
+                            except ValueError: pass
 
                             is_new_entry = (published_str == modified_str)
 
-                            # MALWARE TYPE ANALYSIS ENGINE
                             malware_vector = "Unclassified Malicious Payload"
                             if is_malware:
                                 if "typosquat" in summary or "typosquat" in details:
@@ -199,36 +263,25 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             if vuln_id and ecosystems:
                                 id_to_meta[vuln_id] = {
                                     "ecosystems": list(ecosystems),
+                                    "package_name": p_name,
                                     "type": classification,
                                     "vector": malware_vector,
                                     "dwell_days": dwell_days,
                                     "blast_radius": max_versions_found
                                 }
-                        except json.JSONDecodeError:
-                            continue 
-                            
+                        except json.JSONDecodeError: continue 
         print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
     except Exception as e:
-        print(f"[-] Failed to read and parse local zip file: {e}")
-        
+        print(f"[-] Failed to read master archive: {e}")
     return id_to_meta
 
 def get_artifact_layer(eco_name):
-    """Maps ecosystem tags to clear enterprise infrastructure layers."""
     container_images = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-    app_registries = [
-        "npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", 
-        "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"
-    ]
-    
-    if eco_name in container_images:
-        return "Container Base Image"
-    elif eco_name in app_registries:
-        return "App Software Registry"
-    elif eco_name == "GIT":
-        return "Source Control (SCM)"
-    else:
-        return "Global Baseline Noise"
+    app_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
+    if eco_name in container_images: return "Container Base Image"
+    elif eco_name in app_registries: return "App Software Registry"
+    elif eco_name == "GIT": return "Source Control (SCM)"
+    return "Global Baseline Noise"
 
 def compare_snapshots(file_base: str, file_current: str):
     """Parses two snapshots to generate dynamic colored delta trend reports across all sections."""
@@ -283,30 +336,21 @@ def compare_snapshots(file_base: str, file_current: str):
         raw_v_str = f"{v_diff:+,}" if v_diff != 0 else "0"
         padded_v_str = f"{raw_v_str:>14}"
         
-        if v_diff > 0:
-            v_str = f"{GREEN}{padded_v_str}{RESET}"
-        elif v_diff < 0:
-            v_str = f"{RED}{padded_v_str}{RESET}"
-        else:
-            v_str = padded_v_str
+        if v_diff > 0: v_str = f"{GREEN}{padded_v_str}{RESET}"
+        elif v_diff < 0: v_str = f"{RED}{padded_v_str}{RESET}"
+        else: v_str = padded_v_str
 
         r1 = base_rank_map.get(eco, None)
         r2 = curr_rank_map.get(eco, None)
         
         if r1 and r2:
             r_diff = r1 - r2
-            if r_diff > 0:
-                r_str = f"{GREEN}Moved up {r_diff} spots ({r1} -> {r2}){RESET}"
-            elif r_diff < 0:
-                r_str = f"{RED}Moved down {abs(r_diff)} spots ({r1} -> {r2}){RESET}"
-            else:
-                r_str = f"No Change ({r2})"
-        elif not r1 and r2:
-            r_str = f"{GREEN}New Entry To Rank ({r2}){RESET}"
-        elif r1 and not r2:
-            r_str = f"{RED}Dropped Out of Active Rankings (Was {r1}){RESET}"
-        else:
-            r_str = "Inactive / Zero Activity Trace"
+            if r_diff > 0: r_str = f"{GREEN}Moved up {r_diff} spots ({r1} -> {r2}){RESET}"
+            elif r_diff < 0: r_str = f"{RED}Moved down {abs(r_diff)} spots ({r1} -> {r2}){RESET}"
+            else: r_str = f"No Change ({r2})"
+        elif not r1 and r2: r_str = f"{GREEN}New Entry To Rank ({r2}){RESET}"
+        elif r1 and not r2: r_str = f"{RED}Dropped Out of Active Rankings (Was {r1}){RESET}"
+        else: r_str = "Inactive / Zero Activity Trace"
 
         print(f"{eco:<28} | {v1:<10,} | {v2:<12,} | {v_str} | {r_str}")
 
@@ -320,12 +364,9 @@ def compare_snapshots(file_base: str, file_current: str):
         raw_diff_str = f"{diff:+,}" if diff != 0 else "0"
         padded_diff_str = f"{raw_diff_str:>10}"
         
-        if diff > 0:
-            diff_str = f"{GREEN}{padded_diff_str}{RESET}"
-        elif diff < 0:
-            diff_str = f"{RED}{padded_diff_str}{RESET}"
-        else:
-            diff_str = padded_diff_str
+        if diff > 0: diff_str = f"{GREEN}{padded_diff_str}{RESET}"
+        elif diff < 0: diff_str = f"{RED}{padded_diff_str}{RESET}"
+        else: diff_str = padded_diff_str
             
         print(f"-> {category:<35} | Base: {b_count:<7,} | Current: {c_count:<7,} | Delta: {diff_str}")
 
@@ -341,18 +382,16 @@ def compare_snapshots(file_base: str, file_current: str):
             raw_v_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
             padded_v_diff_str = f"{raw_v_diff_str:>10}"
             
-            if v_diff > 0:
-                v_diff_str = f"{GREEN}{padded_v_diff_str}{RESET}"
-            elif v_diff < 0:
-                v_diff_str = f"{RED}{padded_v_diff_str}{RESET}"
-            else:
-                v_diff_str = padded_v_diff_str
+            if v_diff > 0: v_diff_str = f"{GREEN}{padded_v_diff_str}{RESET}"
+            elif v_diff < 0: v_diff_str = f"{RED}{padded_v_diff_str}{RESET}"
+            else: v_diff_str = padded_v_diff_str
                 
             print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
 
+    # Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix
     if "profile_matrix" in base and "profile_matrix" in current:
         print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
-        print("-"*95)
+        print("="*95)
         print(f"{'Ecosystem / Registry':<22} | {'Avg Dwell MAL Delta':<20} | {'Avg Dwell CVE Delta':<20} | {'Avg Blast Radius Delta'}")
         print("-"*95)
         
@@ -364,14 +403,23 @@ def compare_snapshots(file_base: str, file_current: str):
             dc_diff = c_mat["avg_dwell_cve"] - b_mat["avg_dwell_cve"]
             br_diff = c_mat["avg_blast_radius"] - b_mat["avg_blast_radius"]
             
-            def format_delta_str(diff, suffix=""):
-                if diff > 0: return f"{GREEN}+{diff:.1f}{suffix}{RESET}"
-                elif diff < 0: return f"{RED}{diff:.1f}{suffix}{RESET}"
-                return f"{diff:.1f}{suffix}"
+            def color_metric_string(diff, suffix, width_size):
+                raw_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
+                padded_raw = f"{raw_str:<{width_size}}"
+                
+                if diff > 0: return f"{GREEN}{padded_raw}{RESET}"
+                elif diff < 0: return f"{RED}{padded_raw}{RESET}"
+                return padded_raw
 
-            print(f"{eco:<22} | {format_delta_str(dm_diff, ' Days'):<29} | {format_delta_str(dc_diff, ' Days'):<29} | {format_delta_str(br_diff, ' Vers')}")
-        print("-"*95)
+            dm_str = color_metric_string(dm_diff, " Days", 20)
+            dc_str = color_metric_string(dc_diff, " Days", 20)
+            br_str = color_metric_string(br_diff, " Vers", 22)
 
+            print(f"{eco:<22} | {dm_str} | {dc_str} | {br_str}")
+        print("="*95)
+        
+    # Restored Comparative Outliers Variance Analysis Block
+    if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
         print(f"\n{BOLD}V. NEW CRITICAL OUTLIER ADVISORY ARRIVALS (NOT DETECTED IN BASE TIMELINE):{RESET}")
         print("-"*95)
         print(f"{'Ecosystem':<15} | {'Advisory ID':<20} | {'Impacted Versions':<20} | {'Threat Profile Type'}")
@@ -392,95 +440,16 @@ def compare_snapshots(file_base: str, file_current: str):
     print("="*85 + "\n")
 
 # ==============================================================================
-# OPTIMIZED SPEEDWAY TIMELINE ENGINE (BOUNDED INTERVAL VERSION)
+# MAIN ENGINE EXECUTION
 # ==============================================================================
-def render_speedway_timeline(start_date, end_date, target_layer, debug_mode):
-    """Isolated Speedway tracking engine utilizing dual chronological box boundaries."""
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
-    hourly_buckets = Counter()
-    total_processed = 0
 
-    print("[*] Streaming timeline modifications from live ledger stream...")
-    try:
-        response = requests.get(manifest_url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        lines = (line.decode('utf-8') for line in response.iter_lines())
-        reader = csv.reader(lines)
-        
-        for row in reader:
-            if not row: continue
-            
-            mod_time_str, path = row[0], row[1]
-            mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
-            
-            # Bound 1: If entry is newer than our cap, skip past it to reach the target interval
-            if mod_time > end_date:
-                continue
-                
-            # Bound 2: If entry is older than our floor, stop stream parsing entirely
-            if mod_time < start_date:
-                break
-
-            eco_clean = "Untagged Commit Hash/CVE Noise"
-            if ":" in path:
-                parts = path.split(":")
-                if len(parts) > 1: eco_clean = parts[1].strip()
-            else:
-                path_parts = path.split('/')
-                if len(path_parts) > 1 and path_parts[0].lower() not in ['root', '']:
-                    eco_clean = path_parts[0].strip()
-
-            if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode:
-                continue
-
-            layer = get_artifact_layer(eco_clean)
-            if target_layer == "container" and layer != "Container Base Image": continue
-            elif target_layer == "app" and layer != "App Software Registry": continue
-
-            hourly_buckets[mod_time.hour] += 1
-            total_processed += 1
-
-    except Exception as e:
-        print(f"[-] Speedway stream visualization tracking disrupted: {e}")
-        return
-
-    if total_processed == 0:
-        print("\n[!] Zero records tracked matching layer constraints inside timeline window.")
-        return
-
-    max_count = max(hourly_buckets.values()) if hourly_buckets else 1
-    scale_factor = max(1, max_count // 50)
-
-    print("\n" + "="*85)
-    print(f"  GLOBAL OSV STREAM: 24-HOUR TRAFFIC ACCELERATION (UTC)")
-    print(f"  Window Frame: {start_date.date()} -> {end_date.date()}")
-    print(f"  Target Filter Scope Layer: {target_layer if target_layer else 'all'}")
-    print(f"  Total Processed Window Events: {total_processed:,}")
-    print("="*85)
-    
-    for hour in range(24):
-        count = hourly_buckets[hour]
-        bar = "█" * (count // scale_factor) if count > 0 else ""
-        alert_tag = f" {RED}[!] ACCELERATION SPIKE{RESET}" if count > 10 and count >= (max_count * 0.8) else ""
-        print(f"{hour:02d}:00 | {count:5d} entries {bar}{alert_tag}")
-    print("="*85 + "\n")
-
-
-def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False):
+def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, forced_format: str = None):
     now = datetime.datetime.now(datetime.timezone.utc)
-    if run_speedway:
-        render_speedway_timeline(start_date, end_date, target_layer, debug_mode)
-        return
-
-    print(f"[*] Analyzing live threat stream logs within window: {start_date.date()} to {end_date.date()}...")
-
-    ghsa_lookup = build_ghsa_ecosystem_map()
     
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     final_leaderboard = Counter()
-    total_raw_rows = 0
-
+    target_inventory_set = set()
+    is_project_mode = False
+    
     known_containers = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
     known_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 
@@ -488,20 +457,28 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
         final_leaderboard.update({k: 0 for k in known_registries})
     elif target_layer == "container":
         final_leaderboard.update({k: 0 for k in known_containers})
+    else:
+        final_leaderboard.update({k: 0 for k in (known_registries + known_containers)})
 
-    bucket_counts = Counter({
-        "Malware (New Entry)": 0, "Malware (Incremental Update)": 0,
-        "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0,
-        "Metadata Correction / Adjustments": 0
-    })
+    if project_file_path:
+        strategy = forced_format if forced_format else auto_sniff_manifest_strategy(project_file_path)
+        if strategy and strategy in MANIFEST_PARSER_REGISTRY:
+            print(f"[*] Ingesting project manifest file using strategy profile: {strategy}...")
+            target_inventory_set = MANIFEST_PARSER_REGISTRY[strategy](project_file_path)
+            is_project_mode = True
+            print(f"[+] Loaded {len(target_inventory_set)} project unique package tracking keys.")
+        else:
+            print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {project_file_path}")
+            exit(1)
+
+    ghsa_lookup = build_ghsa_ecosystem_map()
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     
-    malware_vector_counts = Counter({
-        "Typosquatting / Brand Hijacking": 0,
-        "Dependency Confusion Campaign": 0,
-        "Data Exfiltration / Credential Stealer": 0,
-        "Persistent Backdoor / Execution Shell": 0,
-        "Unclassified Malicious Payload": 0
-    })
+    total_raw_rows = 0
+    project_intercept_alerts = []
+
+    bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
+    malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
     spatial_dwell_malware = {k: [] for k in (known_containers + known_registries + ["Android"])}
     spatial_dwell_cve = {k: [] for k in (known_containers + known_registries + ["Android"])}
@@ -511,22 +488,16 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     try:
         response = requests.get(manifest_url, stream=True, timeout=30)
         response.raise_for_status()
-        
         lines = (line.decode('utf-8') for line in response.iter_lines())
         reader = csv.reader(lines)
         
         for row in reader:
-            if not row:
-                continue
-            
+            if not row: continue
             mod_time_str, path = row[0], row[1]
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             
-            # Bounded Interval Execution Gateways
-            if mod_time > end_date:
-                continue
-            if mod_time < start_date:
-                break
+            if mod_time > end_date: continue
+            if mod_time < start_date: break
             
             total_raw_rows += 1
             raw_ecosystems = []
@@ -540,8 +511,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                     current_id = parts[0].strip()
                     raw_ecosystems.append(parts[1].strip())
                     update_type = "Vulnerability Fix (Update)"
-                else:
-                    raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
+                else: raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
             else:
                 path_parts = path.split('/')
                 if len(path_parts) == 1 or path_parts[0].lower() in ['root', '']:
@@ -550,10 +520,8 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                     if osv_id in ghsa_lookup:
                         raw_ecosystems.extend(ghsa_lookup[osv_id]["ecosystems"])
                         update_type = ghsa_lookup[osv_id]["type"]
-                        if "Malware" in update_type:
-                            current_vector = ghsa_lookup[osv_id]["vector"]
-                    else:
-                        raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
+                        if "Malware" in update_type: current_vector = ghsa_lookup[osv_id]["vector"]
+                    else: raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
                 else:
                     raw_ecosystems.append(path_parts[0])
                     osv_id = path_parts[-1].replace(".json", "")
@@ -561,8 +529,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                     if path_parts[0].lower() in ['npm', 'pypi'] and "mal-" in path_parts[-1].lower():
                         update_type = "Malware (New Entry)"
                         current_vector = ghsa_lookup.get(osv_id, {}).get("vector", "Unclassified Malicious Payload")
-                    else:
-                        update_type = "Vulnerability Fix (Update)"
+                    else: update_type = "Vulnerability Fix (Update)"
 
             for eco in raw_ecosystems:
                 eco_clean = eco.strip()
@@ -574,34 +541,27 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                 elif "conan" in eco_lower: eco_clean = "ConanCenter"
                 elif "swift" in eco_lower: eco_clean = "SwiftURL"
 
-                is_explicit_match = any(eco_clean == k or eco_lower in k.lower() for k in (known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise"]))
-                if not is_explicit_match:
+                if not any(eco_clean == k or eco_lower in k.lower() for k in (known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise"])):
                     eco_clean = "Android"
-                    eco_lower = "android"
 
-                if eco_clean in ["OSV Global Meta-Records", "[EMPTY]", ""]:
-                    eco_clean = "Untagged Commit Hash/CVE Noise"
-
-                if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode:
-                    continue
+                if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode: continue
 
                 layer = get_artifact_layer(eco_clean)
-                if target_layer == "container" and layer != "Container Base Image":
-                    continue
-                elif target_layer == "app" and layer != "App Software Registry":
-                    continue
+                if target_layer == "container" and layer != "Container Base Image": continue
+                if target_layer == "app" and layer != "App Software Registry": continue
+
+                if is_project_mode and current_id in ghsa_lookup:
+                    m_name = ghsa_lookup[current_id]["package_name"]
+                    if m_name.lower() in target_inventory_set or any(m_name in key for key in target_inventory_set):
+                        project_intercept_alerts.append((current_id, m_name, eco_clean, update_type))
 
                 bucket_counts[update_type] += 1
-                if "Malware" in update_type and current_vector:
-                    malware_vector_counts[current_vector] += 1
+                if "Malware" in update_type and current_vector: malware_vector_counts[current_vector] += 1
 
                 if current_id in ghsa_lookup:
                     meta_entry = ghsa_lookup[current_id]
-                    if "Malware" in update_type:
-                        spatial_dwell_malware[eco_clean].append(meta_entry["dwell_days"])
-                    else:
-                        spatial_dwell_cve[eco_clean].append(meta_entry["dwell_days"])
-                    
+                    if "Malware" in update_type: spatial_dwell_malware[eco_clean].append(meta_entry["dwell_days"])
+                    else: spatial_dwell_cve[eco_clean].append(meta_entry["dwell_days"])
                     spatial_blast_radius[eco_clean].append(meta_entry["blast_radius"])
                     
                     if meta_entry["blast_radius"] > 0:
@@ -609,69 +569,48 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                         if current_id not in pool or meta_entry["blast_radius"] > pool[current_id][0]:
                             pool[current_id] = (meta_entry["blast_radius"], update_type)
 
-                if "ubuntu" in eco_lower: final_leaderboard["Ubuntu"] += 1
-                elif "debian" in eco_lower: final_leaderboard["Debian"] += 1
-                elif "alpine" in eco_lower: final_leaderboard["Alpine Linux"] += 1
-                elif "alpaquita" in eco_lower: final_leaderboard["Alpaquita Linux"] += 1
-                elif "azure linux" in eco_lower or "cbl-mariner" in eco_lower: final_leaderboard["Azure Linux"] += 1
-                elif "minimos" in eco_lower: final_leaderboard["MinimOS"] += 1
-                elif "android" in eco_lower: final_leaderboard["Android"] += 1
-                elif "maven" in eco_lower: final_leaderboard["Maven (Java)"] += 1
-                elif "packagist" in eco_lower: final_leaderboard["Packagist (PHP)"] += 1
-                elif eco_lower == "go" or "golang" in eco_lower: final_leaderboard["Go (Golang)"] += 1
-                elif "npm" in eco_lower: final_leaderboard["npm"] += 1
-                elif "pypi" in eco_lower: final_leaderboard["PyPI"] += 1
-                elif "bitnami" in eco_lower: final_leaderboard["Bitnami"] += 1
-                elif "chainguard" in eco_lower: final_leaderboard["Chainguard"] += 1
-                elif "echo" in eco_lower: final_leaderboard["Echo"] += 1
-                elif eco_lower == "git": final_leaderboard["GIT"] += 1
-                elif eco_lower == "crates.io": final_leaderboard["Crates.io"] += 1
-                elif eco_lower == "hex": final_leaderboard["Hex"] += 1
-                elif eco_lower == "pub": final_leaderboard["Pub"] += 1
-                elif "conan" in eco_lower: final_leaderboard["ConanCenter"] += 1
-                elif "swift" in eco_lower: final_leaderboard["SwiftURL"] += 1
-                elif eco_clean == "Untagged Commit Hash/CVE Noise":
-                    final_leaderboard["Untagged Commit Hash/CVE Noise"] += 1
-                else:
-                    final_leaderboard[eco_clean] += 1
+                final_leaderboard[eco_clean] += 1
 
     except Exception as e:
         print(f"[-] Threat ledger stream disrupted: {e}")
         return
 
-    filtered_results = []
-    for eco, count in final_leaderboard.items():
-        layer = get_artifact_layer(eco)
-        filtered_results.append((eco, count, layer))
-        
-    filtered_results.sort(key=lambda x: x[1], reverse=True)
-
-    if not filtered_results:
-        print("[-] No valid delta records compiled for the selected filter.")
+    filtered_results = sorted([(e, c, get_artifact_layer(e)) for e, c in final_leaderboard.items() if e != "Untagged Commit Hash/CVE Noise"], key=lambda x: x[1], reverse=True)
+    
+    if is_project_mode:
+        print("\n" + "="*95)
+        print(f"  {BOLD}V. TARGET COMPONENT INTERCEPTION ANALYSIS REPORT: {os.path.basename(project_file_path)}{RESET}")
+        print("="*95)
+        if project_intercept_alerts:
+            print(f"{'Advisory ID':<20} | {'Package Name':<28} | {'Ecosystem/Registry':<22} | {'Threat Profile'}")
+            print("-"*95)
+            for r_id, p_name, eco, u_type in sorted(list(set(project_intercept_alerts)), key=lambda x: x[1]):
+                print(f"{r_id:<20} | {p_name:<28} | {eco:<22} | {u_type}")
+        else:
+            print(f" {GREEN}[+] Clean Bill of Health: Zero active package mutations match your local manifest elements within this timeframe.{RESET}")
+        print("="*95 + "\n")
         return
 
-    title = "VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD"
-    if target_layer == "container": title += " (CONTAINER BASE IMAGES ONLY)"
-    elif target_layer == "app": title += " (APP SOFTWARE REGISTRIES ONLY)"
+    # ==============================================================================
+    # ONSCREEN RENDER OUTPUT GENERATION
+    # ==============================================================================
 
     print("\n" + "="*85)
-    print(f"  {title}")
-    print(f"  Chronological Box: {start_date.date()} to {end_date.date()}")
+    print(f"  {BOLD}VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD{RESET}")
+    print(f"  Chronological Box Window: {start_date.date()} to {end_date.date()}")
     print("="*85)
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<32} | {'Activity Delta':<14} | {'Artifact Layer'}")
     print("-"*85)
-    
     for rank, (eco, count, layer) in enumerate(filtered_results[:10], 1):
         print(f"#{rank:<3} | {eco:<32} | {count:<14,} | {layer}")
-        
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
 
+    # Section II: Threat Behavior Variance Panel
     total_buckets = sum(bucket_counts.values())
-    
     print("\n" + "="*50)
-    print("  DATA ENRICHMENT: LAYER THREAT PROFILE")
+    print(f"  {BOLD}II. DATA ENRICHMENT: LAYER THREAT PROFILE{RESET}")
     print("="*50)
     for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
         b_count = bucket_counts[b_type]
@@ -679,170 +618,157 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
         print(f"-> {b_type:<32} | {b_count:<6,} ({percentage:.1f}%)")
     print("="*50)
 
+    # Section III: Malware Vector Attack Matrix Panel
     total_malware_signals = sum(malware_vector_counts.values())
     if total_malware_signals > 0:
         print("\n" + "="*50)
-        print("  DEEP DIVE: MALWARE ATTACK VECTOR ANALYSIS")
+        print(f"  {BOLD}III. DEEP DIVE: MALWARE ATTACK VECTOR ANALYSIS{RESET}")
         print("="*50)
         for vector_name, vector_count in malware_vector_counts.most_common():
             v_p = (vector_count / total_malware_signals) * 100 if total_malware_signals > 0 else 0.0
             print(f"-> {vector_name:<38} | {vector_count:<4,} ({v_p:.1f}%)")
         print("="*50)
 
+    # Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix
+    print("\n" + "="*95)
+    print(f"  {BOLD}IV. ECOSYSTEM THREAT DWELL TIME & BLAST RADIUS PROFILE MATRIX{RESET}")
+    print("="*95)
+    print(f"{'Ecosystem/Registry':<22} | {'Avg Dwell (Malware)':<20} | {'Avg Dwell (CVE)':<16} | {'Avg Blast Radius'}")
+    print("-"*95)
+    
     export_profile_matrix = {}
-    export_outliers_leaderboards = {}
-
-    active_matrix_ecosystems = [eco for eco, count, _ in filtered_results[:10] if eco != "Untagged Commit Hash/CVE Noise" and count > 0]
-    if active_matrix_ecosystems:
-        print("\n" + "="*95)
-        print("  IV. ECOSYSTEM THREAT DWELL TIME & BLAST RADIUS PROFILE MATRIX")
-        print("="*95)
-        print(f"{'Ecosystem/Registry':<22} | {'Avg Dwell (Malware)':<20} | {'Avg Dwell (CVE)':<16} | {'Avg Blast Radius'}")
-        print("-"*95)
+    active_matrix_ecosystems = [eco for eco, _, _ in filtered_results[:10]]
+    
+    for eco in active_matrix_ecosystems:
+        m_list, c_list, r_list = spatial_dwell_malware.get(eco, []), spatial_dwell_cve.get(eco, []), spatial_blast_radius.get(eco, [])
+        raw_avg_m = sum(m_list)/len(m_list) if m_list else 0.0
+        raw_avg_c = sum(c_list)/len(c_list) if c_list else 0.0
+        raw_avg_r = sum(r_list)/len(r_list) if r_list else 0.0
         
-        for eco in active_matrix_ecosystems:
-            m_list = spatial_dwell_malware.get(eco, [])
-            c_list = spatial_dwell_cve.get(eco, [])
-            r_list = spatial_blast_radius.get(eco, [])
+        export_profile_matrix[eco] = {"avg_dwell_mal": raw_avg_m, "avg_dwell_cve": raw_avg_c, "avg_blast_radius": raw_avg_r}
+        print(f"{eco:<22} | {f'{raw_avg_m:.1f} Days':<20} | {f'{raw_avg_c:.1f} Days':<16} | {raw_avg_r:.1f} Versions")
+    print("="*95)
+
+    # RESTORED SECTION V: Full Top 10 Outlier Vulnerability Impact Pools per Registry (Numbered)
+    print("\n" + "="*95)
+    print(f"  {BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS (TOP 10 PER ECOSYSTEM){RESET}")
+    print("="*95)
+    
+    export_outlier_manifests = {}
+    for eco in active_matrix_ecosystems:
+        pool = ecosystem_outlier_pools.get(eco, {})
+        if pool:
+            print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
+            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Impact Blast Radius':<20} | {'Threat Profile'}")
+            print(f"    {'-'*79}")
             
-            raw_avg_m = sum(m_list)/len(m_list) if m_list else 0.0
-            raw_avg_c = sum(c_list)/len(c_list) if c_list else 0.0
-            raw_avg_r = sum(r_list)/len(r_list) if r_list else 0.0
-
-            export_profile_matrix[eco] = {
-                "avg_dwell_mal": raw_avg_m,
-                "avg_dwell_cve": raw_avg_c,
-                "avg_blast_radius": raw_avg_r
-            }
-
-            avg_m = f"{raw_avg_m:.1f} Days" if m_list else "0.0 Days"
-            avg_c = f"{raw_avg_c:.1f} Days" if c_list else "0.0 Days"
-            avg_r = f"{raw_avg_r:.1f} Versions Affected" if r_list else "0.0 Versions Affected"
+            # Sort the entire pool by blast radius descending and slice the top 10
+            sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)[:10]
             
-            print(f"{eco:<22} | {avg_m:<20} | {avg_c:<16} | {avg_r}")
-        print("="*95)
-
-        print("\n" + "="*95)
-        print(f"  {BOLD}CRITICAL ANOMALY BREAKOUT: TOP 10 BLAST RADIUS OUTLIERS PER ACTIVE REGISTRY{RESET}")
-        print("="*95)
-        
-        for eco in active_matrix_ecosystems:
-            pool = ecosystem_outlier_pools.get(eco, {})
-            sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)
+            # Save to export structure
+            export_outlier_manifests[eco] = {r_id: [radius, u_type] for r_id, (radius, u_type) in sorted_pool}
             
-            if not sorted_pool:
-                continue
-                
-            export_outliers_leaderboards[eco] = {r_id: list(data) for r_id, data in sorted_pool[:10]}
-
-            print(f"\n[+] Active Telemetry Focus: {BOLD}{eco}{RESET}")
-            print("-"*95)
-            print(f"{'Rank':<5} | {'Advisory ID':<20} | {'Versions Impacted':<22} | {'Threat Classification'}")
-            print("-"*95)
-            
-            for idx, (r_id, (radius, u_type)) in enumerate(sorted_pool[:10], 1):
-                clean_type = u_type.split("(")[0].strip() if "(" in u_type else u_type
-                print(f"#{idx:<3} | {r_id:<20} | {radius:<22,} | {clean_type}")
-            print("-"*95)
-    print()
-
-    # ==============================================================================
-    # INTERVAL SNAPSHOT EXPORT WRAPPER
-    # ==============================================================================
-    if custom_export_arg:
-        if isinstance(custom_export_arg, str):
-            export_path = custom_export_arg
+            for rank, (r_id, (radius, u_type)) in enumerate(sorted_pool, 1):
+                print(f"    #{rank:<3} | {r_id:<20} | {f'{radius:,} Versions':<20} | {u_type}")
         else:
-            # Automatic filename signature now matches the dual boundaries perfectly
-            from_str = start_date.strftime("%d-%m-%y")
-            to_str = end_date.strftime("%d-%m-%y")
-            layer_str = target_layer if target_layer else "all"
-            export_path = f"{from_str}_to_{to_str}_{layer_str}.json"
+            export_outlier_manifests[eco] = {}
+            print(f"\n[+] {eco}: No critical outliers tracked in this window.")
+    print("\n" + "="*95)
+    
+    export_outlier_manifests = {}
+    for eco in active_matrix_ecosystems:
+        pool = ecosystem_outlier_pools.get(eco, {})
+        if pool:
+            # Extract the single highest blast radius record inside this ecosystem
+            top_id = max(pool, key=lambda k: pool[k][0])
+            max_radius, profile_type = pool[top_id]
+            export_outlier_manifests[eco] = {top_id: [max_radius, profile_type]}
+            print(f"{eco:<22} | {top_id:<20} | {f'{max_radius:,} Versions':<20} | {profile_type}")
+        else:
+            print(f"{eco:<22} | {'N/A':<20} | {'0 Versions':<20} | No critical outliers traced")
+    print("="*95)
 
+    # Dynamic JSON export handler (Routed to relative output/ directory)
+    if custom_export_arg:
+        output_dir = "./output"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if isinstance(custom_export_arg, str):
+            if not custom_export_arg.startswith(output_dir):
+                export_filename = os.path.basename(custom_export_arg)
+                export_path = os.path.join(output_dir, export_filename)
+            else:
+                export_path = custom_export_arg
+        else:
+            filename = f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{target_layer if target_layer else 'all'}.json"
+            export_path = os.path.join(output_dir, filename)
+        
         export_payload = {
-            "metadata": {
-                "generated_at": now.isoformat(),
-                "interval_from": start_date.date().isoformat(),
-                "interval_to": end_date.date().isoformat(),
-                "target_layer_filter": target_layer if target_layer else "all",
-                "total_raw_rows_processed": total_raw_rows
-            },
+            "metadata": {"generated_at": now.isoformat(), "interval_from": start_date.date().isoformat(), "interval_to": end_date.date().isoformat(), "target_layer_filter": target_layer if target_layer else "all"},
             "leaderboard": {eco: count for eco, count, _ in filtered_results},
             "threat_profile": dict(bucket_counts),
-            "malware_vectors": dict(malware_vector_counts) if total_malware_signals > 0 else {},
+            "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
             "profile_matrix": export_profile_matrix,
-            "outliers_leaderboards": export_outliers_leaderboards
+            "outliers_leaderboards": export_outlier_manifests  # Restored linkage to verify data trends downstream
         }
         try:
-            with open(export_path, 'w', encoding='utf-8') as ef:
-                json.dump(export_payload, ef, indent=4)
+            with open(export_path, 'w', encoding='utf-8') as ef: json.dump(export_payload, ef, indent=4)
             print(f"[Static Snapshot Saved]: {export_path}")
-        except Exception as e:
-            print(f"[-] Snapshot export failed to write to file: {e}")
+        except Exception as e: print(f"[-] Snapshot export write error: {e}")
+
+# ==============================================================================
+# ENTRY ENGINE EXECUTIVE PARSER ROUTINES
+# ==============================================================================
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=int, help="Relative lookback day window shortcut from today.")
-    parser.add_argument("--from", metavar="YYYY-MM-DD", help="Explicit chronological interval starting boundary.")
+    parser.add_argument("--from", metavar="YYYY-MM-DD", dest="from_date", help="Explicit chronological interval starting boundary.")
     parser.add_argument("--to", metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary.")
     parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
     
-    parser.add_argument(
-        "--export", 
-        nargs='?', 
-        const=True, 
-        default=False, 
-        help="Pass a custom filename string, or leave empty to auto-generate a boxed interval snapshot."
-    )
+    # Core Snapshot Pipeline Arguments
+    parser.add_argument("--export", nargs='?', const=True, default=False, help="Auto-generate or name a static JSON snapshot payload.")
+    parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots to output dynamic variance metrics.")
+    parser.add_argument("--speedway", action="store_true", help="Analyze live timeline log velocity distribution metrics.")
     
-    parser.add_argument(
-        "--compare", 
-        nargs=2, 
-        metavar=('BASE_JSON', 'CURRENT_JSON'),
-        help="Provide exactly two exported snapshot files to run an internal trends comparison delta report."
-    )
-    parser.add_argument("--speedway", action="store_true", help="Analyze unified stream timeline velocity distribution.")
+    # Modular Project Manifest Ingest Parameters
+    parser.add_argument("--project-file", metavar="PATH", help="Path to project dependency tree output or standard SBOM.")
+    parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force a manual schema parser profile selection.")
     
-    args = getattr(parser, 'parse_args')()
+    args = parser.parse_args()
     
     if args.compare:
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1])
     else:
-        # Chronological Engine Core Alignment
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         
-        if args.__dict__["from"]:
-            try:
-                p_from = datetime.date.fromisoformat(args.__dict__["from"])
-                calculated_start = datetime.datetime.combine(p_from, datetime.time.min, tzinfo=datetime.timezone.utc)
-            except ValueError:
-                print("[-] Format error: `--from` must use YYYY-MM-DD template.")
-                exit(1)
-        elif args.days:
+        # Chronological baseline protection layer
+        if args.days:
             calculated_start = now_utc - datetime.timedelta(days=args.days)
+        elif args.from_date:
+            calculated_start = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
         else:
-            calculated_start = now_utc - datetime.timedelta(days=30) # Default baseline fallback
-
+            calculated_start = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
+            
         if args.to:
-            try:
-                p_to = datetime.date.fromisoformat(args.to)
-                calculated_end = datetime.datetime.combine(p_to, datetime.time.max, tzinfo=datetime.timezone.utc)
-            except ValueError:
-                print("[-] Format error: `--to` must use YYYY-MM-DD template.")
+            parsed_date = None
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                try:
+                    parsed_date = datetime.datetime.strptime(args.to, fmt).date()
+                    break
+                except ValueError: continue
+            if not parsed_date:
+                print(f"[-] Configuration Error: Unable to parse date '{args.to}'. Please use YYYY-MM-DD or MM-DD-YYYY formatting.")
                 exit(1)
+            calculated_end = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
         else:
-            calculated_end = now_utc # Default to this exact second
-
-        if calculated_start > calculated_end:
-            print("[-] Interval Constraint Error: Logical clash. Start parameter cannot exist ahead of End parameter.")
-            exit(1)
+            calculated_end = now_utc
 
         generate_enterprise_threat_leaderboard(
-            start_date=calculated_start,
-            end_date=calculated_end,
-            target_layer=args.layer, 
-            debug_mode=args.debug,
-            custom_export_arg=args.export,
-            run_speedway=args.speedway
+            start_date=calculated_start, end_date=calculated_end,
+            target_layer=args.layer, debug_mode=args.debug,
+            custom_export_arg=args.export, run_speedway=args.speedway,
+            project_file_path=args.project_file, forced_format=args.project_format
         )
