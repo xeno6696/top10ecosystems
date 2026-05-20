@@ -419,7 +419,58 @@ def compare_snapshots(file_base: str, file_current: str):
         print("="*95)
         
     # Restored Comparative Outliers Variance Analysis Block
+    # Section V: Outlier Vulnerability Impact Pools Variance Tracking (FULLY EXTENDED)
     if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
+        print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
+        print("="*95)
+        
+        # We look at the ecosystems present in the current snapshot
+        for eco in sorted(list(current["outliers_leaderboards"].keys())):
+            base_pool = base["outliers_leaderboards"].get(eco, {})
+            curr_pool = current["outliers_leaderboards"].get(eco, {})
+            
+            if not base_pool and not curr_pool:
+                continue
+                
+            print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts:{RESET}")
+            print(f"    {'Advisory ID':<20} | {'Base Impact':<16} | {'Current Impact':<16} | {'Impact Delta'}")
+            print(f"    {'-'*76}")
+            
+            # Map out all unique keys across both pools
+            all_advisories = set(base_pool.keys()).union(set(curr_pool.keys()))
+            
+            # Group them by current rank/presence for clear presentation
+            has_shifts = False
+            for r_id in all_advisories:
+                b_radius = base_pool.get(r_id, [0, ""])[0]
+                c_radius = curr_pool.get(r_id, [0, ""])[0]
+                u_type = curr_pool.get(r_id, [0, ""])[1] if r_id in curr_pool else base_pool.get(r_id, [0, ""])[1]
+                
+                radius_diff = c_radius - b_radius
+                if radius_diff == 0:
+                    continue  # Static baseline, skip to keep screen high-signal
+                
+                has_shifts = True
+                b_str = f"{b_radius:,} Vers" if b_radius > 0 else "N/A"
+                c_str = f"{c_radius:,} Vers" if c_radius > 0 else "N/A"
+                
+                # Format Delta Metric with clear indicator colors
+                if radius_diff > 0:
+                    if b_radius == 0:
+                        diff_str = f"{GREEN}+ {radius_diff:,} Vers (NEW ARRIVAL){RESET}"
+                    else:
+                        diff_str = f"{GREEN}+ {radius_diff:,} Vers (EXPANDED){RESET}"
+                else:
+                    if c_radius == 0:
+                        diff_str = f"{RED}- {abs(radius_diff):,} Vers (DROPPED OUT){RESET}"
+                    else:
+                        diff_str = f"{RED}- {abs(radius_diff):,} Vers (REDUCED){RESET}"
+                        
+                print(f"    {r_id:<20} | {b_str:<16} | {c_str:<16} | {diff_str}")
+                
+            if not has_shifts:
+                print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
+        print("="*95)
         print(f"\n{BOLD}V. NEW CRITICAL OUTLIER ADVISORY ARRIVALS (NOT DETECTED IN BASE TIMELINE):{RESET}")
         print("-"*95)
         print(f"{'Ecosystem':<15} | {'Advisory ID':<20} | {'Impacted Versions':<20} | {'Threat Profile Type'}")
