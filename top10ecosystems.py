@@ -123,6 +123,35 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
     return discovered_packages
 
 def parse_cyclonedx_sbom(file_path: str) -> dict:
+    """Extracts package names mapped to versions from a CycloneDX JSON SBOM, rejecting unpinned elements."""
+    discovered_packages = {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            sbom_data = json.load(f)
+            for component in sbom_data.get("components", []):
+                name = component.get("name")
+                group = component.get("group")
+                version = component.get("version", "").strip()
+                
+                if name:
+                    # Construct the unified coordinate key for cross-ecosystem parsing
+                    full_name = f"{group}:{name}" if group else name
+                    full_name_clean = full_name.strip().lower()
+                    
+                    # Intercept non-deterministic or missing version allocations
+                    if not version or version in ["0.0.0", "latest", "snapshot"]:
+                        print(f"\n{BOLD}{RED}[!] SBOM LINTING FAILURE:{RESET}")
+                        print(f"    -> Offending Component: '{full_name}'")
+                        print(f"    -> Reason: Missing or dynamic version tag detected. Strict pinning is required.")
+                        print(f"    -> Action: Regenerate your SBOM using a locked or fully resolved build state.\n")
+                        exit(1)
+                        
+                    discovered_packages[full_name_clean] = version
+    except Exception as e:
+        print(f"[-] Error executing strict CycloneDX JSON strategy: {e}")
+        exit(1)
+    return discovered_packages
+    
     """Extracts package names mapped to versions from a standard CycloneDX JSON SBOM."""
     discovered_packages = {}
     try:
