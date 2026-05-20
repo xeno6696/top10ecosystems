@@ -52,11 +52,11 @@ As a result:
 """
 #!/usr/bin/env python3
 """
-OSV Threat Stream Campaign Dashboard Indicator - Version 1.1
+OSV Threat Stream Campaign Dashboard Indicator - Version 1.2
 =================================================================================
 A security engineering tool designed to track software supply chain fluctuations 
 by aggregating upstream vulnerability mutations from the Open Source Vulnerability 
-(OSV) database and cross-referencing local project manifests.
+(OSV) database and cross-referencing strict local project manifest pins.
 
 CRITICAL ARCHITECTURAL NOTE ON METRICS:
 ---------------------------------------------------------------------------------
@@ -89,53 +89,88 @@ BOLD = "\033[1m"
 # MODULAR PLUG-AND-PLAY DECOUPLED MANIFEST PARSERS (STRATEGY PATTERN)
 # ==============================================================================
 
-def parse_maven_dependency_tree(file_path: str) -> set:
-    """Extracts unique groupId:artifactId pairs from raw mvn dependency:tree text logs."""
-    discovered_packages = set()
+def parse_maven_dependency_tree(file_path: str) -> dict:
+    """Extracts unique groupId:artifactId pairs mapped to pinned versions, barfing on dynamic ranges."""
+    discovered_packages = {}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 clean_line = line.replace("+-", "").replace("\\-", "").replace("|", "").strip()
+                if not clean_line or ":" not in clean_line:
+                    continue
+                
+                # Check for fancy dynamic range tokens or open resolution symbols
+                illegal_maven_indicators = ["[", "]", "(", ")", "LATEST", "RELEASE", "SNAPSHOT"]
+                if any(indicator in clean_line for indicator in illegal_maven_indicators):
+                    print(f"\n{BOLD}{RED}[!] MAVEN TREE LINTING FAILURE (Line {line_num}):{RESET}")
+                    print(f"    -> Offending Line: '{line.strip()}'")
+                    print(f"    -> Reason: Dynamic ranges, SNAPSHOTs, or LATEST keywords are forbidden to ensure build determinism.")
+                    print(f"    -> Action: Please run dependency:tree against a fully resolved, locked release build.\n")
+                    exit(1)
+                
                 parts = clean_line.split(":")
                 if len(parts) >= 4:
                     group_id = parts[0].strip()
                     artifact_id = parts[1].strip()
-                    discovered_packages.add(f"{group_id}:{artifact_id}")
+                    version_pin = parts[3].strip()
+                    
+                    package_key = f"{group_id}:{artifact_id}".lower().strip()
+                    if package_key:
+                        discovered_packages[package_key] = version_pin
     except Exception as e:
-        print(f"[-] Error executing Maven tree parser strategy: {e}")
+        print(f"[-] Error executing strict Maven tree parser strategy: {e}")
+        exit(1)
     return discovered_packages
 
-def parse_cyclonedx_sbom(file_path: str) -> set:
-    """Extracts package names from a standard CycloneDX JSON SBOM."""
-    discovered_packages = set()
+def parse_cyclonedx_sbom(file_path: str) -> dict:
+    """Extracts package names mapped to versions from a standard CycloneDX JSON SBOM."""
+    discovered_packages = {}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             sbom_data = json.load(f)
             for component in sbom_data.get("components", []):
                 name = component.get("name")
                 group = component.get("group")
+                version = component.get("version", "0.0.0").strip()
                 if name:
                     full_name = f"{group}:{name}" if group else name
-                    discovered_packages.add(full_name.strip())
+                    discovered_packages[full_name.strip().lower()] = version
     except Exception as e:
         print(f"[-] Error executing CycloneDX JSON strategy: {e}")
     return discovered_packages
 
-def parse_pypi_requirements(file_path: str) -> set:
-    """Extracts normalized package names from a Python requirements.txt file."""
-    discovered_packages = set()
+def parse_pypi_requirements(file_path: str) -> dict:
+    """Extracts exact package names mapped to pinned versions, rejecting dynamic operators."""
+    discovered_packages = {}
     try:
         with open(file_path, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 clean_line = line.strip()
                 if not clean_line or clean_line.startswith("#") or clean_line.startswith("-r"):
                     continue
-                parts = re.split(r'==|>=|<=|>|<|~=|@', clean_line)
+                
+                # Check for dynamic range symbols before parsing
+                illegal_operators = [">=", "<=", ">", "<", "~=", "!="]
+                if any(op in clean_line for op in illegal_operators):
+                    print(f"\n{BOLD}{RED}[!] MANIFEST LINTING FAILURE (Line {line_num}):{RESET}")
+                    print(f"    -> Offending Line: '{clean_line}'")
+                    print(f"    -> Reason: Dynamic range operators are forbidden to ensure build determinism.")
+                    print(f"    -> Action: Please compile your lockfile or freeze the library to a strict pin ('==').\n")
+                    exit(1) # Immediate hard halt
+                
+                parts = clean_line.split("==")
                 package_name = parts[0].strip().lower().replace('_', '-')
+                
+                version_pin = "0.0.0"
+                if len(parts) > 1:
+                    # Strip out downstream comments or environment markers if present
+                    version_pin = parts[1].split(";")[0].split("#")[0].strip()
+                        
                 if package_name:
-                    discovered_packages.add(package_name)
+                    discovered_packages[package_name] = version_pin
     except Exception as e:
-        print(f"[-] Error executing PyPI requirements parser strategy: {e}")
+        print(f"[-] Error executing strict PyPI parser strategy: {e}")
+        exit(1)
     return discovered_packages
 
 # Central Registry Routing Interface Mapping
@@ -208,6 +243,7 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             has_fixes = False
                             is_malware = False
                             p_name = "N/A"
+                            vuln_versions = set() # Track explicit vulnerable literal versions
                             
                             if vuln_id.startswith("MAL-") or "malicious" in file_name.lower():
                                 is_malware = True
@@ -223,6 +259,10 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                 name = affected.get("package", {}).get("name")
                                 if eco: ecosystems.add(eco)
                                 if name: p_name = name.strip()
+                                
+                                # Index literal vulnerable version values directly from the record
+                                for v in affected.get("versions", []):
+                                    vuln_versions.add(str(v).strip())
                                 
                                 v_len = len(affected.get("versions", []))
                                 if v_len > max_versions_found: max_versions_found = v_len
@@ -267,7 +307,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                     "type": classification,
                                     "vector": malware_vector,
                                     "dwell_days": dwell_days,
-                                    "blast_radius": max_versions_found
+                                    "blast_radius": max_versions_found,
+                                    "vulnerable_versions": vuln_versions # Stored for validation checking
                                 }
                         except json.JSONDecodeError: continue 
         print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
@@ -473,13 +514,13 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     now = datetime.datetime.now(datetime.timezone.utc)
     
     final_leaderboard = Counter()
-    target_inventory_set = set()
+    target_inventory_map = {} # Shifted to dictionary to record exact Name -> Version mappings
     is_project_mode = False
+    allowed_project_ecosystems = []
     
     known_containers = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
     known_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 
-    # Master track allocations targeting database telemetry layers
     master_tracks = known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
     
     if target_layer == "app":
@@ -489,16 +530,24 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     else:
         final_leaderboard.update({k: 0 for k in master_tracks if k not in ["GIT", "Untagged Commit Hash/CVE Noise"]})
 
-    # Internal repository ingestion hooks
     manifest_target = project_file_path if project_file_path else (audit_mode if isinstance(audit_mode, str) else None)
     
     if manifest_target:
         strategy = forced_format if forced_format else auto_sniff_manifest_strategy(manifest_target)
         if strategy and strategy in MANIFEST_PARSER_REGISTRY:
             print(f"[*] Ingesting project manifest file using strategy profile: {strategy}...")
-            target_inventory_set = MANIFEST_PARSER_REGISTRY[strategy](manifest_target)
+            target_inventory_map = MANIFEST_PARSER_REGISTRY[strategy](manifest_target)
             is_project_mode = True
-            print(f"[+] Loaded {len(target_inventory_set)} project unique package tracking keys.")
+            print(f"[+] Loaded {len(target_inventory_map)} project unique package tracking keys.")
+            
+            # Decoupled Language Context Whitelists mapping parser types straight to registry targets
+            # AFTER
+            STRATEGY_ECOSYSTEM_WHITELIST = {
+                "pypi_requirements": ["PyPI"],
+                "maven_tree": ["Maven (Java)", "Maven"], # Allows both the raw and translated tokens
+                "cyclonedx_json": ["npm", "PyPI", "Maven (Java)", "Maven", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems"]
+            }
+            allowed_project_ecosystems = STRATEGY_ECOSYSTEM_WHITELIST.get(strategy, [])
         else:
             print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {manifest_target}")
             exit(1)
@@ -512,7 +561,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
-    # Structural memory tracks mapping to telemetry buckets
     spatial_dwell_malware = {k: [] for k in master_tracks}
     spatial_dwell_cve = {k: [] for k in master_tracks}
     spatial_blast_radius = {k: [] for k in master_tracks}
@@ -568,7 +616,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                 eco_raw = eco.strip()
                 eco_lower = eco_raw.lower()
                 
-                # Hard conversion overrides for shorthand upstream indicators
                 hard_mappings = {
                     "maven": "Maven (Java)",
                     "go": "Go (Golang)",
@@ -581,7 +628,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                 if eco_lower in hard_mappings:
                     eco_clean = hard_mappings[eco_lower]
                 else:
-                    # Defensive bidirectional containment matching layer
                     for track in master_tracks:
                         if eco_lower in track.lower() or track.lower() in eco_lower:
                             eco_clean = track
@@ -596,10 +642,21 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                 if target_layer == "container" and layer != "Container Base Image": continue
                 if target_layer == "app" and layer != "App Software Registry": continue
 
+                # Strict Exact Key and Pinned Version Boundary Validation Interception
                 if is_project_mode and current_id in ghsa_lookup:
-                    m_name = ghsa_lookup[current_id]["package_name"]
-                    if m_name.lower() in target_inventory_set or any(m_name in key for key in target_inventory_set):
-                        project_intercept_alerts.append((current_id, m_name, eco_clean, update_type))
+                    m_name = ghsa_lookup[current_id]["package_name"].lower().strip()
+                    
+                    if m_name in target_inventory_map:
+                        if allowed_project_ecosystems and eco_clean not in allowed_project_ecosystems:
+                            continue
+                            
+                        local_version = target_inventory_map[m_name]
+                        vulnerable_versions_pool = ghsa_lookup[current_id].get("vulnerable_versions", set())
+                        
+                        # Fix: If running version is found OR if the upstream record omits a literal 
+                        # version list (common in Maven ranges), flag it for analyst triage.
+                        if local_version == "0.0.0" or local_version in vulnerable_versions_pool or not vulnerable_versions_pool:
+                            project_intercept_alerts.append((current_id, ghsa_lookup[current_id]["package_name"], eco_clean, update_type))
 
                 bucket_counts[update_type] += 1
                 if "Malware" in update_type and current_vector: malware_vector_counts[current_vector] += 1
@@ -659,7 +716,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     total_buckets = sum(bucket_counts.values())
     print("\n" + "="*50)
     print(f"  {BOLD}II. DATA ENRICHMENT: LAYER THREAT PROFILE{RESET}")
-    print("=" * 50)
+    print("="*50)
     for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
         b_count = bucket_counts[b_type]
         percentage = (b_count / total_buckets) * 100 if total_buckets > 0 else 0.0
@@ -775,7 +832,6 @@ if __name__ == "__main__":
     else:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         
-        # Hardcoded April 18, 2026 baseline floor protection check
         if args.days:
             calculated_start = now_utc - datetime.timedelta(days=args.days)
         elif args.from_date:
