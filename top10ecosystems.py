@@ -52,11 +52,11 @@ As a result:
 """
 #!/usr/bin/env python3
 """
-OSV Threat Stream Campaign Dashboard Indicator - Version 1.0
+OSV Threat Stream Campaign Dashboard Indicator - Version 1.1
 =================================================================================
 A security engineering tool designed to track software supply chain fluctuations 
 by aggregating upstream vulnerability mutations from the Open Source Vulnerability 
-(OSV) database.
+(OSV) database and cross-referencing local project manifests.
 
 CRITICAL ARCHITECTURAL NOTE ON METRICS:
 ---------------------------------------------------------------------------------
@@ -95,7 +95,6 @@ def parse_maven_dependency_tree(file_path: str) -> set:
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             for line in f:
-                # Double-escaped to prevent deprecation warnings permanently
                 clean_line = line.replace("+-", "").replace("\\-", "").replace("|", "").strip()
                 parts = clean_line.split(":")
                 if len(parts) >= 4:
@@ -389,7 +388,6 @@ def compare_snapshots(file_base: str, file_current: str):
                 
             print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
 
-    # Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix (Padded Context Alignment)
     if "profile_matrix" in base and "profile_matrix" in current:
         print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
         print("="*115)
@@ -424,7 +422,6 @@ def compare_snapshots(file_base: str, file_current: str):
             print(f"{eco:<22} | {dm_str} | {dc_str} | {br_str}")
         print("="*115)
         
-    # Section V: Outlier Vulnerability Impact Pools Variance Tracking
     if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
         print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
         print("="*95)
@@ -472,7 +469,7 @@ def compare_snapshots(file_base: str, file_current: str):
 # MAIN ENGINE EXECUTION
 # ==============================================================================
 
-def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, forced_format: str = None):
+def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, forced_format: str = None, audit_mode: bool = False):
     now = datetime.datetime.now(datetime.timezone.utc)
     
     final_leaderboard = Counter()
@@ -482,22 +479,28 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     known_containers = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
     known_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 
+    # Master track allocations targeting database telemetry layers
+    master_tracks = known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
+    
     if target_layer == "app":
         final_leaderboard.update({k: 0 for k in known_registries})
     elif target_layer == "container":
         final_leaderboard.update({k: 0 for k in known_containers})
     else:
-        final_leaderboard.update({k: 0 for k in (known_registries + known_containers)})
+        final_leaderboard.update({k: 0 for k in master_tracks if k not in ["GIT", "Untagged Commit Hash/CVE Noise"]})
 
-    if project_file_path:
-        strategy = forced_format if forced_format else auto_sniff_manifest_strategy(project_file_path)
+    # Internal repository ingestion hooks
+    manifest_target = project_file_path if project_file_path else (audit_mode if isinstance(audit_mode, str) else None)
+    
+    if manifest_target:
+        strategy = forced_format if forced_format else auto_sniff_manifest_strategy(manifest_target)
         if strategy and strategy in MANIFEST_PARSER_REGISTRY:
             print(f"[*] Ingesting project manifest file using strategy profile: {strategy}...")
-            target_inventory_set = MANIFEST_PARSER_REGISTRY[strategy](project_file_path)
+            target_inventory_set = MANIFEST_PARSER_REGISTRY[strategy](manifest_target)
             is_project_mode = True
             print(f"[+] Loaded {len(target_inventory_set)} project unique package tracking keys.")
         else:
-            print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {project_file_path}")
+            print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {manifest_target}")
             exit(1)
 
     ghsa_lookup = build_ghsa_ecosystem_map()
@@ -509,10 +512,11 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
-    spatial_dwell_malware = {k: [] for k in (known_containers + known_registries + ["Android"])}
-    spatial_dwell_cve = {k: [] for k in (known_containers + known_registries + ["Android"])}
-    spatial_blast_radius = {k: [] for k in (known_containers + known_registries + ["Android"])}
-    ecosystem_outlier_pools = {k: {} for k in (known_containers + known_registries + ["Android"])}
+    # Structural memory tracks mapping to telemetry buckets
+    spatial_dwell_malware = {k: [] for k in master_tracks}
+    spatial_dwell_cve = {k: [] for k in master_tracks}
+    spatial_blast_radius = {k: [] for k in master_tracks}
+    ecosystem_outlier_pools = {k: {} for k in master_tracks}
 
     try:
         response = requests.get(manifest_url, stream=True, timeout=30)
@@ -561,17 +565,30 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                     else: update_type = "Vulnerability Fix (Update)"
 
             for eco in raw_ecosystems:
-                eco_clean = eco.strip()
-                eco_lower = eco_clean.lower()
+                eco_raw = eco.strip()
+                eco_lower = eco_raw.lower()
                 
-                if eco_lower == "crates.io": eco_clean = "Crates.io"
-                elif eco_lower == "hex": eco_clean = "Hex"
-                elif eco_lower == "pub": eco_clean = "Pub"
-                elif "conan" in eco_lower: eco_clean = "ConanCenter"
-                elif "swift" in eco_lower: eco_clean = "SwiftURL"
-
-                if not any(eco_clean == k or eco_lower in k.lower() for k in (known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise"])):
-                    eco_clean = "Android"
+                # Hard conversion overrides for shorthand upstream indicators
+                hard_mappings = {
+                    "maven": "Maven (Java)",
+                    "go": "Go (Golang)",
+                    "packagist": "Packagist (PHP)",
+                    "git": "GIT",
+                    "crates.io": "Crates.io"
+                }
+                
+                eco_clean = None
+                if eco_lower in hard_mappings:
+                    eco_clean = hard_mappings[eco_lower]
+                else:
+                    # Defensive bidirectional containment matching layer
+                    for track in master_tracks:
+                        if eco_lower in track.lower() or track.lower() in eco_lower:
+                            eco_clean = track
+                            break
+                
+                if not eco_clean:
+                    eco_clean = "Android" if eco_lower not in ["git", "untagged commit hash/cve noise"] else "Untagged Commit Hash/CVE Noise"
 
                 if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode: continue
 
@@ -604,17 +621,20 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
         print(f"[-] Threat ledger stream disrupted: {e}")
         return
 
-    filtered_results = sorted([(e, c, get_artifact_layer(e)) for e, c in final_leaderboard.items() if e != "Untagged Commit Hash/CVE Noise"], key=lambda x: x[1], reverse=True)
+    filtered_results = sorted([(e, c, get_artifact_layer(e)) for e, c in final_leaderboard.items() if e not in ["Untagged Commit Hash/CVE Noise", "GIT"]], key=lambda x: x[1], reverse=True)
     
     if is_project_mode:
         print("\n" + "="*95)
-        print(f"  {BOLD}V. TARGET COMPONENT INTERCEPTION ANALYSIS REPORT: {os.path.basename(project_file_path)}{RESET}")
+        title_source = project_file_path if project_file_path else audit_mode
+        print(f"  {BOLD}LOCAL REPOSITORY INTERSECTION REPORT: {os.path.basename(title_source)}{RESET}")
         print("="*95)
         if project_intercept_alerts:
-            print(f"{'Advisory ID':<20} | {'Package Name':<28} | {'Ecosystem/Registry':<22} | {'Threat Profile'}")
+            print(f"{BOLD}{RED}[!] LOCAL BLAST RADIUS BREACH ALERT:{RESET}")
+            print("-"*95)
+            print(f"{'Advisory ID':<22} | {'Package Name':<20} | {'Ecosystem/Registry':<22} | {'Threat Profile'}")
             print("-"*95)
             for r_id, p_name, eco, u_type in sorted(list(set(project_intercept_alerts)), key=lambda x: x[1]):
-                print(f"{r_id:<20} | {p_name:<28} | {eco:<22} | {u_type}")
+                print(f"{r_id:<22} | {p_name:<20} | {eco:<22} | {u_type}")
         else:
             print(f" {GREEN}[+] Clean Bill of Health: Zero active package mutations match your local manifest elements within this timeframe.{RESET}")
         print("="*95 + "\n")
@@ -636,18 +656,16 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
 
-    # Section II: Threat Behavior Variance Panel
     total_buckets = sum(bucket_counts.values())
     print("\n" + "="*50)
     print(f"  {BOLD}II. DATA ENRICHMENT: LAYER THREAT PROFILE{RESET}")
-    print("="*50)
+    print("=" * 50)
     for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
         b_count = bucket_counts[b_type]
         percentage = (b_count / total_buckets) * 100 if total_buckets > 0 else 0.0
         print(f"-> {b_type:<32} | {b_count:<6,} ({percentage:.1f}%)")
     print("="*50)
 
-    # Section III: Malware Vector Attack Matrix Panel
     total_malware_signals = sum(malware_vector_counts.values())
     if total_malware_signals > 0:
         print("\n" + "="*50)
@@ -658,7 +676,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             print(f"-> {vector_name:<38} | {vector_count:<4,} ({v_p:.1f}%)")
         print("="*50)
 
-    # Section IV: Ecosystem Threat Dwell Time & Blast Radius Profile Matrix
     print("\n" + "="*95)
     print(f"  {BOLD}IV. ECOSYSTEM THREAT DWELL TIME & BLAST RADIUS PROFILE MATRIX{RESET}")
     print("="*95)
@@ -678,7 +695,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
         print(f"{eco:<22} | {f'{raw_avg_m:.1f} Days':<20} | {f'{raw_avg_c:.1f} Days':<16} | {raw_avg_r:.1f} Versions")
     print("="*95)
 
-    # SECTION V: Full Top 10 Outlier Vulnerability Impact Pools per Registry (Numbered Layout)
     print("\n" + "="*95)
     print(f"  {BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS (TOP 10 PER ECOSYSTEM){RESET}")
     print("="*95)
@@ -701,7 +717,6 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             print(f"\n[+] {eco}: No critical outliers tracked in this window.")
     print("\n" + "="*95)
 
-    # Dynamic JSON export handler (Routed to relative output/ directory)
     if custom_export_arg:
         output_dir = "./output"
         os.makedirs(output_dir, exist_ok=True)
@@ -750,6 +765,9 @@ if __name__ == "__main__":
     parser.add_argument("--project-file", metavar="PATH", help="Path to project dependency tree output or standard SBOM.")
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force a manual schema parser profile selection.")
     
+    # Target Intersection Sprint Addition
+    parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Ingest a local lockfile/requirements format directly to track active blast radius breaches.")
+    
     args = parser.parse_args()
     
     if args.compare:
@@ -783,5 +801,6 @@ if __name__ == "__main__":
             start_date=calculated_start, end_date=calculated_end,
             target_layer=args.layer, debug_mode=args.debug,
             custom_export_arg=args.export, run_speedway=args.speedway,
-            project_file_path=args.project_file, forced_format=args.project_format
+            project_file_path=args.project_file, forced_format=args.project_format,
+            audit_mode=args.audit
         )
