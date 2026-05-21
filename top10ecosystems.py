@@ -50,7 +50,7 @@ As a result:
     VECTOR ANALYSIS" panel entirely, as the targeted malware metrics drop to zero.
 =================================================================================
 """
-#!/usr/bin/env python3
+
 """
 OSV Threat Stream Campaign Dashboard Indicator - Version 1.2
 =================================================================================
@@ -467,13 +467,22 @@ def compare_snapshots(file_base: str, file_current: str):
             br_diff = c_mat["avg_blast_radius"] - br_base
             
             def color_metric_string(diff, base_val, suffix, width_size):
+                # Force signature to absolute zero if the value is functionally non-existent
+                if abs(diff) < 0.05:
+                    diff = 0.0
+                    
                 diff_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
                 raw_str = f"{diff_str:<12} (from {base_val:.1f})"
                 padded_raw = f"{raw_str:<{width_size}}"
                 
-                if diff > 0: return f"{GREEN}{padded_raw}{RESET}"
-                elif diff < 0: return f"{RED}{padded_raw}{RESET}"
-                return padded_raw
+                # Lock absolute zero back to standard terminal gray/white canvas color
+                if diff == 0.0:
+                    return padded_raw
+                
+                # AppSec Risk Polarity: 
+                # Contractions / Drops (< 0) are a security WIN -> GREEN
+                # Spikes / Growth (> 0) are an increased RISK -> RED
+                return f"{RED}{padded_raw}{RESET}" if diff > 0 else f"{GREEN}{padded_raw}{RESET}"
 
             dm_str = color_metric_string(dm_diff, dm_base, " Days", 26)
             dc_str = color_metric_string(dc_diff, dc_base, " Days", 26)
@@ -533,34 +542,50 @@ def compare_snapshots(file_base: str, file_current: str):
                 c_radius = item["c_radius"]
                 radius_diff = c_radius - b_radius
                 
+                # 1. Compute plaintext layout strings first to keep formatting deterministic
                 if radius_diff > 0:
-                    diff_str = f"{GREEN}+{radius_diff:,} Vers{RESET}" if b_radius > 0 else f"{GREEN}NEW (0->{c_radius}){RESET}"
+                    raw_diff_str = f"+{radius_diff:,} Vers" if b_radius > 0 else f"NEW (0->{c_radius})"
                 elif radius_diff < 0:
-                    diff_str = f"{RED}{radius_diff:,} Vers{RESET}"
+                    raw_diff_str = f"{radius_diff:,} Vers"
                 else:
-                    diff_str = "No Change"
+                    raw_diff_str = "No Change"
                     
                 b_rank = base_ranks.get(r_id)
                 c_rank = curr_ranks.get(r_id)
                 
                 if b_rank and c_rank:
                     r_diff = b_rank - c_rank
-                    if r_diff > 0: r_str = f"{GREEN}Up {r_diff} ({b_rank}->{c_rank}){RESET}"
-                    elif r_diff < 0: r_str = f"{RED}Down {abs(r_diff)} ({b_rank}->{c_rank}){RESET}"
-                    else: r_str = f"No Change"
-                    if r_diff != 0: has_shifts = True
+                    if r_diff > 0: raw_r_str = f"Up {r_diff} ({b_rank}->{c_rank})"
+                    elif r_diff < 0: raw_r_str = f"Down {abs(r_diff)} ({b_rank}->{c_rank})"
+                    else: raw_r_str = "No Change"
                 elif not b_rank and c_rank:
-                    r_str = f"{GREEN}New to Radar{RESET}"
-                    has_shifts = True
+                    raw_r_str = "New to Radar"
                 else:
-                    r_str = "-"
+                    raw_r_str = "-"
                     
-                if radius_diff != 0: has_shifts = True
+                if radius_diff != 0 or (b_rank and c_rank and b_rank != c_rank) or (not b_rank and c_rank):
+                    has_shifts = True
+                    
+                # 2. Inject terminal color sequences ONLY after padding boundaries are assigned
+                if radius_diff > 0:
+                    diff_display = f"{GREEN}{raw_diff_str:<18}{RESET}"
+                elif radius_diff < 0:
+                    diff_display = f"{RED}{raw_diff_str:<18}{RESET}"
+                else:
+                    diff_display = f"{raw_diff_str:<18}"
+                    
+                if "Up" in raw_r_str or "New" in raw_r_str:
+                    r_display = f"{GREEN}{raw_r_str}{RESET}"
+                elif "Down" in raw_r_str:
+                    r_display = f"{RED}{raw_r_str}{RESET}"
+                else:
+                    r_display = raw_r_str
                     
                 c_str = f"{c_radius:,} Vers"
                 p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
                 
-                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<28} | {c_str:<16} | {diff_str:<18} | {r_str}")
+                # Render the clean, perfectly tracking row alignment structure
+                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<28} | {c_str:<16} | {diff_display} | {r_display}")
                 
             if dropped_out:
                 print(f"    {'-'*120}")
