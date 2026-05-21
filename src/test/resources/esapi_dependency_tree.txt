@@ -1,0 +1,55 @@
+[INFO] org.owasp.esapi:esapi:jar:2.7.0.0-SNAPSHOT
+[INFO] +- javax.servlet:javax.servlet-api:jar:3.1.0:provided
+[INFO] +- javax.servlet.jsp:javax.servlet.jsp-api:jar:2.3.3:provided
+[INFO] +- xom:xom:jar:1.3.9:compile
+[INFO] +- commons-beanutils:commons-beanutils:jar:1.11.0:compile
+[INFO] |  +- commons-logging:commons-logging:jar:1.3.5:compile
+[INFO] |  \- commons-collections:commons-collections:jar:3.2.2:compile
+[INFO] +- commons-configuration:commons-configuration:jar:1.10:compile
+[INFO] +- commons-lang:commons-lang:jar:2.6:compile
+[INFO] +- commons-fileupload:commons-fileupload:jar:1.6.0:compile
+[INFO] +- org.apache.commons:commons-collections4:jar:4.5.0-M2:compile
+[INFO] +- org.apache-extras.beanshell:bsh:jar:2.0b6:compile
+[INFO] +- org.owasp.antisamy:antisamy:jar:1.7.8:compile
+[INFO] |  +- commons-io:commons-io:jar:2.19.0:compile
+[INFO] |  +- org.apache.httpcomponents.client5:httpclient5:jar:5.4.4:compile
+[INFO] |  |  \- org.apache.httpcomponents.core5:httpcore5-h2:jar:5.3.4:compile
+[INFO] |  +- org.apache.httpcomponents.core5:httpcore5:jar:5.3.4:compile
+[INFO] |  +- org.apache.xmlgraphics:batik-css:jar:1.19:compile
+[INFO] |  |  +- org.apache.xmlgraphics:batik-shared-resources:jar:1.19:compile
+[INFO] |  |  +- org.apache.xmlgraphics:batik-util:jar:1.19:compile
+[INFO] |  |  |  +- org.apache.xmlgraphics:batik-constants:jar:1.19:compile
+[INFO] |  |  |  \- org.apache.xmlgraphics:batik-i18n:jar:1.19:compile
+[INFO] |  |  \- org.apache.xmlgraphics:xmlgraphics-commons:jar:2.11:compile
+[INFO] |  +- org.htmlunit:neko-htmlunit:jar:4.11.0:compile
+[INFO] |  +- xerces:xercesImpl:jar:2.12.2:compile
+[INFO] |  \- xml-apis:xml-apis-ext:jar:1.3.04:compile
+[INFO] +- org.slf4j:slf4j-api:jar:2.0.16:compile
+[INFO] +- xml-apis:xml-apis:jar:1.4.01:compile
+[INFO] +- com.github.spotbugs:spotbugs-annotations:jar:4.9.3:compile (optional)
+[INFO] |  \- com.google.code.findbugs:jsr305:jar:3.0.2:compile (optional)
+[INFO] +- commons-codec:commons-codec:jar:1.17.1:test
+[INFO] +- junit:junit:jar:4.13.2:test
+[INFO] +- org.bouncycastle:bcprov-jdk18on:jar:1.78.1:test
+[INFO] +- org.hamcrest:hamcrest-core:jar:2.2:test
+[INFO] |  \- org.hamcrest:hamcrest:jar:2.2:test
+[INFO] +- org.powermock:powermock-api-mockito2:jar:2.0.9:test
+[INFO] |  \- org.powermock:powermock-api-support:jar:2.0.9:test
+[INFO] +- org.mockito:mockito-core:jar:3.12.4:test
+[INFO] |  +- net.bytebuddy:byte-buddy:jar:1.11.13:test
+[INFO] |  +- net.bytebuddy:byte-buddy-agent:jar:1.11.13:test
+[INFO] |  \- org.objenesis:objenesis:jar:3.2:test
+[INFO] +- org.powermock:powermock-core:jar:2.0.9:test
+[INFO] |  \- org.javassist:javassist:jar:3.27.0-GA:test
+[INFO] +- org.powermock:powermock-module-junit4:jar:2.0.9:test
+[INFO] |  \- org.powermock:powermock-module-junit4-common:jar:2.0.9:test
+[INFO] +- org.powermock:powermock-reflect:jar:2.0.9:test
+[INFO] \- org.openjdk.jmh:jmh-core:jar:1.37:test
+[INFO]    +- net.sf.jopt-simple:jopt-simple:jar:5.0.4:test
+[INFO]    \- org.apache.commons:commons-math3:jar:3.6.1:test
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  9.740 s
+[INFO] Finished at: 2026-05-20T20:40:48-07:00
+[INFO] ------------------------------------------------------------------------

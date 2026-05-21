@@ -89,7 +89,59 @@ BOLD = "\033[1m"
 # MODULAR PLUG-AND-PLAY DECOUPLED MANIFEST PARSERS (STRATEGY PATTERN)
 # ==============================================================================
 
+import re
+
 def parse_maven_dependency_tree(file_path: str) -> dict:
+    """Extracts unique groupId:artifactId pairs mapped to pinned versions, navigating raw CLI noise."""
+    discovered_packages = {}
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, 1):
+                clean_line = line.strip()
+                
+                # 1. Strip standard Maven CLI log prefixes
+                clean_line = re.sub(r'^\[(?:INFO|WARNING|ERROR)\]\s*', '', clean_line)
+                
+                # 2. Skip empty lines, section dividers, and the build summary footer
+                if not clean_line or ":" not in clean_line or clean_line.startswith("-"):
+                    continue
+                if any(x in clean_line for x in ["Total time:", "Finished at:", "BUILD SUCCESS", "BUILD FAILURE"]):
+                    continue
+                    
+                # 3. Strip trailing modifiers that contain illegal characters
+                clean_line = clean_line.replace(" (optional)", "")
+                
+                # 4. Skip the root project definition (to avoid flagging the target's own SNAPSHOT status)
+                # The root project does not contain the standard tree structural branches (+-, \-, |)
+                if not re.search(r'[\\|\+\-]', clean_line) and line_num < 10:
+                    continue
+
+                # 5. Check for dynamic range tokens now that the noise is gone
+                illegal_maven_indicators = ["[", "]", "(", ")", "LATEST", "RELEASE", "SNAPSHOT"]
+                if any(indicator in clean_line for indicator in illegal_maven_indicators):
+                    print(f"\n{BOLD}{RED}[!] MAVEN TREE LINTING FAILURE (Line {line_num}):{RESET}")
+                    print(f"    -> Offending Line: '{line.strip()}'")
+                    print(f"    -> Reason: Dynamic ranges, SNAPSHOTs, or LATEST keywords are forbidden to ensure build determinism.")
+                    exit(1)
+                
+                parts = clean_line.split(":")
+                if len(parts) >= 4:
+                    # Strip tree layout characters (+-, \-, |) natively
+                    raw_group = parts[0]
+                    group_id = re.sub(r'^[\\|\s\+\-]+', '', raw_group).strip()
+                    
+                    artifact_id = parts[1].strip()
+                    version_pin = parts[3].strip()
+                    
+                    package_key = f"{group_id}:{artifact_id}".lower().strip()
+                    if package_key:
+                        discovered_packages[package_key] = version_pin
+                        
+    except Exception as e:
+        print(f"[-] Error executing strict Maven tree parser strategy: {e}")
+        exit(1)
+        
+    return discovered_packages
     """Extracts unique groupId:artifactId pairs mapped to pinned versions, barfing on dynamic ranges."""
     discovered_packages = {}
     try:
@@ -833,8 +885,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
 # ==============================================================================
 # ENTRY ENGINE EXECUTIVE PARSER ROUTINES
 # ==============================================================================
-
-if __name__ == "__main__":
+def main(): 
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=int, help="Relative lookback day window shortcut from today.")
@@ -889,3 +940,5 @@ if __name__ == "__main__":
             project_file_path=args.project_file, forced_format=args.project_format,
             audit_mode=args.audit
         )
+if __name__ == "__main__":
+    main()

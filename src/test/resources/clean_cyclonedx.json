@@ -1,0 +1,12 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "components": [
+    {
+      "group": "commons-io",
+      "name": "commons-io",
+      "version": "2.16.1",
+      "type": "library"
+    }
+  ]
+}

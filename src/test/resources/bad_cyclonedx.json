@@ -1,0 +1,12 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "components": [
+    {
+      "group": "org.apache.tomcat",
+      "name": "tomcat-catalina",
+      "version": "9.0.115",
+      "type": "library"
+    }
+  ]
+}

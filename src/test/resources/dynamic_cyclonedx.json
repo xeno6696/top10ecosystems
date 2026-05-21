@@ -1,0 +1,12 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.4",
+  "components": [
+    {
+      "group": "org.springframework",
+      "name": "spring-core",
+      "version": "",
+      "type": "library"
+    }
+  ]
+}
