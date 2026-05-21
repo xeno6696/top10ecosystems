@@ -655,11 +655,17 @@ def compare_snapshots(file_base: str, file_current: str):
 # MAIN ENGINE EXECUTION
 # ==============================================================================
 
-def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: str = None, debug_mode: bool = False, custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, forced_format: str = None, audit_mode: bool = False):
+def generate_enterprise_threat_leaderboard(
+    start_date, end_date, 
+    target_layer: str = None, debug_mode: bool = False, 
+    custom_export_arg=None, run_speedway: bool = False, 
+    project_file_path: str = None, forced_format: str = None, 
+    audit_mode: bool = False, ghsa_lookup: dict = None
+    ):
     now = datetime.datetime.now(datetime.timezone.utc)
     
     final_leaderboard = Counter()
-    target_inventory_map = {} # Shifted to dictionary to record exact Name -> Version mappings
+    target_inventory_map = {} 
     is_project_mode = False
     allowed_project_ecosystems = []
     
@@ -685,11 +691,9 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             is_project_mode = True
             print(f"[+] Loaded {len(target_inventory_map)} project unique package tracking keys.")
             
-            # Decoupled Language Context Whitelists mapping parser types straight to registry targets
-            # AFTER
             STRATEGY_ECOSYSTEM_WHITELIST = {
                 "pypi_requirements": ["PyPI"],
-                "maven_tree": ["Maven (Java)", "Maven"], # Allows both the raw and translated tokens
+                "maven_tree": ["Maven (Java)", "Maven"], 
                 "cyclonedx_json": ["npm", "PyPI", "Maven (Java)", "Maven", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems"]
             }
             allowed_project_ecosystems = STRATEGY_ECOSYSTEM_WHITELIST.get(strategy, [])
@@ -697,9 +701,11 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
             print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {manifest_target}")
             exit(1)
 
-    ghsa_lookup = build_ghsa_ecosystem_map()
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
-    
+    # BULLETPROOF FALLBACK: Load the DB here ONLY if the batch runner didn't pass it in
+    if ghsa_lookup is None:
+        ghsa_lookup = build_ghsa_ecosystem_map()
+        
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"   
     total_raw_rows = 0
     project_intercept_alerts = []
 
@@ -959,19 +965,16 @@ def main():
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=int, help="Relative lookback day window shortcut from today.")
     parser.add_argument("--from", metavar="YYYY-MM-DD", dest="from_date", help="Explicit chronological interval starting boundary.")
-    parser.add_argument("--to", metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary.")
-    parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
     
-    # Core Snapshot Pipeline Arguments
+    # UPDATED: Accept multiple dates to trigger batch generation
+    parser.add_argument("--to", nargs='+', metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary. Accepts multiple dates for batch generation.")
+    
+    parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
     parser.add_argument("--export", nargs='?', const=True, default=False, help="Auto-generate or name a static JSON snapshot payload.")
     parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots to output dynamic variance metrics.")
     parser.add_argument("--speedway", action="store_true", help="Analyze live timeline log velocity distribution metrics.")
-    
-    # Modular Project Manifest Ingest Parameters
     parser.add_argument("--project-file", metavar="PATH", help="Path to project dependency tree output or standard SBOM.")
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force a manual schema parser profile selection.")
-    
-    # Target Intersection Sprint Addition
     parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Ingest a local lockfile/requirements format directly to track active blast radius breaches.")
     
     args = parser.parse_args()
@@ -981,33 +984,49 @@ def main():
     else:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         
-        if args.days:
-            calculated_start = now_utc - datetime.timedelta(days=args.days)
-        elif args.from_date:
-            calculated_start = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
-        else:
-            calculated_start = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
-            
-        if args.to:
-            parsed_date = None
-            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
-                try:
-                    parsed_date = datetime.datetime.strptime(args.to, fmt).date()
-                    break
-                except ValueError: continue
-            if not parsed_date:
-                print(f"[-] Configuration Error: Unable to parse date '{args.to}'. Please use YYYY-MM-DD or MM-DD-YYYY formatting.")
-                exit(1)
-            calculated_end = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
-        else:
-            calculated_end = now_utc
+        # 1. LOAD THE MASSIVE DATABASE EXACTLY ONCE
+        print(f"[*] Initializing Batch Execution Environment...")
+        global_ghsa_lookup = build_ghsa_ecosystem_map()
+        
+        # 2. Setup the target dates array (defaults to a single run if --to is omitted)
+        target_to_dates = args.to if args.to else [None]
+        
+        for date_str in target_to_dates:
+            if date_str:
+                parsed_date = None
+                for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                    try:
+                        parsed_date = datetime.datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError: continue
+                if not parsed_date:
+                    print(f"[-] Configuration Error: Unable to parse date '{date_str}'. Skipping.")
+                    continue
+                calculated_end = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+            else:
+                calculated_end = now_utc
 
-        generate_enterprise_threat_leaderboard(
-            start_date=calculated_start, end_date=calculated_end,
-            target_layer=args.layer, debug_mode=args.debug,
-            custom_export_arg=args.export, run_speedway=args.speedway,
-            project_file_path=args.project_file, forced_format=args.project_format,
-            audit_mode=args.audit
-        )
+            if args.days:
+                calculated_start = calculated_end - datetime.timedelta(days=args.days)
+            elif args.from_date:
+                calculated_start = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
+            else:
+                calculated_start = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
+                
+            print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
+
+            generate_enterprise_threat_leaderboard(
+                start_date=calculated_start, 
+                end_date=calculated_end,
+                target_layer=args.layer, 
+                debug_mode=args.debug,
+                custom_export_arg=args.export, 
+                run_speedway=args.speedway,
+                project_file_path=args.project_file, 
+                forced_format=args.project_format,
+                audit_mode=args.audit,
+                ghsa_lookup=global_ghsa_lookup  # Pass the pre-loaded DB map!
+            )
+
 if __name__ == "__main__":
     main()
