@@ -68,7 +68,6 @@ user-defined day window.
 
 import csv
 import datetime
-import io
 import json
 import os
 import time
@@ -88,8 +87,6 @@ BOLD = "\033[1m"
 # ==============================================================================
 # MODULAR PLUG-AND-PLAY DECOUPLED MANIFEST PARSERS (STRATEGY PATTERN)
 # ==============================================================================
-
-import re
 
 def parse_maven_dependency_tree(file_path: str) -> dict:
     """Extracts unique groupId:artifactId pairs mapped to pinned versions, navigating raw CLI noise."""
@@ -112,7 +109,6 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
                 clean_line = clean_line.replace(" (optional)", "")
                 
                 # 4. Skip the root project definition (to avoid flagging the target's own SNAPSHOT status)
-                # The root project does not contain the standard tree structural branches (+-, \-, |)
                 if re.match(r'^[a-zA-Z0-9]', clean_line) and line_num < 10:
                     continue
 
@@ -126,10 +122,8 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
                 
                 parts = clean_line.split(":")
                 if len(parts) >= 4:
-                    # Strip tree layout characters (+-, \-, |) natively
                     raw_group = parts[0]
                     group_id = re.sub(r'^[\\|\s\+\-]+', '', raw_group).strip()
-                    
                     artifact_id = parts[1].strip()
                     version_pin = parts[3].strip()
                     
@@ -141,37 +135,6 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
         print(f"[-] Error executing strict Maven tree parser strategy: {e}")
         exit(1)
         
-    return discovered_packages
-    """Extracts unique groupId:artifactId pairs mapped to pinned versions, barfing on dynamic ranges."""
-    discovered_packages = {}
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            for line_num, line in enumerate(f, 1):
-                clean_line = line.replace("+-", "").replace("\\-", "").replace("|", "").strip()
-                if not clean_line or ":" not in clean_line:
-                    continue
-                
-                # Check for fancy dynamic range tokens or open resolution symbols
-                illegal_maven_indicators = ["[", "]", "(", ")", "LATEST", "RELEASE", "SNAPSHOT"]
-                if any(indicator in clean_line for indicator in illegal_maven_indicators):
-                    print(f"\n{BOLD}{RED}[!] MAVEN TREE LINTING FAILURE (Line {line_num}):{RESET}")
-                    print(f"    -> Offending Line: '{line.strip()}'")
-                    print(f"    -> Reason: Dynamic ranges, SNAPSHOTs, or LATEST keywords are forbidden to ensure build determinism.")
-                    print(f"    -> Action: Please run dependency:tree against a fully resolved, locked release build.\n")
-                    exit(1)
-                
-                parts = clean_line.split(":")
-                if len(parts) >= 4:
-                    group_id = parts[0].strip()
-                    artifact_id = parts[1].strip()
-                    version_pin = parts[3].strip()
-                    
-                    package_key = f"{group_id}:{artifact_id}".lower().strip()
-                    if package_key:
-                        discovered_packages[package_key] = version_pin
-    except Exception as e:
-        print(f"[-] Error executing strict Maven tree parser strategy: {e}")
-        exit(1)
     return discovered_packages
 
 def parse_cyclonedx_sbom(file_path: str) -> dict:
@@ -186,11 +149,9 @@ def parse_cyclonedx_sbom(file_path: str) -> dict:
                 version = component.get("version", "").strip()
                 
                 if name:
-                    # Construct the unified coordinate key for cross-ecosystem parsing
                     full_name = f"{group}:{name}" if group else name
                     full_name_clean = full_name.strip().lower()
                     
-                    # Intercept non-deterministic or missing version allocations
                     if not version or version in ["0.0.0", "latest", "snapshot"]:
                         print(f"\n{BOLD}{RED}[!] SBOM LINTING FAILURE:{RESET}")
                         print(f"    -> Offending Component: '{full_name}'")
@@ -203,22 +164,6 @@ def parse_cyclonedx_sbom(file_path: str) -> dict:
         print(f"[-] Error executing strict CycloneDX JSON strategy: {e}")
         exit(1)
     return discovered_packages
-    
-    """Extracts package names mapped to versions from a standard CycloneDX JSON SBOM."""
-    discovered_packages = {}
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            sbom_data = json.load(f)
-            for component in sbom_data.get("components", []):
-                name = component.get("name")
-                group = component.get("group")
-                version = component.get("version", "0.0.0").strip()
-                if name:
-                    full_name = f"{group}:{name}" if group else name
-                    discovered_packages[full_name.strip().lower()] = version
-    except Exception as e:
-        print(f"[-] Error executing CycloneDX JSON strategy: {e}")
-    return discovered_packages
 
 def parse_pypi_requirements(file_path: str) -> dict:
     """Extracts exact package names mapped to pinned versions, rejecting dynamic operators."""
@@ -230,21 +175,19 @@ def parse_pypi_requirements(file_path: str) -> dict:
                 if not clean_line or clean_line.startswith("#") or clean_line.startswith("-r"):
                     continue
                 
-                # Check for dynamic range symbols before parsing
                 illegal_operators = [">=", "<=", ">", "<", "~=", "!="]
                 if any(op in clean_line for op in illegal_operators):
                     print(f"\n{BOLD}{RED}[!] MANIFEST LINTING FAILURE (Line {line_num}):{RESET}")
                     print(f"    -> Offending Line: '{clean_line}'")
                     print(f"    -> Reason: Dynamic range operators are forbidden to ensure build determinism.")
                     print(f"    -> Action: Please compile your lockfile or freeze the library to a strict pin ('==').\n")
-                    exit(1) # Immediate hard halt
+                    exit(1)
                 
                 parts = clean_line.split("==")
                 package_name = parts[0].strip().lower().replace('_', '-')
                 
                 version_pin = "0.0.0"
                 if len(parts) > 1:
-                    # Strip out downstream comments or environment markers if present
                     version_pin = parts[1].split(";")[0].split("#")[0].strip()
                         
                 if package_name:
@@ -254,7 +197,6 @@ def parse_pypi_requirements(file_path: str) -> dict:
         exit(1)
     return discovered_packages
 
-# Central Registry Routing Interface Mapping
 MANIFEST_PARSER_REGISTRY = {
     "maven_tree": parse_maven_dependency_tree,
     "cyclonedx_json": parse_cyclonedx_sbom,
@@ -262,22 +204,15 @@ MANIFEST_PARSER_REGISTRY = {
 }
 
 def auto_sniff_manifest_strategy(file_path: str) -> str:
-    """Inspects file characteristics to assign the correct parsing algorithm."""
-    if not os.path.exists(file_path):
-        return None
-    
-    if file_path.endswith(".json"):
-        return "cyclonedx_json"
-        
+    if not os.path.exists(file_path): return None
+    if file_path.endswith(".json"): return "cyclonedx_json"
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             sample = [f.readline() for _ in range(15)]
             for line in sample:
                 if any(x in line for x in ["+-", "\\-", "|"]) and len(line.split(":")) >= 3:
                     return "maven_tree"
-    except Exception:
-        pass
-        
+    except Exception: pass
     return "pypi_requirements"
 
 # ==============================================================================
@@ -324,7 +259,7 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             has_fixes = False
                             is_malware = False
                             p_name = "N/A"
-                            vuln_versions = set() # Track explicit vulnerable literal versions
+                            vuln_versions = set() 
                             
                             if vuln_id.startswith("MAL-") or "malicious" in file_name.lower():
                                 is_malware = True
@@ -341,7 +276,6 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                 if eco: ecosystems.add(eco)
                                 if name: p_name = name.strip()
                                 
-                                # Index literal vulnerable version values directly from the record
                                 for v in affected.get("versions", []):
                                     vuln_versions.add(str(v).strip())
                                 
@@ -389,7 +323,7 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                     "vector": malware_vector,
                                     "dwell_days": dwell_days,
                                     "blast_radius": max_versions_found,
-                                    "vulnerable_versions": vuln_versions # Stored for validation checking
+                                    "vulnerable_versions": vuln_versions 
                                 }
                         except json.JSONDecodeError: continue 
         print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
@@ -406,7 +340,6 @@ def get_artifact_layer(eco_name):
     return "Global Baseline Noise"
 
 def compare_snapshots(file_base: str, file_current: str):
-    """Parses two snapshots to generate dynamic colored delta trend reports across all sections."""
     try:
         with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
             base = json.load(f1)
@@ -437,8 +370,9 @@ def compare_snapshots(file_base: str, file_current: str):
         clean_name = "Android" if eco not in known_clean_keys else eco
         sanitized_curr_leaderboard[clean_name] += count
 
-    base_sorted = sorted(sanitized_base_leaderboard.items(), key=lambda x: x[1], reverse=True)
-    curr_sorted = sorted(sanitized_curr_leaderboard.items(), key=lambda x: x[1], reverse=True)
+    # Section I uses item[1] because volume counts are ints
+    base_sorted = sorted(sanitized_base_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    curr_sorted = sorted(sanitized_curr_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
 
     base_rank_map = {item[0]: rank for rank, item in enumerate(base_sorted, 1) if item[1] > 0}
     curr_rank_map = {item[0]: rank for rank, item in enumerate(curr_sorted, 1) if item[1] > 0}
@@ -448,14 +382,12 @@ def compare_snapshots(file_base: str, file_current: str):
     print(f"{'Rank':<4} | {'Ecosystem / Registry':<26} | {'Base Vol':<10} | {'Current Vol':<12} | {'Volume Delta':<14} | {'Rank Shift'}")
     print("-"*95)
 
-    # Sort ecosystems by their NEW volume (descending), falling back to base volume
     all_ecosystems = sorted(
         list(set(sanitized_base_leaderboard.keys()).union(set(sanitized_curr_leaderboard.keys()))),
         key=lambda x: (sanitized_curr_leaderboard.get(x, 0), sanitized_base_leaderboard.get(x, 0)),
         reverse=True
     )
     
-    # Iterate through only the top 10, explicitly generating the 1-10 sequence
     for current_rank, eco in enumerate(all_ecosystems[:10], start=1):
         v1 = sanitized_base_leaderboard.get(eco, 0)
         v2 = sanitized_curr_leaderboard.get(eco, 0)
@@ -564,14 +496,13 @@ def compare_snapshots(file_base: str, file_current: str):
             print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<28} | {'Current Impact':<16} | {'Impact Delta':<18} | {'Rank Shift'}")
             print(f"    {'-'*120}")
             
-            # Pre-calculate chronological ranks for the deep pools (up to 50 deep)
-            base_sorted = sorted(base_pool.items(), key=lambda x: x[1][0], reverse=True)
-            curr_sorted = sorted(curr_pool.items(), key=lambda x: x[1][0], reverse=True)
+            base_sorted_pool = sorted(base_pool.items(), key=lambda x: (x[1][0], x[0]), reverse=True)
+            curr_sorted_pool = sorted(curr_pool.items(), key=lambda x: (x[1][0], x[0]), reverse=True)
             
-            base_ranks = {item[0]: rank for rank, item in enumerate(base_sorted, 1)}
-            curr_ranks = {item[0]: rank for rank, item in enumerate(curr_sorted, 1)}
+            # Section V uses item[1][0] because radius is index 0 of the stored list
+            base_ranks = {item[0]: rank for rank, item in enumerate(base_sorted_pool, 1) if item[1][0] > 0}
+            curr_ranks = {item[0]: rank for rank, item in enumerate(curr_sorted_pool, 1) if item[1][0] > 0}
             
-            # Build the sortable current pool
             sortable_pool = []
             all_advisories = set(base_pool.keys()).union(set(curr_pool.keys()))
             
@@ -585,12 +516,10 @@ def compare_snapshots(file_base: str, file_current: str):
                     "id": r_id, "name": p_name, "b_radius": b_radius, "c_radius": c_radius
                 })
                 
-            # Lock the Top 10 view based strictly on CURRENT radius
-            sorted_advisories = sorted(sortable_pool, key=lambda x: x["c_radius"], reverse=True)
+            sorted_advisories = sorted(sortable_pool, key=lambda x: (x["c_radius"], x["id"]), reverse=True)
             current_top_10 = sorted_advisories[:10]
             
-            # Identify what fell out of the Top 10 (Was in base Top 10, NOT in current Top 10)
-            base_top_10_ids = {item[0] for item in base_sorted[:10]}
+            base_top_10_ids = {item[0] for item in base_sorted_pool[:10]}
             curr_top_10_ids = {item["id"] for item in current_top_10}
             dropped_out_ids = base_top_10_ids - curr_top_10_ids
             dropped_out = [item for item in sorted_advisories if item["id"] in dropped_out_ids]
@@ -604,7 +533,6 @@ def compare_snapshots(file_base: str, file_current: str):
                 c_radius = item["c_radius"]
                 radius_diff = c_radius - b_radius
                 
-                # Impact Delta String
                 if radius_diff > 0:
                     diff_str = f"{GREEN}+{radius_diff:,} Vers{RESET}" if b_radius > 0 else f"{GREEN}NEW (0->{c_radius}){RESET}"
                 elif radius_diff < 0:
@@ -612,7 +540,6 @@ def compare_snapshots(file_base: str, file_current: str):
                 else:
                     diff_str = "No Change"
                     
-                # Rank Shift String
                 b_rank = base_ranks.get(r_id)
                 c_rank = curr_ranks.get(r_id)
                 
@@ -633,7 +560,7 @@ def compare_snapshots(file_base: str, file_current: str):
                 c_str = f"{c_radius:,} Vers"
                 p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
                 
-                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<28} | {c_str:<16} | {diff_str:<27} | {r_str}")
+                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<28} | {c_str:<16} | {diff_str:<18} | {r_str}")
                 
             if dropped_out:
                 print(f"    {'-'*120}")
@@ -701,7 +628,6 @@ def generate_enterprise_threat_leaderboard(
             print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {manifest_target}")
             exit(1)
 
-    # BULLETPROOF FALLBACK: Load the DB here ONLY if the batch runner didn't pass it in
     if ghsa_lookup is None:
         ghsa_lookup = build_ghsa_ecosystem_map()
         
@@ -793,7 +719,6 @@ def generate_enterprise_threat_leaderboard(
                 if target_layer == "container" and layer != "Container Base Image": continue
                 if target_layer == "app" and layer != "App Software Registry": continue
 
-                # Strict Exact Key and Pinned Version Boundary Validation Interception
                 if is_project_mode and current_id in ghsa_lookup:
                     m_name = ghsa_lookup[current_id]["package_name"].lower().strip()
                     
@@ -804,8 +729,6 @@ def generate_enterprise_threat_leaderboard(
                         local_version = target_inventory_map[m_name]
                         vulnerable_versions_pool = ghsa_lookup[current_id].get("vulnerable_versions", set())
                         
-                        # Fix: If running version is found OR if the upstream record omits a literal 
-                        # version list (common in Maven ranges), flag it for analyst triage.
                         if local_version == "0.0.0" or local_version in vulnerable_versions_pool or not vulnerable_versions_pool:
                             project_intercept_alerts.append((current_id, ghsa_lookup[current_id]["package_name"], eco_clean, update_type))
 
@@ -915,13 +838,9 @@ def generate_enterprise_threat_leaderboard(
             print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<30} | {'Impact Blast Radius':<20} | {'Threat Profile'}")
             print(f"    {'-'*112}")
             
-            # Sort the entire pool descending by blast radius
-            full_sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)
-            
-            # EXPORT UP TO 50: Give the JSON snapshot deep memory for next month's rank shifts
+            full_sorted_pool = sorted(pool.items(), key=lambda x: (x[1][0], x[0]), reverse=True)
             export_outlier_manifests[eco] = {r_id: [radius, u_type, p_name] for r_id, (radius, u_type, p_name) in full_sorted_pool[:50]}
             
-            # PRINT ONLY 10: Keep the terminal dashboard clean
             for rank, (r_id, (radius, u_type, p_name)) in enumerate(full_sorted_pool[:10], 1):
                 p_name_display = p_name[:27] + "..." if len(p_name) > 30 else p_name
                 print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<30} | {f'{radius:,} Versions':<20} | {u_type}")
@@ -965,10 +884,7 @@ def main():
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate the dashboard layout by layer type.")
     parser.add_argument("--days", type=int, help="Relative lookback day window shortcut from today.")
     parser.add_argument("--from", metavar="YYYY-MM-DD", dest="from_date", help="Explicit chronological interval starting boundary.")
-    
-    # UPDATED: Accept multiple dates to trigger batch generation
     parser.add_argument("--to", nargs='+', metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary. Accepts multiple dates for batch generation.")
-    
     parser.add_argument("--debug", action="store_true", help="Surface raw, untagged noise.")
     parser.add_argument("--export", nargs='?', const=True, default=False, help="Auto-generate or name a static JSON snapshot payload.")
     parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots to output dynamic variance metrics.")
@@ -984,12 +900,13 @@ def main():
     else:
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         
-        # 1. LOAD THE MASSIVE DATABASE EXACTLY ONCE
         print(f"[*] Initializing Batch Execution Environment...")
         global_ghsa_lookup = build_ghsa_ecosystem_map()
         
-        # 2. Setup the target dates array (defaults to a single run if --to is omitted)
-        target_to_dates = args.to if args.to else [None]
+        if args.to:
+            target_to_dates = " ".join(args.to).replace(",", " ").split()
+        else:
+            target_to_dates = [None]
         
         for date_str in target_to_dates:
             if date_str:
@@ -1025,7 +942,7 @@ def main():
                 project_file_path=args.project_file, 
                 forced_format=args.project_format,
                 audit_mode=args.audit,
-                ghsa_lookup=global_ghsa_lookup  # Pass the pre-loaded DB map!
+                ghsa_lookup=global_ghsa_lookup
             )
 
 if __name__ == "__main__":
