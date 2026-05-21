@@ -113,7 +113,7 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
                 
                 # 4. Skip the root project definition (to avoid flagging the target's own SNAPSHOT status)
                 # The root project does not contain the standard tree structural branches (+-, \-, |)
-                if not re.search(r'[\\|\+\-]', clean_line) and line_num < 10:
+                if re.match(r'^[a-zA-Z0-9]', clean_line) and line_num < 10:
                     continue
 
                 # 5. Check for dynamic range tokens now that the noise is gone
@@ -443,14 +443,20 @@ def compare_snapshots(file_base: str, file_current: str):
     base_rank_map = {item[0]: rank for rank, item in enumerate(base_sorted, 1) if item[1] > 0}
     curr_rank_map = {item[0]: rank for rank, item in enumerate(curr_sorted, 1) if item[1] > 0}
 
-    print(f"\n{BOLD}I. ECOSYSTEM ACTIVITY & RANK SHIFTS:{RESET}")
-    print("-"*85)
-    print(f"{'Ecosystem / Registry':<28} | {'Base Vol':<10} | {'Current Vol':<12} | {'Volume Delta':<14} | {'Rank Shift'}")
-    print("-"*85)
+    print(f"\n{BOLD}I. ECOSYSTEM ACTIVITY & RANK SHIFTS (TOP 10):{RESET}")
+    print("-"*95)
+    print(f"{'Rank':<4} | {'Ecosystem / Registry':<26} | {'Base Vol':<10} | {'Current Vol':<12} | {'Volume Delta':<14} | {'Rank Shift'}")
+    print("-"*95)
 
-    all_ecosystems = sorted(list(set(sanitized_base_leaderboard.keys()).union(set(sanitized_curr_leaderboard.keys()))))
+    # Sort ecosystems by their NEW volume (descending), falling back to base volume
+    all_ecosystems = sorted(
+        list(set(sanitized_base_leaderboard.keys()).union(set(sanitized_curr_leaderboard.keys()))),
+        key=lambda x: (sanitized_curr_leaderboard.get(x, 0), sanitized_base_leaderboard.get(x, 0)),
+        reverse=True
+    )
     
-    for eco in all_ecosystems:
+    # Iterate through only the top 10, explicitly generating the 1-10 sequence
+    for current_rank, eco in enumerate(all_ecosystems[:10], start=1):
         v1 = sanitized_base_leaderboard.get(eco, 0)
         v2 = sanitized_curr_leaderboard.get(eco, 0)
         v_diff = v2 - v1
@@ -474,7 +480,7 @@ def compare_snapshots(file_base: str, file_current: str):
         elif r1 and not r2: r_str = f"{RED}Dropped Out of Active Rankings (Was {r1}){RESET}"
         else: r_str = "Inactive / Zero Activity Trace"
 
-        print(f"{eco:<28} | {v1:<10,} | {v2:<12,} | {v_str} | {r_str}")
+        print(f"#{current_rank:<3} | {eco:<26} | {v1:<10,} | {v2:<12,} | {v_str} | {r_str}")
 
     print(f"\n{BOLD}II. THREAT BEHAVIOR VARIANCE:{RESET}")
     print("-"*85)
