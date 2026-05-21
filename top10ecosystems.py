@@ -268,6 +268,11 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                     with z.open(file_name) as f:
                         try:
                             vuln_data = json.load(f)
+                            # Intercept and discard withdrawn advisories immediately
+                            if "withdrawn" in vuln_data:
+                                continue  # Drop it on the floor, move to next file
+                                
+                            vuln_id = vuln_data.get("id", "")
                             vuln_id = vuln_data.get("id", "")
                             ecosystems = set()
                             has_fixes = False
@@ -556,9 +561,9 @@ def compare_snapshots(file_base: str, file_current: str):
                 c_radius = item["c_radius"]
                 radius_diff = c_radius - b_radius
                 
-                # 1. Compute plaintext layout strings first to keep formatting deterministic
+                # 1. Clear up ambiguity: Always represent Impact Delta as a version delta
                 if radius_diff > 0:
-                    raw_diff_str = f"+{radius_diff:,} Vers" if b_radius > 0 else f"NEW (0->{c_radius})"
+                    raw_diff_str = f"+{radius_diff:,} Vers"
                 elif radius_diff < 0:
                     raw_diff_str = f"{radius_diff:,} Vers"
                 else:
