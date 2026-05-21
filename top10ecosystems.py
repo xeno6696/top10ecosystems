@@ -552,7 +552,7 @@ def compare_snapshots(file_base: str, file_current: str):
         
     if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
         print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
-        print("="*95)
+        print("="*125)
         
         for eco in sorted(list(current["outliers_leaderboards"].keys())):
             base_pool = base["outliers_leaderboards"].get(eco, {})
@@ -560,36 +560,94 @@ def compare_snapshots(file_base: str, file_current: str):
             
             if not base_pool and not curr_pool: continue
                 
-            print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts:{RESET}")
-            print(f"    {'Advisory ID':<20} | {'Base Impact':<16} | {'Current Impact':<16} | {'Impact Delta'}")
-            print(f"    {'-'*76}")
+            print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts (Top 10):{RESET}")
+            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<28} | {'Current Impact':<16} | {'Impact Delta':<18} | {'Rank Shift'}")
+            print(f"    {'-'*120}")
             
+            # Pre-calculate chronological ranks for the deep pools (up to 50 deep)
+            base_sorted = sorted(base_pool.items(), key=lambda x: x[1][0], reverse=True)
+            curr_sorted = sorted(curr_pool.items(), key=lambda x: x[1][0], reverse=True)
+            
+            base_ranks = {item[0]: rank for rank, item in enumerate(base_sorted, 1)}
+            curr_ranks = {item[0]: rank for rank, item in enumerate(curr_sorted, 1)}
+            
+            # Build the sortable current pool
+            sortable_pool = []
             all_advisories = set(base_pool.keys()).union(set(curr_pool.keys()))
-            has_shifts = False
             
             for r_id in all_advisories:
-                b_radius = base_pool.get(r_id, [0, ""])[0]
-                c_radius = curr_pool.get(r_id, [0, ""])[0]
+                b_data = base_pool.get(r_id, [0, "Vulnerability", "N/A"])
+                c_data = curr_pool.get(r_id, [0, "Vulnerability", "N/A"])
+                b_radius, c_radius = b_data[0], c_data[0]
+                p_name = c_data[2] if len(c_data) > 2 else b_data[2] if len(b_data) > 2 else "N/A"
+
+                sortable_pool.append({
+                    "id": r_id, "name": p_name, "b_radius": b_radius, "c_radius": c_radius
+                })
                 
+            # Lock the Top 10 view based strictly on CURRENT radius
+            sorted_advisories = sorted(sortable_pool, key=lambda x: x["c_radius"], reverse=True)
+            current_top_10 = sorted_advisories[:10]
+            
+            # Identify what fell out of the Top 10 (Was in base Top 10, NOT in current Top 10)
+            base_top_10_ids = {item[0] for item in base_sorted[:10]}
+            curr_top_10_ids = {item["id"] for item in current_top_10}
+            dropped_out_ids = base_top_10_ids - curr_top_10_ids
+            dropped_out = [item for item in sorted_advisories if item["id"] in dropped_out_ids]
+            
+            has_shifts = False
+            
+            for rank, item in enumerate(current_top_10, 1):
+                r_id = item["id"]
+                p_name = item["name"]
+                b_radius = item["b_radius"]
+                c_radius = item["c_radius"]
                 radius_diff = c_radius - b_radius
-                if radius_diff == 0: continue
                 
-                has_shifts = True
-                b_str = f"{b_radius:,} Vers" if b_radius > 0 else "N/A"
-                c_str = f"{c_radius:,} Vers" if c_radius > 0 else "N/A"
-                
+                # Impact Delta String
                 if radius_diff > 0:
-                    if b_radius == 0: diff_str = f"{GREEN}+ {radius_diff:,} Vers (NEW ARRIVAL){RESET}"
-                    else: diff_str = f"{GREEN}+ {radius_diff:,} Vers (EXPANDED){RESET}"
+                    diff_str = f"{GREEN}+{radius_diff:,} Vers{RESET}" if b_radius > 0 else f"{GREEN}NEW (0->{c_radius}){RESET}"
+                elif radius_diff < 0:
+                    diff_str = f"{RED}{radius_diff:,} Vers{RESET}"
                 else:
-                    if c_radius == 0: diff_str = f"{RED}- {abs(radius_diff):,} Vers (DROPPED OUT){RESET}"
-                    else: diff_str = f"{RED}- {abs(radius_diff):,} Vers (REDUCED){RESET}"
-                        
-                print(f"    {r_id:<20} | {b_str:<16} | {c_str:<16} | {diff_str}")
+                    diff_str = "No Change"
+                    
+                # Rank Shift String
+                b_rank = base_ranks.get(r_id)
+                c_rank = curr_ranks.get(r_id)
                 
-            if not has_shifts:
+                if b_rank and c_rank:
+                    r_diff = b_rank - c_rank
+                    if r_diff > 0: r_str = f"{GREEN}Up {r_diff} ({b_rank}->{c_rank}){RESET}"
+                    elif r_diff < 0: r_str = f"{RED}Down {abs(r_diff)} ({b_rank}->{c_rank}){RESET}"
+                    else: r_str = f"No Change"
+                    if r_diff != 0: has_shifts = True
+                elif not b_rank and c_rank:
+                    r_str = f"{GREEN}New to Radar{RESET}"
+                    has_shifts = True
+                else:
+                    r_str = "-"
+                    
+                if radius_diff != 0: has_shifts = True
+                    
+                c_str = f"{c_radius:,} Vers"
+                p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
+                
+                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<28} | {c_str:<16} | {diff_str:<27} | {r_str}")
+                
+            if dropped_out:
+                print(f"    {'-'*120}")
+                print(f"    {YELLOW}* The following advisories mitigated or dropped out of the {eco} Top 10:{RESET}")
+                for item in dropped_out:
+                    r_id = item['id']
+                    b_rank = base_ranks.get(r_id, "N/A")
+                    c_rank = curr_ranks.get(r_id, ">50") if item['c_radius'] > 0 else "Mitigated (0)"
+                    p_name_display = item["name"][:25] + "..." if len(item["name"]) > 28 else item["name"]
+                    print(f"      - {r_id:<20} | {p_name_display:<28} | Base Rank: #{b_rank:<3} -> Current Rank: {c_rank}")
+                
+            if not has_shifts and not dropped_out:
                 print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
-        print("="*95)
+        print("="*125 + "\n")
         
     print("="*85 + "\n")
 
@@ -757,7 +815,7 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
                     if meta_entry["blast_radius"] > 0:
                         pool = ecosystem_outlier_pools[eco_clean]
                         if current_id not in pool or meta_entry["blast_radius"] > pool[current_id][0]:
-                            pool[current_id] = (meta_entry["blast_radius"], update_type)
+                            pool[current_id] = (meta_entry["blast_radius"], update_type, meta_entry["package_name"])
 
                 final_leaderboard[eco_clean] += 1
 
@@ -848,14 +906,19 @@ def generate_enterprise_threat_leaderboard(start_date, end_date, target_layer: s
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
-            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Impact Blast Radius':<20} | {'Threat Profile'}")
-            print(f"    {'-'*79}")
+            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<30} | {'Impact Blast Radius':<20} | {'Threat Profile'}")
+            print(f"    {'-'*112}")
             
-            sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)[:10]
-            export_outlier_manifests[eco] = {r_id: [radius, u_type] for r_id, (radius, u_type) in sorted_pool}
+            # Sort the entire pool descending by blast radius
+            full_sorted_pool = sorted(pool.items(), key=lambda x: x[1][0], reverse=True)
             
-            for rank, (r_id, (radius, u_type)) in enumerate(sorted_pool, 1):
-                print(f"    #{rank:<3} | {r_id:<20} | {f'{radius:,} Versions':<20} | {u_type}")
+            # EXPORT UP TO 50: Give the JSON snapshot deep memory for next month's rank shifts
+            export_outlier_manifests[eco] = {r_id: [radius, u_type, p_name] for r_id, (radius, u_type, p_name) in full_sorted_pool[:50]}
+            
+            # PRINT ONLY 10: Keep the terminal dashboard clean
+            for rank, (r_id, (radius, u_type, p_name)) in enumerate(full_sorted_pool[:10], 1):
+                p_name_display = p_name[:27] + "..." if len(p_name) > 30 else p_name
+                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<30} | {f'{radius:,} Versions':<20} | {u_type}")
         else:
             export_outlier_manifests[eco] = {}
             print(f"\n[+] {eco}: No critical outliers tracked in this window.")
