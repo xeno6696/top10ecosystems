@@ -3,6 +3,7 @@ from unittest.mock import patch
 import sys
 import io
 import os
+import datetime
 
 # Import your command line application module
 import top10ecosystems
@@ -143,5 +144,170 @@ class TestThreatStreamScanner(unittest.TestCase):
         # Explicitly ensure our dynamic range guardrails weren't accidentally tripped by the raw CLI output
         self.assertNotIn("LINTING FAILURE", output)
         self.assertNotIn("Configuration Error", output)
+        
+    # -------------------------------------------------------------------------
+    # UNIT TESTS: CVSS EXTRACTOR ENGINE
+    # -------------------------------------------------------------------------
+    def test_extract_cvss_score_malware_override(self):
+        """Verifies that explicitly malicious payloads automatically max out at 10.0."""
+        vuln_data_mal_id = {"id": "MAL-2026-9999"}
+        vuln_data_mal_keyword = {"id": "GHSA-xxxx", "summary": "This is a malware package"}
+        
+        self.assertEqual(top10ecosystems.extract_cvss_score(vuln_data_mal_id), 10.0)
+        self.assertEqual(top10ecosystems.extract_cvss_score(vuln_data_mal_keyword), 10.0)
+
+    def test_extract_cvss_score_v3_parsing(self):
+        """Verifies CVSSv3 vectors are correctly parsed by the FIRST library."""
+        vuln_data = {
+            "id": "GHSA-xxxx",
+            "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
+        }
+        score = top10ecosystems.extract_cvss_score(vuln_data)
+        self.assertEqual(score, 9.8)
+
+    def test_extract_cvss_score_empty_severity(self):
+        """Ensures missing severity structures safely return 0.0 without crashing."""
+        vuln_data = {"id": "CVE-2026-0000", "severity": []}
+        score = top10ecosystems.extract_cvss_score(vuln_data)
+        self.assertEqual(score, 0.0)
+
+    # -------------------------------------------------------------------------
+    # UNIT TESTS: ARTIFACT LAYER ROUTING
+    # -------------------------------------------------------------------------
+    def test_get_artifact_layer_routing(self):
+        """Ensures ecosystems are deterministically bucketed into the correct architectural layers."""
+        self.assertEqual(top10ecosystems.get_artifact_layer("Debian"), "Container Base Image")
+        self.assertEqual(top10ecosystems.get_artifact_layer("npm"), "App Software Registry")
+        self.assertEqual(top10ecosystems.get_artifact_layer("GIT"), "Source Control (SCM)")
+        self.assertEqual(top10ecosystems.get_artifact_layer("UnknownFramework"), "Global Baseline Noise")
+
+    # -------------------------------------------------------------------------
+    # INTEGRATION TESTS: LEADERBOARD GENERATION ENGINE
+    # -------------------------------------------------------------------------
+    @patch('requests.get')
+    def test_generate_leaderboard_stream_aggregation(self, mock_requests_get):
+        """Mocks the live OSV CSV stream to verify the analytical engine aggregates ecosystem counts correctly."""
+        
+        # 1. Setup the mock response to simulate the CSV stream coming from Google Cloud Storage
+        mock_response = unittest.mock.MagicMock()
+        mock_response.status_code = 200
+        
+        # We use a date (April 20, 2026) that safely falls within the script's default 
+        # fallback window (April 18, 2026 to present) so it isn't filtered out.
+        mock_csv_lines = [
+            b"2026-04-20T10:00:00Z,GHSA-mock-1111:npm",
+            b"2026-04-20T11:00:00Z,CVE-mock-2222:Debian",
+            b"2026-04-20T11:30:00Z,CVE-mock-3333:Debian",
+            b"2026-04-20T12:00:00Z,npm/MAL-mock-4444.json" 
+        ]
+        mock_response.iter_lines.return_value = mock_csv_lines
+        mock_requests_get.return_value = mock_response
+
+        # 2. Trap the stdout to verify the printed output
+        captured_output = io.StringIO()
+        
+        # We supply an empty ghsa_lookup so the parser relies purely on the CSV string routing
+        with patch('sys.stdout', captured_output):
+            top10ecosystems.generate_enterprise_threat_leaderboard(
+                start_date=datetime.datetime(2026, 4, 18, tzinfo=datetime.timezone.utc),
+                end_date=datetime.datetime(2026, 4, 25, tzinfo=datetime.timezone.utc),
+                target_layer=None, 
+                debug_mode=False, 
+                ghsa_lookup={} 
+            )
+            
+        output = captured_output.getvalue()
+
+        # 3. Assert the stream was parsed and aggregated accurately
+        self.assertIn("VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD", output)
+        
+        # We fed it 2 Debian entries and 2 npm entries
+        self.assertRegex(output, r"Debian\s+\|\s+2")
+        self.assertRegex(output, r"npm\s+\|\s+2")
+        self.assertIn("Raw Entry Stream Items:    4", output)
+
+    @patch('requests.get')
+    def test_historical_golden_masters(self, mock_requests_get):
+        """
+        Iterates over verified historical export files in src/test/resources/ 
+        and ensures current engine logic produces identical analytical payloads.
+        Uses a frozen local CSV stream to prevent network drift.
+        """
+        import json
+        import os
+
+        # We point to a static, frozen copy of the OSV stream
+        frozen_csv_path = os.path.join("src", "test", "resources", "frozen_modified_id.csv")
+        
+        if not os.path.exists(frozen_csv_path):
+            self.skipTest(f"Frozen CSV stream not found at {frozen_csv_path}. Action: Download the current OSV modified_id.csv and place it here.")
+
+        # Configure the network mock to serve our frozen file instead of hitting the internet
+        mock_response = unittest.mock.MagicMock()
+        mock_response.status_code = 200
+        
+        def frozen_stream_generator():
+            with open(frozen_csv_path, 'rb') as f:
+                for line in f:
+                    yield line
+                    
+        mock_response.iter_lines.side_effect = lambda: frozen_stream_generator()
+        mock_requests_get.return_value = mock_response
+
+        # The locked files from your directory mapped to their date windows
+        golden_files = [
+            ("2026-04-18", "2026-05-18", "18-04-26_to_18-05-26_app.json"),
+            ("2026-04-18", "2026-05-19", "18-04-26_to_19-05-26_app.json"),
+            ("2026-04-18", "2026-05-20", "18-04-26_to_20-05-26_app.json"),
+            ("2026-04-18", "2026-05-21", "18-04-26_to_21-05-26_app.json"),
+        ]
+
+        print(f"\n[*] Validating engine parity against Golden Master files using frozen state...")
+
+        for start_str, end_str, filename in golden_files:
+            with self.subTest(file=filename):
+                golden_path = os.path.join("src", "test", "resources", filename)
+                
+                if not os.path.exists(golden_path):
+                    self.skipTest(f"Golden master {filename} not found in {golden_path}")
+
+                # Bypass the absolute path stripping by using the expected relative output path
+                temp_export_path = f"./output/temp_{filename}"
+                
+                mock_flags = [
+                    '--layer', 'app',
+                    '--from', start_str,
+                    '--to', end_str,
+                    '--export', temp_export_path
+                ]
+                
+                exit_code, _ = self.run_scanner_with_args(mock_flags)
+                self.assertEqual(exit_code, 0, f"Script execution failed for window {end_str}")
+                
+                with open(golden_path, 'r', encoding='utf-8') as f_golden:
+                    golden_data = json.load(f_golden)
+                    
+                with open(temp_export_path, 'r', encoding='utf-8') as f_temp:
+                    temp_data = json.load(f_temp)
+                    
+                self.assertDictEqual(
+                    temp_data.get("leaderboard", {}), 
+                    golden_data.get("leaderboard", {}),
+                    f"Leaderboard mismatch detected in {filename}"
+                )
+                self.assertDictEqual(
+                    temp_data.get("threat_profile", {}), 
+                    golden_data.get("threat_profile", {}),
+                    f"Threat profile mismatch detected in {filename}"
+                )
+                self.assertDictEqual(
+                    temp_data.get("malware_vectors", {}), 
+                    golden_data.get("malware_vectors", {}),
+                    f"Malware vector mismatch detected in {filename}"
+                )
+                
+                # Clean up the temporary file so we don't litter your output directory
+                if os.path.exists(temp_export_path):
+                    os.remove(temp_export_path)       
 if __name__ == '__main__':
     unittest.main()
