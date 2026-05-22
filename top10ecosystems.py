@@ -90,6 +90,7 @@ import argparse
 import re
 from collections import Counter
 import requests
+from cvss import CVSS2, CVSS3, CVSS4
 
 # ANSI Color Codes for Scannable Shell Output
 GREEN = "\033[92m"
@@ -97,6 +98,37 @@ RED = "\033[91m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
+def extract_cvss_score(vuln_data):
+    """
+    Parses OSV severity vectors using the official FIRST cvss library.
+    Enforces a default score of 10.0 for explicitly malicious packages.
+    """
+    vuln_id = vuln_data.get("id", "")
+    if vuln_id.startswith("MAL-") or "malware" in json.dumps(vuln_data).lower():
+        return 10.0
+        
+    severity_list = vuln_data.get("severity", [])
+    if not severity_list:
+        return 0.0
+        
+    for sev in severity_list:
+        sev_type = sev.get("type", "")
+        vector_str = sev.get("score", "")
+        if not vector_str:
+            continue
+            
+        try:
+            if sev_type == "CVSS_V3" or "CVSS:3" in vector_str:
+                return float(CVSS3(vector_str).base_score)
+            elif sev_type == "CVSS_V4" or "CVSS:4" in vector_str:
+                return float(CVSS4(vector_str).base_score)
+            elif sev_type == "CVSS_V2" or "RUSTSEC" in vuln_id:
+                return float(CVSS2(vector_str).base_score)
+        except Exception:
+            continue
+            
+    return 0.0
 
 # ==============================================================================
 # MODULAR PLUG-AND-PLAY DECOUPLED MANIFEST PARSERS (STRATEGY PATTERN)
@@ -109,24 +141,16 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
         with open(file_path, "r", encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 clean_line = line.strip()
-                
-                # 1. Strip standard Maven CLI log prefixes
                 clean_line = re.sub(r'^\[(?:INFO|WARNING|ERROR)\]\s*', '', clean_line)
                 
-                # 2. Skip empty lines, section dividers, and the build summary footer
                 if not clean_line or ":" not in clean_line or clean_line.startswith("-"):
                     continue
                 if any(x in clean_line for x in ["Total time:", "Finished at:", "BUILD SUCCESS", "BUILD FAILURE"]):
                     continue
-                    
-                # 3. Strip trailing modifiers that contain illegal characters
                 clean_line = clean_line.replace(" (optional)", "")
-                
-                # 4. Skip the root project definition (to avoid flagging the target's own SNAPSHOT status)
                 if re.match(r'^[a-zA-Z0-9]', clean_line) and line_num < 10:
                     continue
 
-                # 5. Check for dynamic range tokens now that the noise is gone
                 illegal_maven_indicators = ["[", "]", "(", ")", "LATEST", "RELEASE", "SNAPSHOT"]
                 if any(indicator in clean_line for indicator in illegal_maven_indicators):
                     print(f"\n{BOLD}{RED}[!] MAVEN TREE LINTING FAILURE (Line {line_num}):{RESET}")
@@ -138,13 +162,12 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
                 if len(parts) >= 4:
                     raw_group = parts[0]
                     group_id = re.sub(r'^[\\|\s\+\-]+', '', raw_group).strip()
-                    artifact_id = parts[1].strip()
-                    version_pin = parts[3].strip()
-                    
-                    package_key = f"{group_id}:{artifact_id}".lower().strip()
+                    package_key = f"{group_id}:{parts[1].strip()}".lower().strip()
                     if package_key:
-                        discovered_packages[package_key] = version_pin
+                        discovered_packages[package_key] = parts[3].strip()
                         
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"[-] Error executing strict Maven tree parser strategy: {e}")
         exit(1)
@@ -174,6 +197,8 @@ def parse_cyclonedx_sbom(file_path: str) -> dict:
                         exit(1)
                         
                     discovered_packages[full_name_clean] = version
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"[-] Error executing strict CycloneDX JSON strategy: {e}")
         exit(1)
@@ -199,13 +224,14 @@ def parse_pypi_requirements(file_path: str) -> dict:
                 
                 parts = clean_line.split("==")
                 package_name = parts[0].strip().lower().replace('_', '-')
-                
                 version_pin = "0.0.0"
                 if len(parts) > 1:
                     version_pin = parts[1].split(";")[0].split("#")[0].strip()
                         
                 if package_name:
                     discovered_packages[package_name] = version_pin
+    except SystemExit:
+        raise
     except Exception as e:
         print(f"[-] Error executing strict PyPI parser strategy: {e}")
         exit(1)
@@ -268,11 +294,9 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                     with z.open(file_name) as f:
                         try:
                             vuln_data = json.load(f)
-                            # Intercept and discard withdrawn advisories immediately
                             if "withdrawn" in vuln_data:
-                                continue  # Drop it on the floor, move to next file
+                                continue
                                 
-                            vuln_id = vuln_data.get("id", "")
                             vuln_id = vuln_data.get("id", "")
                             ecosystems = set()
                             has_fixes = False
@@ -342,7 +366,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                     "vector": malware_vector,
                                     "dwell_days": dwell_days,
                                     "blast_radius": max_versions_found,
-                                    "vulnerable_versions": vuln_versions 
+                                    "vulnerable_versions": vuln_versions,
+                                    "cvss_score": extract_cvss_score(vuln_data)
                                 }
                         except json.JSONDecodeError: continue 
         print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
@@ -389,7 +414,6 @@ def compare_snapshots(file_base: str, file_current: str):
         clean_name = "Android" if eco not in known_clean_keys else eco
         sanitized_curr_leaderboard[clean_name] += count
 
-    # Section I uses item[1] because volume counts are ints
     base_sorted = sorted(sanitized_base_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
     curr_sorted = sorted(sanitized_curr_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
 
@@ -486,7 +510,6 @@ def compare_snapshots(file_base: str, file_current: str):
             br_diff = c_mat["avg_blast_radius"] - br_base
             
             def color_metric_string(diff, base_val, suffix, width_size):
-                # Force signature to absolute zero if the value is functionally non-existent
                 if abs(diff) < 0.05:
                     diff = 0.0
                     
@@ -494,13 +517,9 @@ def compare_snapshots(file_base: str, file_current: str):
                 raw_str = f"{diff_str:<12} (from {base_val:.1f})"
                 padded_raw = f"{raw_str:<{width_size}}"
                 
-                # Lock absolute zero back to standard terminal gray/white canvas color
                 if diff == 0.0:
                     return padded_raw
                 
-                # AppSec Risk Polarity: 
-                # Contractions / Drops (< 0) are a security WIN -> GREEN
-                # Spikes / Growth (> 0) are an increased RISK -> RED
                 return f"{RED}{padded_raw}{RESET}" if diff > 0 else f"{GREEN}{padded_raw}{RESET}"
 
             dm_str = color_metric_string(dm_diff, dm_base, " Days", 26)
@@ -512,7 +531,7 @@ def compare_snapshots(file_base: str, file_current: str):
         
     if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
         print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
-        print("="*125)
+        print("="*145)
         
         for eco in sorted(list(current["outliers_leaderboards"].keys())):
             base_pool = base["outliers_leaderboards"].get(eco, {})
@@ -521,33 +540,44 @@ def compare_snapshots(file_base: str, file_current: str):
             if not base_pool and not curr_pool: continue
                 
             print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts (Top 10):{RESET}")
-            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<28} | {'Current Impact':<16} | {'Impact Delta':<18} | {'Rank Shift'}")
-            print(f"    {'-'*120}")
+            w_rank, w_id, w_name, w_cvss, w_radius = 5, 20, 28, 6, 22
+            print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Current Impact':<16} | {'Impact Delta':<18} | {'Rank Shift'}")
+            print(f"    {'-'*135}")
             
-            base_sorted_pool = sorted(base_pool.items(), key=lambda x: (x[1][0], x[0]), reverse=True)
-            curr_sorted_pool = sorted(curr_pool.items(), key=lambda x: (x[1][0], x[0]), reverse=True)
+            base_mapped = []
+            for r_id, item in base_pool.items():
+                score = item[3] if len(item) > 3 else 0.0
+                base_mapped.append({"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": score})
+                
+            curr_mapped = []
+            for r_id, item in curr_pool.items():
+                score = item[3] if len(item) > 3 else 0.0
+                curr_mapped.append({"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": score})
             
-            # Section V uses item[1][0] because radius is index 0 of the stored list
-            base_ranks = {item[0]: rank for rank, item in enumerate(base_sorted_pool, 1) if item[1][0] > 0}
-            curr_ranks = {item[0]: rank for rank, item in enumerate(curr_sorted_pool, 1) if item[1][0] > 0}
+            base_sorted_pool = sorted(base_mapped, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
+            curr_sorted_pool = sorted(curr_mapped, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
+            
+            base_ranks = {item["id"]: rank for rank, item in enumerate(base_sorted_pool, 1) if item["radius"] > 0}
+            curr_ranks = {item["id"]: rank for rank, item in enumerate(curr_sorted_pool, 1) if item["radius"] > 0}
             
             sortable_pool = []
             all_advisories = set(base_pool.keys()).union(set(curr_pool.keys()))
             
             for r_id in all_advisories:
-                b_data = base_pool.get(r_id, [0, "Vulnerability", "N/A"])
-                c_data = curr_pool.get(r_id, [0, "Vulnerability", "N/A"])
-                b_radius, c_radius = b_data[0], c_data[0]
-                p_name = c_data[2] if len(c_data) > 2 else b_data[2] if len(b_data) > 2 else "N/A"
+                b_item = next((x for x in base_sorted_pool if x["id"] == r_id), {"radius": 0, "name": "N/A", "cvss": 0.0})
+                c_item = next((x for x in curr_sorted_pool if x["id"] == r_id), {"radius": 0, "name": "N/A", "cvss": 0.0})
+                
+                p_name = c_item["name"] if c_item["name"] != "N/A" else b_item["name"]
+                c_score = c_item["cvss"] if c_item["cvss"] > 0.0 else b_item["cvss"]
 
                 sortable_pool.append({
-                    "id": r_id, "name": p_name, "b_radius": b_radius, "c_radius": c_radius
+                    "id": r_id, "name": p_name, "b_radius": b_item["radius"], "c_radius": c_item["radius"], "cvss": c_score
                 })
                 
-            sorted_advisories = sorted(sortable_pool, key=lambda x: (x["c_radius"], x["id"]), reverse=True)
+            sorted_advisories = sorted(sortable_pool, key=lambda x: (-x["cvss"], -x["c_radius"], x["id"]), reverse=True)
             current_top_10 = sorted_advisories[:10]
             
-            base_top_10_ids = {item[0] for item in base_sorted_pool[:10]}
+            base_top_10_ids = {item["id"] for item in base_sorted_pool[:10]}
             curr_top_10_ids = {item["id"] for item in current_top_10}
             dropped_out_ids = base_top_10_ids - curr_top_10_ids
             dropped_out = [item for item in sorted_advisories if item["id"] in dropped_out_ids]
@@ -561,13 +591,9 @@ def compare_snapshots(file_base: str, file_current: str):
                 c_radius = item["c_radius"]
                 radius_diff = c_radius - b_radius
                 
-                # 1. Clear up ambiguity: Always represent Impact Delta as a version delta
-                if radius_diff > 0:
-                    raw_diff_str = f"+{radius_diff:,} Vers"
-                elif radius_diff < 0:
-                    raw_diff_str = f"{radius_diff:,} Vers"
-                else:
-                    raw_diff_str = "No Change"
+                if radius_diff > 0: raw_diff_str = f"+{radius_diff:,} Vers"
+                elif radius_diff < 0: raw_diff_str = f"{radius_diff:,} Vers"
+                else: raw_diff_str = "No Change"
                     
                 b_rank = base_ranks.get(r_id)
                 c_rank = curr_ranks.get(r_id)
@@ -585,29 +611,22 @@ def compare_snapshots(file_base: str, file_current: str):
                 if radius_diff != 0 or (b_rank and c_rank and b_rank != c_rank) or (not b_rank and c_rank):
                     has_shifts = True
                     
-                # 2. Inject terminal color sequences ONLY after padding boundaries are assigned
-                if radius_diff > 0:
-                    diff_display = f"{GREEN}{raw_diff_str:<18}{RESET}"
-                elif radius_diff < 0:
-                    diff_display = f"{RED}{raw_diff_str:<18}{RESET}"
-                else:
-                    diff_display = f"{raw_diff_str:<18}"
+                if radius_diff > 0: diff_display = f"{GREEN}{raw_diff_str:<18}{RESET}"
+                elif radius_diff < 0: diff_display = f"{RED}{raw_diff_str:<18}{RESET}"
+                else: diff_display = f"{raw_diff_str:<18}"
                     
-                if "Up" in raw_r_str or "New" in raw_r_str:
-                    r_display = f"{GREEN}{raw_r_str}{RESET}"
-                elif "Down" in raw_r_str:
-                    r_display = f"{RED}{raw_r_str}{RESET}"
-                else:
-                    r_display = raw_r_str
+                if "Up" in raw_r_str or "New" in raw_r_str: r_display = f"{GREEN}{raw_r_str}{RESET}"
+                elif "Down" in raw_r_str: r_display = f"{RED}{raw_r_str}{RESET}"
+                else: r_display = raw_r_str
                     
                 c_str = f"{c_radius:,} Vers"
                 p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
+                cvss_display = f"{item['cvss']:.1f}"
                 
-                # Render the clean, perfectly tracking row alignment structure
-                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<28} | {c_str:<16} | {diff_display} | {r_display}")
+                print(f"    #{rank:<{w_rank-1}} | {r_id:<{w_id}} | {p_name_display:<{w_name}} | {cvss_display:<{w_cvss}} | {c_str:<16} | {diff_display} | {r_display}")
                 
             if dropped_out:
-                print(f"    {'-'*120}")
+                print(f"    {'-'*135}")
                 print(f"    {YELLOW}* The following advisories mitigated or dropped out of the {eco} Top 10:{RESET}")
                 for item in dropped_out:
                     r_id = item['id']
@@ -618,7 +637,7 @@ def compare_snapshots(file_base: str, file_current: str):
                 
             if not has_shifts and not dropped_out:
                 print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
-        print("="*125 + "\n")
+        print("="*145 + "\n")
         
     print("="*85 + "\n")
 
@@ -765,14 +784,12 @@ def generate_enterprise_threat_leaderboard(
 
                 if is_project_mode and current_id in ghsa_lookup:
                     m_name = ghsa_lookup[current_id]["package_name"].lower().strip()
-                    
                     if m_name in target_inventory_map:
                         if allowed_project_ecosystems and eco_clean not in allowed_project_ecosystems:
                             continue
                             
                         local_version = target_inventory_map[m_name]
                         vulnerable_versions_pool = ghsa_lookup[current_id].get("vulnerable_versions", set())
-                        
                         if local_version == "0.0.0" or local_version in vulnerable_versions_pool or not vulnerable_versions_pool:
                             project_intercept_alerts.append((current_id, ghsa_lookup[current_id]["package_name"], eco_clean, update_type))
 
@@ -788,7 +805,7 @@ def generate_enterprise_threat_leaderboard(
                     if meta_entry["blast_radius"] > 0:
                         pool = ecosystem_outlier_pools[eco_clean]
                         if current_id not in pool or meta_entry["blast_radius"] > pool[current_id][0]:
-                            pool[current_id] = (meta_entry["blast_radius"], update_type, meta_entry["package_name"])
+                            pool[current_id] = (meta_entry["blast_radius"], update_type, meta_entry["package_name"], meta_entry.get("cvss_score", 0.0))
 
                 final_leaderboard[eco_clean] += 1
 
@@ -825,7 +842,7 @@ def generate_enterprise_threat_leaderboard(
     print("="*85)
     print(f"{'Rank':<5} | {'Ecosystem/Registry':<32} | {'Activity Delta':<14} | {'Artifact Layer'}")
     print("-"*85)
-    for rank, (eco, count, layer) in enumerate(filtered_results[:10], 1):
+    for rank, (eco, count, layer) in enumerate(filtered_results[:10], start=1):
         print(f"#{rank:<3} | {eco:<32} | {count:<14,} | {layer}")
     print("="*85)
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
@@ -879,15 +896,24 @@ def generate_enterprise_threat_leaderboard(
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
-            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<30} | {'Impact Blast Radius':<20} | {'Threat Profile'}")
-            print(f"    {'-'*112}")
+            w_rank, w_id, w_name, w_cvss, w_radius = 5, 20, 28, 6, 22
+            print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
+            print(f"    {'-'*116}")
             
-            full_sorted_pool = sorted(pool.items(), key=lambda x: (x[1][0], x[0]), reverse=True)
-            export_outlier_manifests[eco] = {r_id: [radius, u_type, p_name] for r_id, (radius, u_type, p_name) in full_sorted_pool[:50]}
+            flat_pool = []
+            for r_id, item in pool.items():
+                flat_pool.append({
+                    "id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": item[3] if len(item) > 3 else 0.0
+                })
             
-            for rank, (r_id, (radius, u_type, p_name)) in enumerate(full_sorted_pool[:10], 1):
-                p_name_display = p_name[:27] + "..." if len(p_name) > 30 else p_name
-                print(f"    #{rank:<3} | {r_id:<20} | {p_name_display:<30} | {f'{radius:,} Versions':<20} | {u_type}")
+            full_sorted_pool = sorted(flat_pool, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
+            export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"]] for item in full_sorted_pool[:50]}
+            
+            for rank, item in enumerate(full_sorted_pool[:10], start=1):
+                p_name_display = item["name"][:25] + "..." if len(item["name"]) > 28 else item["name"]
+                c_score_str = f"{item['cvss']:.1f}"
+                r_radius_str = f"{item['radius']:,} Vers"
+                print(f"    #{rank:<{w_rank-1}} | {item['id']:<{w_id}} | {p_name_display:<{w_name}} | {c_score_str:<{w_cvss}} | {r_radius_str:<{w_radius}} | {item['type']}")
         else:
             export_outlier_manifests[eco] = {}
             print(f"\n[+] {eco}: No critical outliers tracked in this window.")
