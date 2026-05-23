@@ -91,6 +91,12 @@ import re
 from collections import Counter
 import requests
 from cvss import CVSS2, CVSS3, CVSS4
+import plotext as plt
+import matplotlib
+matplotlib.use('Agg') # CRITICAL for headless servers
+import matplotlib.pyplot as plt
+import io
+import base64
 
 # ANSI Color Codes for Scannable Shell Output
 GREEN = "\033[92m"
@@ -98,6 +104,159 @@ RED = "\033[91m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
+def generate_html_report(snapshots, output_html="briefing.html"):
+    print(f"[*] Generating Professional Briefing: {output_html}")
+    
+    # 1. Setup Data: Calculate volume-based top 5
+    all_ecos = set().union(*[s.get("leaderboard", {}).keys() for s in snapshots])
+    eco_totals = {eco: sum(s.get("leaderboard", {}).get(eco, 0) for s in snapshots) for eco in all_ecos}
+    top_5 = sorted(eco_totals, key=eco_totals.get, reverse=True)[:5]
+    
+    dates = [s["metadata"]["interval_to"] for s in snapshots]
+    
+    # 2. Generate Matplotlib Plot (The "What")
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for eco in top_5:
+        totals = [s.get("leaderboard", {}).get(eco, 0) for s in snapshots]
+        # Calculate deltas with a safety check for the first index
+        deltas = [totals[0]] + [totals[i] - totals[i-1] for i in range(1, len(totals))]
+        ax.plot(dates, deltas, label=eco, marker='o')
+        
+    ax.set_title("Threat Churn Velocity (Daily Deltas)")
+    ax.legend()
+    plt.xticks(rotation=45)
+    
+    # 3. Capture to Base64
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight')
+    img_data = base64.b64encode(buf.getvalue()).decode("utf-8")
+    
+    # 4. Generate HTML Table (The "Evidence")
+    table_rows = "".join([f"<tr><td>{d}</td><td>{s.get('leaderboard', {})}</td></tr>" for d, s in zip(dates, snapshots)])
+    
+    html = f"""
+    <html>
+    <head><style>body {{ font-family: sans-serif; }} table {{ border-collapse: collapse; width: 100%; }} td, th {{ border: 1px solid #ddd; padding: 8px; }}</style></head>
+    <body>
+        <h1>AppSec Threat Briefing</h1>
+        <img src='data:image/png;base64,{img_data}'/>
+        <h2>Daily Raw Data</h2>
+        <table><tr><th>Date</th><th>Registry Totals</th></tr>{table_rows}</table>
+    </body>
+    </html>
+    """
+    with open(output_html, "w") as f: f.write(html)
+    print(f"[+] Briefing generated successfully.")
+
+def generate_velocity_matrix(target_dir: str, output_path: str = "./output/velocity_matrix.csv"):
+    """
+    Ingests a directory of daily JSON snapshots and stitches them into a time-series CSV matrix.
+    """
+    if not os.path.isdir(target_dir):
+        print(f"[-] Velocity Engine Error: The directory '{target_dir}' does not exist.")
+        return
+
+    print("\n" + "="*85)
+    print(f"  {BOLD}THREAT VELOCITY AGGREGATION ENGINE{RESET}")
+    print("="*85)
+
+    snapshots = []
+    
+    # 1. Vacuum up the JSONs
+    for filename in os.listdir(target_dir):
+        if not filename.endswith(".json"): continue
+        
+        filepath = os.path.join(target_dir, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+                # We need a valid metadata block to anchor it in time
+                if "metadata" in data and "interval_to" in data["metadata"]:
+                    snapshots.append(data)
+        except Exception as e:
+            print(f"[-] Failed to read snapshot {filename}: {e}")
+
+    if not snapshots:
+        print("[-] No valid JSON snapshots found in the target directory.")
+        return
+
+    # 2. Sort chronologically by the end date
+    snapshots.sort(key=lambda x: x["metadata"]["interval_to"])
+    
+    # 3. Discover all unique tracking columns across the timeline
+    all_ecosystems = set()
+    all_threat_profiles = set()
+    
+    for s in snapshots:
+        all_ecosystems.update(s.get("leaderboard", {}).keys())
+        all_threat_profiles.update(s.get("threat_profile", {}).keys())
+
+    sorted_ecosystems = sorted(list(all_ecosystems))
+    sorted_profiles = sorted(list(all_threat_profiles))
+
+    # 4. Build the CSV Header
+    headers = ["Date_End", "Layer_Filter"] + sorted_ecosystems + sorted_profiles
+
+    # 5. Write the Matrix
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    try:
+        with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(headers)
+            
+            for s in snapshots:
+                row = [
+                    s["metadata"]["interval_to"],
+                    s["metadata"].get("target_layer_filter", "all")
+                ]
+                
+                # Append Ecosystem Counts
+                for eco in sorted_ecosystems:
+                    row.append(s.get("leaderboard", {}).get(eco, 0))
+                    
+                # Append Threat Profile Counts
+                for profile in sorted_profiles:
+                    row.append(s.get("threat_profile", {}).get(profile, 0))
+                    
+                writer.writerow(row)
+                
+        print(f"[+] Aggregation Complete: Processed {len(snapshots)} chronological snapshots.")
+        print(f"[+] Velocity Matrix Saved: {output_path}")
+        print("="*85 + "\n")
+        
+       # 4. Render Velocity Visualization (Multi-Series)
+        print("[*] Generating Multi-Series Terminal Velocity Plot...")
+        
+        # Identify the Top 10 by total volume
+        eco_totals = {eco: sum(s.get("leaderboard", {}).get(eco, 0) for s in snapshots) for eco in sorted_ecosystems}
+        top_10 = sorted(eco_totals, key=eco_totals.get, reverse=True)[:10]
+        
+        dates = [s["metadata"]["interval_to"] for s in snapshots]
+        
+        # Configure plotext
+        plt.clt()
+        plt.date_form(input_form="Y-m-d")
+        
+        for eco in top_10:
+            # Calculate DAILY DELTAS instead of totals
+            totals = [s.get("leaderboard", {}).get(eco, 0) for s in snapshots]
+            deltas = [totals[0]] + [totals[i] - totals[i-1] for i in range(1, len(totals))]
+            
+            # Only plot if there's activity
+            if any(d != 0 for d in deltas):
+                plt.plot(dates, deltas, label=f"{eco} (Delta)")
+                
+        plt.title("Threat Churn Velocity (Daily Deltas)")
+        plt.xlabel("Timeline")
+        plt.ylabel("Net New Mutations")
+        plt.plotsize(100, 25) 
+        plt.show()
+        
+    except Exception as e:
+        print(f"[-] Velocity Matrix export failed: {e}")
 
 def extract_cvss_score(vuln_data):
     """
@@ -945,7 +1104,28 @@ def generate_enterprise_threat_leaderboard(
             with open(export_path, 'w', encoding='utf-8') as ef: json.dump(export_payload, ef, indent=4)
             print(f"[Static Snapshot Saved]: {export_path}")
         except Exception as e: print(f"[-] Snapshot export write error: {e}")
-
+        
+def load_snapshots_from_dir(target_dir: str):
+    """Vacuum up all JSON snapshots from a directory and return them as a list."""
+    snapshots = []
+    if not os.path.isdir(target_dir):
+        print(f"[-] Directory '{target_dir}' does not exist.")
+        return snapshots
+        
+    for filename in os.listdir(target_dir):
+        if not filename.endswith(".json"): continue
+        filepath = os.path.join(target_dir, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if "metadata" in data and "interval_to" in data["metadata"]:
+                    snapshots.append(data)
+        except Exception as e:
+            print(f"[-] Failed to read {filename}: {e}")
+            
+    # Sort chronologically
+    snapshots.sort(key=lambda x: x["metadata"]["interval_to"])
+    return snapshots
 # ==============================================================================
 # ENTRY ENGINE EXECUTIVE PARSER ROUTINES
 # ==============================================================================
@@ -962,8 +1142,21 @@ def main():
     parser.add_argument("--project-file", metavar="PATH", help="Path to project dependency tree output or standard SBOM.")
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force a manual schema parser profile selection.")
     parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Ingest a local lockfile/requirements format directly to track active blast radius breaches.")
-    
+    parser.add_argument("--velocity", metavar="DIR_PATH", help="Terminal velocity plot.")
+    parser.add_argument("--html", metavar="OUTPUT_FILE", help="Generate a briefing-ready HTML report.")
     args = parser.parse_args()
+
+    
+    # ... inside main() logic:
+    if args.html:
+        # Re-use the same snapshot loading logic as --velocity
+        snapshots = load_snapshots_from_dir(args.velocity or "./src/test/resources/")
+        generate_html_report(snapshots, args.html)
+        return
+        
+    if args.velocity:
+        generate_velocity_matrix(target_dir=args.velocity)
+        return
     
     if args.compare:
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1])
