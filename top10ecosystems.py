@@ -95,6 +95,7 @@ import plotext as pltx
 import matplotlib
 matplotlib.use('Agg') # CRITICAL for headless servers
 import matplotlib.pyplot as mplplt
+import numpy as np
 import io
 import base64
 
@@ -667,7 +668,7 @@ def get_artifact_layer(eco_name):
     elif eco_name == "GIT": return "Source Control (SCM)"
     return "Global Baseline Noise"
 
-def compare_snapshots(file_base: str, file_current: str):
+def compare_snapshots(file_base: str, file_current: str, html_output: str = None):
     try:
         with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
             base = json.load(f1)
@@ -715,7 +716,9 @@ def compare_snapshots(file_base: str, file_current: str):
         reverse=True
     )
     
-    for current_rank, eco in enumerate(all_ecosystems[:10], start=1):
+    top_10_ecos = all_ecosystems[:10]
+    
+    for current_rank, eco in enumerate(top_10_ecos, start=1):
         v1 = sanitized_base_leaderboard.get(eco, 0)
         v2 = sanitized_curr_leaderboard.get(eco, 0)
         v_diff = v2 - v1
@@ -858,7 +861,7 @@ def compare_snapshots(file_base: str, file_current: str):
                     "id": r_id, "name": p_name, "b_radius": b_item["radius"], "c_radius": c_item["radius"], "cvss": c_score
                 })
                 
-            sorted_advisories = sorted(sortable_pool, key=lambda x: (-x["cvss"], -x["c_radius"], x["id"]), reverse=True)
+            sorted_advisories = sorted(sortable_pool, key=lambda x: (-x["cvss"], -x["c_radius"], x["id"]))
             current_top_10 = sorted_advisories[:10]
             
             base_top_10_ids = {item["id"] for item in base_sorted_pool[:10]}
@@ -922,7 +925,135 @@ def compare_snapshots(file_base: str, file_current: str):
             if not has_shifts and not dropped_out:
                 print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
         print("="*145 + "\n")
+
+    # -------------------------------------------------------------------------
+    # VI. ANSI TERMINAL COMPARISON GRAPH
+    # -------------------------------------------------------------------------
+    print(f"\n{BOLD}VI. RELATIVE CHURN VELOCITY (TERMINAL GRAPH){RESET}")
+    print("="*85)
+    print(f"{'Ecosystem / Registry':<26} | {'Delta':<10} | {'Visual Sparkline'}")
+    print("-" * 85)
+    
+    max_abs_diff = max([abs(sanitized_curr_leaderboard.get(e, 0) - sanitized_base_leaderboard.get(e, 0)) for e in top_10_ecos] + [1])
+    max_bar_width = 30
+    
+    for eco in top_10_ecos:
+        v1 = sanitized_base_leaderboard.get(eco, 0)
+        v2 = sanitized_curr_leaderboard.get(eco, 0)
+        v_diff = v2 - v1
         
+        bar_len = int((abs(v_diff) / max_abs_diff) * max_bar_width)
+        bar_char = "█" * max(bar_len, 1) if v_diff != 0 else "|"
+        
+        if v_diff > 0: color, sign = GREEN, "+"
+        elif v_diff < 0: color, sign = RED, ""
+        else: color, sign = RESET, " "
+            
+        delta_str = f"{sign}{v_diff:,}"
+        print(f"{eco:<26} | {delta_str:<10} | {color}{bar_char}{RESET}")
+
+    # -------------------------------------------------------------------------
+    # CONDITIONAL COMPARISON HTML EXPORT
+    # -------------------------------------------------------------------------
+    if html_output:
+        print(f"\n[*] Generating base64-embedded HTML comparison visualization...")
+        try:
+            # --- Chart 1: Volume Delta (Grouped Bar) ---
+            b_vals = [sanitized_base_leaderboard.get(e, 0) for e in top_10_ecos]
+            c_vals = [sanitized_curr_leaderboard.get(e, 0) for e in top_10_ecos]
+            x = np.arange(len(top_10_ecos))
+            width = 0.35
+            
+            fig1, ax1 = mplplt.subplots(figsize=(12, 5))
+            ax1.bar(x - width/2, b_vals, width, label='Base Snapshot', color='#6c757d')
+            ax1.bar(x + width/2, c_vals, width, label='Current Snapshot', color='#007bff')
+            
+            ax1.set_ylabel('Vulnerability Count')
+            ax1.set_title('Ecosystem Vulnerability Delta (Base vs. Current)')
+            ax1.set_xticks(x)
+            ax1.set_xticklabels(top_10_ecos, rotation=45, ha='right')
+            ax1.legend()
+            mplplt.tight_layout()
+            
+            buf1 = io.BytesIO()
+            fig1.savefig(buf1, format='png', bbox_inches='tight')
+            buf1.seek(0)
+            img_str_vol = base64.b64encode(buf1.read()).decode('utf-8')
+            mplplt.close(fig1)
+
+            # --- Chart 2: Profile Matrix (Diverging Bars) ---
+            dm_deltas, dc_deltas, br_deltas = [], [], []
+            for eco in top_10_ecos:
+                b_mat = base.get("profile_matrix", {}).get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+                c_mat = current.get("profile_matrix", {}).get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+                
+                dm_deltas.append(c_mat.get("avg_dwell_mal", 0.0) - b_mat.get("avg_dwell_mal", 0.0))
+                dc_deltas.append(c_mat.get("avg_dwell_cve", 0.0) - b_mat.get("avg_dwell_cve", 0.0))
+                br_deltas.append(c_mat.get("avg_blast_radius", 0.0) - b_mat.get("avg_blast_radius", 0.0))
+
+            fig2, axes = mplplt.subplots(1, 3, figsize=(15, 5), sharey=True)
+            y_pos = np.arange(len(top_10_ecos))
+
+            def plot_diverging(ax, data, title, xlabel):
+                colors = ['#dc3545' if val > 0 else '#28a745' for val in data]
+                ax.barh(y_pos, data, color=colors)
+                ax.set_title(title)
+                ax.set_xlabel(xlabel)
+                ax.axvline(0, color='black', linewidth=1)
+                ax.grid(axis='x', linestyle='--', alpha=0.7)
+
+            plot_diverging(axes[0], dm_deltas, "Malware Dwell Delta", "Days")
+            plot_diverging(axes[1], dc_deltas, "CVE Dwell Delta", "Days")
+            plot_diverging(axes[2], br_deltas, "Blast Radius Delta", "Versions")
+
+            axes[0].set_yticks(y_pos)
+            axes[0].set_yticklabels(top_10_ecos)
+            axes[0].invert_yaxis() 
+
+            mplplt.tight_layout()
+            buf2 = io.BytesIO()
+            fig2.savefig(buf2, format='png', bbox_inches='tight')
+            buf2.seek(0)
+            img_str_div = base64.b64encode(buf2.read()).decode('utf-8')
+            mplplt.close(fig2)
+            
+            # --- Assemble HTML ---
+            html_report = f"""<!DOCTYPE html>
+            <html>
+            <head>
+                <title>AppSec Threat Delta Report</title>
+                <style>
+                    body {{ background-color: #121212; color: #e0e0e0; font-family: sans-serif; padding: 40px; }}
+                    .container {{ max-width: 1400px; margin: auto; background: #1e1e1e; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
+                    h1 {{ color: #ffffff; border-bottom: 1px solid #333; padding-bottom: 10px; }}
+                    h2 {{ color: #bbbbbb; margin-top: 30px; font-weight: 300; }}
+                    .chart {{ text-align: center; margin-top: 20px; background: #ffffff; padding: 15px; border-radius: 4px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>AppSec Threat Delta Report</h1>
+                    <p><strong>Base Snapshot:</strong> {file_base} <br><strong>Current Snapshot:</strong> {file_current}</p>
+                    
+                    <h2>I. Volume Shifts</h2>
+                    <div class="chart">
+                        <img src="data:image/png;base64,{img_str_vol}" alt="Volume Chart" style="max-width: 100%;" />
+                    </div>
+
+                    <h2>II. Spatial Dwell & Blast Radius Variance</h2>
+                    <div class="chart">
+                        <img src="data:image/png;base64,{img_str_div}" alt="Diverging Chart" style="max-width: 100%;" />
+                    </div>
+                </div>
+            </body>
+            </html>"""
+            
+            with open(html_output, "w", encoding="utf-8") as f: f.write(html_report)
+            print(f"[+] HTML Comparison Report generated: {html_output}")
+            
+        except Exception as e:
+            print(f"\n{RED}[!] Failed to generate HTML output: {e}{RESET}")
+
     print("="*85 + "\n")
 
 # ==============================================================================
@@ -1184,12 +1315,7 @@ def generate_enterprise_threat_leaderboard(
             print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-'*116}")
             
-            flat_pool = []
-            for r_id, item in pool.items():
-                flat_pool.append({
-                    "id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": item[3] if len(item) > 3 else 0.0
-                })
-            
+            flat_pool = [{"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": item[3] if len(item) > 3 else 0.0} for r_id, item in pool.items()]
             full_sorted_pool = sorted(flat_pool, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
             export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"]] for item in full_sorted_pool[:50]}
             
@@ -1197,6 +1323,7 @@ def generate_enterprise_threat_leaderboard(
                 p_name_display = item["name"][:25] + "..." if len(item["name"]) > 28 else item["name"]
                 c_score_str = f"{item['cvss']:.1f}"
                 r_radius_str = f"{item['radius']:,} Vers"
+                
                 print(f"    #{rank:<{w_rank-1}} | {item['id']:<{w_id}} | {p_name_display:<{w_name}} | {c_score_str:<{w_cvss}} | {r_radius_str:<{w_radius}} | {item['type']}")
         else:
             export_outlier_manifests[eco] = {}
@@ -1234,24 +1361,15 @@ def generate_enterprise_threat_leaderboard(
         except Exception as e: print(f"[-] Snapshot export write error: {e}")
         
 def load_snapshots_from_dir(target_dir: str):
-    """Vacuum up all JSON snapshots from a directory and return them as a list."""
     snapshots = []
-    if not os.path.isdir(target_dir):
-        print(f"[-] Directory '{target_dir}' does not exist.")
-        return snapshots
-        
+    if not os.path.isdir(target_dir): return snapshots
     for filename in os.listdir(target_dir):
         if not filename.endswith(".json"): continue
-        filepath = os.path.join(target_dir, filename)
         try:
-            with open(filepath, 'r', encoding='utf-8') as f:
+            with open(os.path.join(target_dir, filename), 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                if "metadata" in data and "interval_to" in data["metadata"]:
-                    snapshots.append(data)
-        except Exception as e:
-            print(f"[-] Failed to read {filename}: {e}")
-            
-    # Sort chronologically
+                if "metadata" in data and "interval_to" in data["metadata"]: snapshots.append(data)
+        except Exception: pass
     snapshots.sort(key=lambda x: x["metadata"]["interval_to"])
     return snapshots
 
@@ -1366,34 +1484,35 @@ def main():
         run_velocity_update(args)
         return
 
-    if args.html:
+    if args.compare:
+        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.html)
+        return
+
+    if args.html and not args.velocity and not args.compare:
         snapshots = load_snapshots_from_dir("./output")
         generate_html_report(snapshots, args.html)
         return
 
-    if args.compare:
-        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1])
-    else:
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        
-        print(f"[*] Initializing Batch Execution Environment...")
-        global_ghsa_lookup = build_ghsa_ecosystem_map()
-        
-        for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
-            print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    
+    print(f"[*] Initializing Batch Execution Environment...")
+    global_ghsa_lookup = build_ghsa_ecosystem_map()
+    
+    for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
+        print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
 
-            generate_enterprise_threat_leaderboard(
-                start_date=calculated_start, 
-                end_date=calculated_end,
-                target_layer=args.layer, 
-                debug_mode=args.debug,
-                custom_export_arg=args.export, 
-                run_speedway=args.speedway,
-                project_file_path=args.project_file, 
-                forced_format=args.project_format,
-                audit_mode=args.audit,
-                ghsa_lookup=global_ghsa_lookup
-            )
+        generate_enterprise_threat_leaderboard(
+            start_date=calculated_start, 
+            end_date=calculated_end,
+            target_layer=args.layer, 
+            debug_mode=args.debug,
+            custom_export_arg=args.export, 
+            run_speedway=args.speedway,
+            project_file_path=args.project_file, 
+            forced_format=args.project_format,
+            audit_mode=args.audit,
+            ghsa_lookup=global_ghsa_lookup
+        )
 
 if __name__ == "__main__":
     main()
