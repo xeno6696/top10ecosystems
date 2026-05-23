@@ -91,10 +91,10 @@ import re
 from collections import Counter
 import requests
 from cvss import CVSS2, CVSS3, CVSS4
-import plotext as plt
+import plotext as pltx
 import matplotlib
 matplotlib.use('Agg') # CRITICAL for headless servers
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as mplplt
 import io
 import base64
 
@@ -106,50 +106,169 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 
 def generate_html_report(snapshots, output_html="briefing.html"):
+    """
+    Generate a briefing-ready HTML report from chronological JSON snapshots.
+
+    The snapshots are cumulative windows. For that reason the report renders two
+    separate registry charts:
+      1. cumulative totals by snapshot date
+      2. true day-over-day / snapshot-over-snapshot deltas
+
+    It also renders threat-profile deltas so the briefing shows whether the
+    movement is malware, vulnerability update churn, or metadata adjustment churn.
+    """
     print(f"[*] Generating Professional Briefing: {output_html}")
-    
-    # 1. Setup Data: Calculate volume-based top 5
-    all_ecos = set().union(*[s.get("leaderboard", {}).keys() for s in snapshots])
-    eco_totals = {eco: sum(s.get("leaderboard", {}).get(eco, 0) for s in snapshots) for eco in all_ecos}
-    top_5 = sorted(eco_totals, key=eco_totals.get, reverse=True)[:5]
-    
+
+    if not snapshots:
+        print("[-] No snapshots supplied to HTML report generator.")
+        return
+
+    snapshots = sorted(snapshots, key=lambda x: x["metadata"]["interval_to"])
     dates = [s["metadata"]["interval_to"] for s in snapshots]
-    
-    # 2. Generate Matplotlib Plot (The "What")
-    fig, ax = plt.subplots(figsize=(10, 6))
-    for eco in top_5:
-        totals = [s.get("leaderboard", {}).get(eco, 0) for s in snapshots]
-        # Calculate deltas with a safety check for the first index
-        deltas = [totals[0]] + [totals[i] - totals[i-1] for i in range(1, len(totals))]
-        ax.plot(dates, deltas, label=eco, marker='o')
-        
-    ax.set_title("Threat Churn Velocity (Daily Deltas)")
-    ax.legend()
-    plt.xticks(rotation=45)
-    
-    # 3. Capture to Base64
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight')
-    img_data = base64.b64encode(buf.getvalue()).decode("utf-8")
-    
-    # 4. Generate HTML Table (The "Evidence")
-    table_rows = "".join([f"<tr><td>{d}</td><td>{s.get('leaderboard', {})}</td></tr>" for d, s in zip(dates, snapshots)])
-    
+
+    def fig_to_base64(fig):
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        encoded = base64.b64encode(buf.getvalue()).decode("utf-8")
+        mplplt.close(fig)
+        return encoded
+
+    def choose_top_keys(section_name, limit=5):
+        all_keys = set().union(*[s.get(section_name, {}).keys() for s in snapshots])
+        key_totals = {
+            key: sum(s.get(section_name, {}).get(key, 0) for s in snapshots)
+            for key in all_keys
+        }
+        return sorted(key_totals, key=key_totals.get, reverse=True)[:limit]
+
+    def values_for(section_name, key):
+        return [s.get(section_name, {}).get(key, 0) for s in snapshots]
+
+    # ------------------------------------------------------------------
+    # Chart 1: Cumulative / snapshot totals. This is the "how big is the
+    # stream window now?" chart.
+    # ------------------------------------------------------------------
+    top_ecosystems = choose_top_keys("leaderboard", 5)
+    fig_totals, ax_totals = mplplt.subplots(figsize=(11, 6))
+    for eco in top_ecosystems:
+        ax_totals.plot(dates, values_for("leaderboard", eco), label=eco, marker="o")
+
+    ax_totals.set_title("Registry Churn Totals by Snapshot Date")
+    ax_totals.set_xlabel("Snapshot End Date")
+    ax_totals.set_ylabel("Cumulative Mutations in Window")
+    ax_totals.legend()
+    ax_totals.grid(True, alpha=0.25)
+    mplplt.setp(ax_totals.get_xticklabels(), rotation=45, ha="right")
+    totals_img_data = fig_to_base64(fig_totals)
+
+    # ------------------------------------------------------------------
+    # Chart 2: True delta velocity. The first snapshot has no previous
+    # snapshot, so we intentionally start this chart at the second date.
+    # ------------------------------------------------------------------
+    fig_delta, ax_delta = mplplt.subplots(figsize=(11, 6))
+    if len(snapshots) > 1:
+        delta_dates = dates[1:]
+        for eco in top_ecosystems:
+            totals = values_for("leaderboard", eco)
+            deltas = [totals[i] - totals[i - 1] for i in range(1, len(totals))]
+            ax_delta.plot(delta_dates, deltas, label=eco, marker="o")
+        ax_delta.set_xlabel("Snapshot End Date")
+        ax_delta.set_ylabel("Net New Mutations Since Previous Snapshot")
+    else:
+        ax_delta.text(0.5, 0.5, "Need at least two snapshots for velocity deltas", ha="center", va="center")
+        ax_delta.set_axis_off()
+
+    ax_delta.set_title("Threat Churn Velocity: Registry Deltas")
+    ax_delta.legend() if len(snapshots) > 1 else None
+    ax_delta.grid(True, alpha=0.25) if len(snapshots) > 1 else None
+    mplplt.setp(ax_delta.get_xticklabels(), rotation=45, ha="right")
+    delta_img_data = fig_to_base64(fig_delta)
+
+    # ------------------------------------------------------------------
+    # Chart 3: Threat behavior deltas. This answers "what kind of churn
+    # changed?" rather than only "which registry moved?"
+    # ------------------------------------------------------------------
+    top_profiles = choose_top_keys("threat_profile", 5)
+    fig_profile, ax_profile = mplplt.subplots(figsize=(11, 6))
+    if len(snapshots) > 1 and top_profiles:
+        profile_delta_dates = dates[1:]
+        for profile in top_profiles:
+            totals = values_for("threat_profile", profile)
+            deltas = [totals[i] - totals[i - 1] for i in range(1, len(totals))]
+            ax_profile.plot(profile_delta_dates, deltas, label=profile, marker="o")
+        ax_profile.set_xlabel("Snapshot End Date")
+        ax_profile.set_ylabel("Net New Signals Since Previous Snapshot")
+    else:
+        ax_profile.text(0.5, 0.5, "Need at least two snapshots with threat profile data", ha="center", va="center")
+        ax_profile.set_axis_off()
+
+    ax_profile.set_title("Threat Behavior Velocity: Profile Deltas")
+    ax_profile.legend() if len(snapshots) > 1 and top_profiles else None
+    ax_profile.grid(True, alpha=0.25) if len(snapshots) > 1 and top_profiles else None
+    mplplt.setp(ax_profile.get_xticklabels(), rotation=45, ha="right")
+    profile_img_data = fig_to_base64(fig_profile)
+
+    # ------------------------------------------------------------------
+    # Evidence table. Keep the raw dict, but make the page easier to scan.
+    # ------------------------------------------------------------------
+    table_rows = "".join([
+        f"<tr><td>{d}</td><td><code>{s.get('leaderboard', {})}</code></td><td><code>{s.get('threat_profile', {})}</code></td></tr>"
+        for d, s in zip(dates, snapshots)
+    ])
+
     html = f"""
     <html>
-    <head><style>body {{ font-family: sans-serif; }} table {{ border-collapse: collapse; width: 100%; }} td, th {{ border: 1px solid #ddd; padding: 8px; }}</style></head>
+    <head>
+        <meta charset='utf-8'/>
+        <title>AppSec Threat Briefing</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 24px; line-height: 1.35; }}
+            h1 {{ margin-bottom: 0.2rem; }}
+            .subtitle {{ color: #555; margin-top: 0; }}
+            .chart {{ margin: 28px 0 36px 0; }}
+            .chart img {{ max-width: 100%; border: 1px solid #ddd; }}
+            table {{ border-collapse: collapse; width: 100%; font-size: 0.92rem; }}
+            td, th {{ border: 1px solid #ddd; padding: 8px; vertical-align: top; }}
+            th {{ background: #f5f5f5; }}
+            code {{ white-space: pre-wrap; }}
+        </style>
+    </head>
     <body>
         <h1>AppSec Threat Briefing</h1>
-        <img src='data:image/png;base64,{img_data}'/>
+        <p class='subtitle'>Generated from {len(snapshots)} chronological OSV snapshot(s).</p>
+
+        <div class='chart'>
+            <h2>1. Registry Churn Totals</h2>
+            <p>Cumulative mutation volume inside each snapshot window.</p>
+            <img src='data:image/png;base64,{totals_img_data}'/>
+        </div>
+
+        <div class='chart'>
+            <h2>2. Registry Churn Velocity</h2>
+            <p>Snapshot-over-snapshot deltas. The first snapshot is excluded because it has no prior baseline.</p>
+            <img src='data:image/png;base64,{delta_img_data}'/>
+        </div>
+
+        <div class='chart'>
+            <h2>3. Threat Behavior Velocity</h2>
+            <p>Snapshot-over-snapshot movement by threat classification.</p>
+            <img src='data:image/png;base64,{profile_img_data}'/>
+        </div>
+
         <h2>Daily Raw Data</h2>
-        <table><tr><th>Date</th><th>Registry Totals</th></tr>{table_rows}</table>
+        <table>
+            <tr><th>Date</th><th>Registry Totals</th><th>Threat Profile Totals</th></tr>
+            {table_rows}
+        </table>
     </body>
     </html>
     """
-    with open(output_html, "w") as f: f.write(html)
+
+    with open(output_html, "w", encoding="utf-8") as f:
+        f.write(html)
     print(f"[+] Briefing generated successfully.")
 
-def generate_velocity_matrix(target_dir: str, output_path: str = "./output/velocity_matrix.csv"):
+def generate_velocity_matrix(target_dir: str, output_path: str = "./output/velocity_matrix.csv", render_terminal_plot: bool = False):
     """
     Ingests a directory of daily JSON snapshots and stitches them into a time-series CSV matrix.
     """
@@ -227,7 +346,12 @@ def generate_velocity_matrix(target_dir: str, output_path: str = "./output/veloc
         print(f"[+] Velocity Matrix Saved: {output_path}")
         print("="*85 + "\n")
         
-       # 4. Render Velocity Visualization (Multi-Series)
+        # Terminal plotting is intentionally opt-in. plotext.clt() clears the terminal,
+        # which hides the dashboard output that was printed immediately before this step.
+        if not render_terminal_plot:
+            return
+        
+        # 6. Render Velocity Visualization (Multi-Series)
         print("[*] Generating Multi-Series Terminal Velocity Plot...")
         
         # Identify the Top 10 by total volume
@@ -236,9 +360,10 @@ def generate_velocity_matrix(target_dir: str, output_path: str = "./output/veloc
         
         dates = [s["metadata"]["interval_to"] for s in snapshots]
         
-        # Configure plotext
-        plt.clt()
-        plt.date_form(input_form="Y-m-d")
+        # Configure plotext. Do not call pltx.clt() here; it clears the entire terminal.
+        # clear_data() resets plot state without erasing prior program output.
+        pltx.clear_data()
+        pltx.date_form(input_form="Y-m-d")
         
         for eco in top_10:
             # Calculate DAILY DELTAS instead of totals
@@ -247,13 +372,13 @@ def generate_velocity_matrix(target_dir: str, output_path: str = "./output/veloc
             
             # Only plot if there's activity
             if any(d != 0 for d in deltas):
-                plt.plot(dates, deltas, label=f"{eco} (Delta)")
+                pltx.plot(dates, deltas, label=f"{eco} (Delta)")
                 
-        plt.title("Threat Churn Velocity (Daily Deltas)")
-        plt.xlabel("Timeline")
-        plt.ylabel("Net New Mutations")
-        plt.plotsize(100, 25) 
-        plt.show()
+        pltx.title("Threat Churn Velocity (Daily Deltas)")
+        pltx.xlabel("Timeline")
+        pltx.ylabel("Net New Mutations")
+        pltx.plotsize(100, 25) 
+        pltx.show()
         
     except Exception as e:
         print(f"[-] Velocity Matrix export failed: {e}")
@@ -1083,14 +1208,17 @@ def generate_enterprise_threat_leaderboard(
         os.makedirs(output_dir, exist_ok=True)
         
         if isinstance(custom_export_arg, str):
-            if not custom_export_arg.startswith(output_dir):
-                export_filename = os.path.basename(custom_export_arg)
-                export_path = os.path.join(output_dir, export_filename)
-            else:
+            # Respect explicit paths, including custom velocity snapshot directories.
+            # Bare filenames still land in ./output for backwards compatibility.
+            if os.path.dirname(custom_export_arg):
                 export_path = custom_export_arg
+            else:
+                export_path = os.path.join(output_dir, os.path.basename(custom_export_arg))
         else:
             filename = f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{target_layer if target_layer else 'all'}.json"
             export_path = os.path.join(output_dir, filename)
+
+        os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
         
         export_payload = {
             "metadata": {"generated_at": now.isoformat(), "interval_from": start_date.date().isoformat(), "interval_to": end_date.date().isoformat(), "target_layer_filter": target_layer if target_layer else "all"},
@@ -1126,6 +1254,92 @@ def load_snapshots_from_dir(target_dir: str):
     # Sort chronologically
     snapshots.sort(key=lambda x: x["metadata"]["interval_to"])
     return snapshots
+
+def calculate_report_windows(args, now_utc):
+    """Resolve CLI date flags into one or more report windows without changing legacy defaults."""
+    if args.to:
+        target_to_dates = " ".join(args.to).replace(",", " ").split()
+    else:
+        target_to_dates = [None]
+
+    windows = []
+    for date_str in target_to_dates:
+        if date_str:
+            parsed_date = None
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                try:
+                    parsed_date = datetime.datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if not parsed_date:
+                print(f"[-] Configuration Error: Unable to parse date '{date_str}'. Skipping.")
+                continue
+            calculated_end = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+        else:
+            calculated_end = now_utc
+
+        if args.days:
+            calculated_start = calculated_end - datetime.timedelta(days=args.days)
+        elif args.from_date:
+            calculated_start = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
+        else:
+            calculated_start = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
+
+        windows.append((calculated_start, calculated_end))
+
+    return windows
+
+
+def build_snapshot_filename(start_date, end_date, target_layer=None):
+    """Match the existing auto-export filename convention for daily snapshot reports."""
+    layer_label = target_layer if target_layer else "all"
+    return f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{layer_label}.json"
+
+
+def run_velocity_update(args):
+    """
+    Append a freshly generated report snapshot into the velocity time series,
+    then refresh the velocity CSV/terminal plot and the HTML briefing.
+    """
+    snapshot_dir = args.velocity or "./output"
+    os.makedirs(snapshot_dir, exist_ok=True)
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    windows = calculate_report_windows(args, now_utc)
+
+    print(f"[*] Initializing Velocity Update Pipeline...")
+    print(f"[*] Snapshot Directory: {snapshot_dir}")
+    global_ghsa_lookup = build_ghsa_ecosystem_map()
+
+    for calculated_start, calculated_end in windows:
+        snapshot_name = build_snapshot_filename(calculated_start, calculated_end, args.layer)
+        snapshot_path = os.path.join(snapshot_dir, snapshot_name)
+
+        print(f"\n[*] Appending Velocity Snapshot: {snapshot_path}")
+        generate_enterprise_threat_leaderboard(
+            start_date=calculated_start,
+            end_date=calculated_end,
+            target_layer=args.layer,
+            debug_mode=args.debug,
+            custom_export_arg=snapshot_path,
+            run_speedway=args.speedway,
+            project_file_path=args.project_file,
+            forced_format=args.project_format,
+            audit_mode=args.audit,
+            ghsa_lookup=global_ghsa_lookup
+        )
+
+    matrix_path = os.path.join(snapshot_dir, "velocity_matrix.csv")
+    generate_velocity_matrix(target_dir=snapshot_dir, output_path=matrix_path, render_terminal_plot=args.terminal_plot)
+
+    html_path = args.html if args.html else os.path.join(snapshot_dir, "briefing.html")
+    snapshots = load_snapshots_from_dir(snapshot_dir)
+    if snapshots:
+        generate_html_report(snapshots, html_path)
+    else:
+        print("[-] HTML report skipped: no valid snapshots available after velocity update.")
+
 # ==============================================================================
 # ENTRY ENGINE EXECUTIVE PARSER ROUTINES
 # ==============================================================================
@@ -1142,22 +1356,21 @@ def main():
     parser.add_argument("--project-file", metavar="PATH", help="Path to project dependency tree output or standard SBOM.")
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force a manual schema parser profile selection.")
     parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Ingest a local lockfile/requirements format directly to track active blast radius breaches.")
-    parser.add_argument("--velocity", metavar="DIR_PATH", help="Terminal velocity plot.")
-    parser.add_argument("--html", metavar="OUTPUT_FILE", help="Generate a briefing-ready HTML report.")
+    parser.add_argument("--velocity", nargs="?", const="./output", metavar="DIR_PATH", help="Append a new snapshot to DIR_PATH, then refresh the velocity CSV, terminal plot, and HTML briefing. Defaults to ./output when no path is supplied.")
+    parser.add_argument("--html", metavar="OUTPUT_FILE", help="Generate or override the briefing-ready HTML report path. With --velocity, defaults to DIR_PATH/briefing.html.")
+    parser.add_argument("--terminal-plot", action="store_true", help="With --velocity, also render the plotext terminal chart. Off by default because plotext can obscure prior terminal output.")
     args = parser.parse_args()
 
-    
-    # ... inside main() logic:
+
+    if args.velocity:
+        run_velocity_update(args)
+        return
+
     if args.html:
-        # Re-use the same snapshot loading logic as --velocity
-        snapshots = load_snapshots_from_dir(args.velocity or "./src/test/resources/")
+        snapshots = load_snapshots_from_dir("./output")
         generate_html_report(snapshots, args.html)
         return
-        
-    if args.velocity:
-        generate_velocity_matrix(target_dir=args.velocity)
-        return
-    
+
     if args.compare:
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1])
     else:
@@ -1166,33 +1379,7 @@ def main():
         print(f"[*] Initializing Batch Execution Environment...")
         global_ghsa_lookup = build_ghsa_ecosystem_map()
         
-        if args.to:
-            target_to_dates = " ".join(args.to).replace(",", " ").split()
-        else:
-            target_to_dates = [None]
-        
-        for date_str in target_to_dates:
-            if date_str:
-                parsed_date = None
-                for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
-                    try:
-                        parsed_date = datetime.datetime.strptime(date_str, fmt).date()
-                        break
-                    except ValueError: continue
-                if not parsed_date:
-                    print(f"[-] Configuration Error: Unable to parse date '{date_str}'. Skipping.")
-                    continue
-                calculated_end = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
-            else:
-                calculated_end = now_utc
-
-            if args.days:
-                calculated_start = calculated_end - datetime.timedelta(days=args.days)
-            elif args.from_date:
-                calculated_start = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
-            else:
-                calculated_start = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
-                
+        for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
             print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
 
             generate_enterprise_threat_leaderboard(
