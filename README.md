@@ -52,5 +52,5 @@ Install dependencies:
 
 ```bash
 
-pip install requests
+pip -r install requirements.txt
 
