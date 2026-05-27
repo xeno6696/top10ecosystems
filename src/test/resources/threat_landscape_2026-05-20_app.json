@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-27T15:33:12.242252+00:00",
+        "generated_at": "2026-05-27T21:22:58.290084+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
         "target_layer_filter": "app"
@@ -29,26 +29,26 @@
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 10,
-        "Data Exfiltration / Credential Stealer": 918,
+        "Data Exfiltration / Credential Stealer": 917,
         "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 804
+        "Unclassified Malicious Payload": 805
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 7.693977591036415,
-            "avg_dwell_cve": 57.01186943620178,
-            "avg_blast_radius": 1.9043767840152237,
+            "avg_dwell_mal": 7.728932584269663,
+            "avg_dwell_cve": 57.066765578635014,
+            "avg_blast_radius": 1.9032411820781696,
             "avg_backlog_age": 385.2
         },
         "PyPI": {
             "avg_dwell_mal": 28.202797202797203,
-            "avg_dwell_cve": 291.7104166666667,
+            "avg_dwell_cve": 291.8,
             "avg_blast_radius": 79.8274478330658,
             "avg_backlog_age": 235.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.6115992970123,
+            "avg_dwell_cve": 85.66959578207381,
             "avg_blast_radius": 0.4727592267135325,
             "avg_backlog_age": 30.0
         },
@@ -60,7 +60,7 @@
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 194.13274336283186,
+            "avg_dwell_cve": 194.16814159292036,
             "avg_blast_radius": 63.72566371681416,
             "avg_backlog_age": 411.0
         },
@@ -84,9 +84,9 @@
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 3.5714285714285716,
+            "avg_dwell_cve": 8.071428571428571,
             "avg_blast_radius": 46.166666666666664,
-            "avg_backlog_age": 91.0
+            "avg_backlog_age": 89.4
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,

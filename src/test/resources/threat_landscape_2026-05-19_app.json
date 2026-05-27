@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-27T15:33:03.530062+00:00",
+        "generated_at": "2026-05-27T21:22:44.090557+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-19",
         "target_layer_filter": "app"
@@ -35,20 +35,20 @@
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 7.764204545454546,
-            "avg_dwell_cve": 56.05351681957187,
-            "avg_blast_radius": 1.924345295829292,
+            "avg_dwell_mal": 7.791903409090909,
+            "avg_dwell_cve": 56.11009174311926,
+            "avg_blast_radius": 1.9233753637245392,
             "avg_backlog_age": 384.2
         },
         "PyPI": {
             "avg_dwell_mal": 27.249097472924188,
-            "avg_dwell_cve": 316.2919847328244,
+            "avg_dwell_cve": 316.456106870229,
             "avg_blast_radius": 57.37827715355805,
             "avg_backlog_age": 234.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 65.61752136752136,
+            "avg_dwell_cve": 65.6880341880342,
             "avg_blast_radius": 0.32264957264957267,
             "avg_backlog_age": 29.4
         },
@@ -60,7 +60,7 @@
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 168.0095238095238,
+            "avg_dwell_cve": 168.04761904761904,
             "avg_blast_radius": 62.54761904761905,
             "avg_backlog_age": 410.0
         },
@@ -84,9 +84,9 @@
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 3.658536585365854,
+            "avg_dwell_cve": 8.268292682926829,
             "avg_blast_radius": 46.146341463414636,
-            "avg_backlog_age": 90.1
+            "avg_backlog_age": 88.6
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,

@@ -15,7 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-OSV Threat Stream Campaign Dashboard Indicator - Version 1.2
+OSV Threat Stream Campaign Dashboard Indicator - Version 1.3
 =================================================================================
 A security engineering tool designed to track software supply chain fluctuations 
 by aggregating upstream vulnerability mutations from the Open Source Vulnerability 
@@ -41,6 +41,7 @@ import matplotlib.pyplot as mplplt
 import numpy as np
 import io
 import base64
+from collections import defaultdict
 
 # ANSI Color Codes for Scannable Shell Output
 GREEN = "\033[92m"
@@ -326,7 +327,7 @@ def generate_enterprise_threat_leaderboard(
     start_date, end_date, target_layer: str = None, debug_mode: bool = False, 
     custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, 
     forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
-    manifest_rows: list = None  # <-- Add this keyword argument
+    manifest_rows: list = None  # <-- Keyword argument preserved
     ):
     now = datetime.datetime.now(datetime.timezone.utc)
     final_leaderboard = Counter()
@@ -356,6 +357,40 @@ def generate_enterprise_threat_leaderboard(
             sys.exit(1)
 
     if ghsa_lookup is None: ghsa_lookup = build_ghsa_ecosystem_map()
+
+    # =========================================================================
+    # 📥 INJECTED CRADLE: Build Ecosystem-Specific Absolute Rank Map
+    # =========================================================================
+    ecosystem_archive_buckets = defaultdict(list)
+    for advisory_id, advisory_data in ghsa_lookup.items():
+        for raw_eco in advisory_data.get("ecosystems", []):
+            eco_lower = raw_eco.lower().strip()
+            hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
+            eco_clean = hard_mappings.get(eco_lower, None)
+            if not eco_clean:
+                for track in master_tracks:
+                    if eco_lower in track.lower() or track.lower() in eco_lower:
+                        eco_clean = track
+                        break
+            if not eco_clean: eco_clean = "Android"
+            ecosystem_archive_buckets[eco_clean].append((advisory_id, advisory_data))
+
+    eco_absolute_ranks = {}
+    for eco_name, advisories in ecosystem_archive_buckets.items():
+        sorted_bucket = sorted(
+            advisories,
+            key=lambda x: (
+                -x[1].get("cvss_score", 0.0),
+                -int(x[1].get("blast_radius", 0)),
+                x[0]
+            )
+        )
+        eco_absolute_ranks[eco_name] = {
+            advisory_id: rank 
+            for rank, (advisory_id, _) in enumerate(sorted_bucket, start=1)
+        }
+    # =========================================================================
+
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"   
     total_raw_rows = 0
     project_intercept_alerts = []
@@ -363,17 +398,6 @@ def generate_enterprise_threat_leaderboard(
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
     speedway_counts = Counter() 
-
-    spatial_dwell_malware = {k: [] for k in master_tracks}
-    spatial_dwell_cve = {k: [] for k in master_tracks}
-    spatial_blast_radius = {k: [] for k in master_tracks}
-    ecosystem_outlier_pools = {k: {} for k in master_tracks}
-
-    total_raw_rows = 0
-    project_intercept_alerts = []
-
-    bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
-    malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
     spatial_dwell_malware = {k: [] for k in master_tracks}
     spatial_dwell_cve = {k: [] for k in master_tracks}
@@ -394,13 +418,11 @@ def generate_enterprise_threat_leaderboard(
             reader = []
 
     try:
-        
         for row in reader:
             if not row: continue
             mod_time_str, path = row[0], row[1]
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             
-            # Robust bounding gates immune to stream sorting anomalies and backfills
             if mod_time > end_date or mod_time < start_date: 
                 continue
             
@@ -569,13 +591,34 @@ def generate_enterprise_threat_leaderboard(
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
-            print(f"    {'Rank':<5} | {'Advisory ID':<20} | {'Artifact Name':<28} | {'CVSS':<6} | {'Impact Blast Radius':<22} | {'Threat Profile'}")
-            print(f"    {'-'*116}")
+            
+            # Synchronized Layout Grid Widths
+            w_rank, w_id, w_name, w_cvss, w_radius = 6, 36, 30, 6, 22
+            
+            # Print Header using the Layout Widths
+            print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
+            print(f"    {'-' * (w_rank + w_id + w_name + w_cvss + w_radius + 16)}")
+            
             flat_pool = [{"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": item[3] if len(item) > 3 else 0.0} for r_id, item in pool.items()]
             full_sorted_pool = sorted(flat_pool, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
             export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"]] for item in full_sorted_pool[:50]}
+            
             for rank, item in enumerate(full_sorted_pool[:10], start=1):
-                print(f"    #{rank:<2} | {item['id']:<20} | {item['name'][:25]:<28} | {item['cvss']:.1f} | {item['radius']:,} Vers | {item['type']}")
+                # 1. Compute and extract the macro-historical rank token
+                local_eco_map = eco_absolute_ranks.get(eco, {})
+                abs_eco_rank = local_eco_map.get(item['id'], "N/A")
+                rank_val_str = f"{abs_eco_rank:,}" if isinstance(abs_eco_rank, int) else str(abs_eco_rank)
+                overall_token = f"(#{rank_val_str} overall)"
+                
+                # 2. Pre-format all columns into clean string primitives
+                rank_str = f"#{rank}"
+                id_column_display = f"{item['id']} {overall_token}"
+                artifact_str = item['name'][:27]  # Gracefully truncate long artifact names to prevent layout bleeding
+                cvss_str = f"{item['cvss']:.1f}"
+                radius_str = f"{item['radius']:,} Vers"
+                
+                # 3. Print Row utilizing the identical layout variables
+                print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
 
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
@@ -606,6 +649,8 @@ def generate_enterprise_threat_leaderboard(
                 elif days_dormant <= 60: status_display = f"{YELLOW}{last_mod_str} ({days_dormant}d ago){RESET}"
                 else: status_display = f"{RED}{last_mod_str} ({days_dormant}d ago){RESET}"
             except ValueError: status_display = f"{RED}Invalid Date{RESET}"
+            
+            # Clean layout restored
             print(f"{f'#{rank:<2} {v_id}':<32} | {p_name[:27]:<30} | {status_display}")
         print("-" * 95)
 
@@ -633,7 +678,6 @@ def generate_enterprise_threat_leaderboard(
                 }, ef, indent=4)
             print(f"[Static Snapshot Saved]: {export_path}")
         except Exception as e: 
-            # SURFACING CRITICAL EXPORT EXCEPTIONS DIRECTLY
             print(f"{RED}[-] CRITICAL FILE EXPORT FAIL: {e}{RESET}")
 
 def load_snapshots_from_dir(target_dir: str):
@@ -838,7 +882,7 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
         
     if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
         print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
-        print("="*145)
+        print("="*156)
         
         for eco in sorted(list(current["outliers_leaderboards"].keys())):
             base_pool = base["outliers_leaderboards"].get(eco, {})
@@ -847,9 +891,11 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             if not base_pool and not curr_pool: continue
                 
             print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts (Top 10):{RESET}")
-            w_rank, w_id, w_name, w_cvss, w_radius = 5, 20, 28, 6, 22
-            print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Current Impact':<16} | {'Impact Delta':<18} | {'Rank Shift'}")
-            print(f"    {'-'*135}")
+            
+            # Widened w_id to 28 to safely contain longer GHSA / PYSEC tracking identifiers
+            w_rank, w_id, w_name, w_cvss, w_impact, w_delta = 5, 28, 28, 6, 16, 18
+            print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Current Impact':<{w_impact}} | {'Impact Delta':<{w_delta}} | {'Rank Shift'}")
+            print(f"    {'-'*150}")
             
             base_mapped = []
             for r_id, item in base_pool.items():
@@ -918,9 +964,10 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                 if radius_diff != 0 or (b_rank and c_rank and b_rank != c_rank) or (not b_rank and c_rank):
                     has_shifts = True
                     
-                if radius_diff > 0: diff_display = f"{GREEN}{raw_diff_str:<18}{RESET}"
-                elif radius_diff < 0: diff_display = f"{RED}{raw_diff_str:<18}{RESET}"
-                else: diff_display = f"{raw_diff_str:<18}"
+                # Pad strings internally before applying ANSI wrappers to preserve visual layout widths
+                if radius_diff > 0: diff_display = f"{GREEN}{raw_diff_str:<{w_delta}}{RESET}"
+                elif radius_diff < 0: diff_display = f"{RED}{raw_diff_str:<{w_delta}}{RESET}"
+                else: diff_display = f"{raw_diff_str:<{w_delta}}"
                     
                 if "Up" in raw_r_str or "New" in raw_r_str: r_display = f"{GREEN}{raw_r_str}{RESET}"
                 elif "Down" in raw_r_str: r_display = f"{RED}{raw_r_str}{RESET}"
@@ -930,10 +977,11 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                 p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
                 cvss_display = f"{item['cvss']:.1f}"
                 
-                print(f"    #{rank:<{w_rank-1}} | {r_id:<{w_id}} | {p_name_display:<{w_name}} | {cvss_display:<{w_cvss}} | {c_str:<16} | {diff_display} | {r_display}")
+                # Render line with verified column boundaries
+                print(f"    #{rank:<{w_rank-1}} | {r_id:<{w_id}} | {p_name_display:<{w_name}} | {cvss_display:<{w_cvss}} | {c_str:<{w_impact}} | {diff_display} | {r_display}")
                 
             if dropped_out:
-                print(f"    {'-'*135}")
+                print(f"    {'-'*150}")
                 print(f"    {YELLOW}* The following advisories mitigated or dropped out of the {eco} Top 10:{RESET}")
                 for item in dropped_out:
                     r_id = item['id']
@@ -944,7 +992,7 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                 
             if not has_shifts and not dropped_out:
                 print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
-        print("="*145 + "\n")
+        print("="*156 + "\n")
 
     # -------------------------------------------------------------------------
     # VI. ANSI TERMINAL COMPARISON GRAPH
