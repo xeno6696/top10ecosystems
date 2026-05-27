@@ -8,6 +8,12 @@ import datetime
 # Import your command line application module
 import top10ecosystems
 
+# 1. Intercept custom CLI flag before passing control to the unittest runner
+UPDATE_GOLDEN_MASTERS = False
+if "--update" in sys.argv:
+    UPDATE_GOLDEN_MASTERS = True
+    sys.argv.remove("--update")  # Stripped so unittest engine doesn't choke on unknown arguments
+
 class TestThreatStreamScanner(unittest.TestCase):
     
     @classmethod
@@ -290,6 +296,46 @@ class TestThreatStreamScanner(unittest.TestCase):
                 with open(temp_export_path, 'r', encoding='utf-8') as f_temp:
                     temp_data = json.load(f_temp)
                     
+                # STRATEGY 1: Native Auto-Minting Hook
+                if UPDATE_GOLDEN_MASTERS:
+                    print(f"[+] --update active: Auto-minting frozen baseline asset -> {filename}")
+                    with open(golden_path, 'w', encoding='utf-8') as gf:
+                        json.dump(temp_data, gf, indent=4)
+                    continue  # Skip validation assertions when updating baselines
+
+                # Load the existing golden data asset for validation
+                with open(golden_path, 'r', encoding='utf-8') as gf:
+                    golden_data = json.load(gf)
+
+                # STRATEGY 2: Embedded On-Failure Runbook Guidance
+                failure_runbook = (
+                    f"\n\n{'='*80}\n"
+                    f"❌ GOLDEN MASTER REGRESSION OR METADATA DRIFT DETECTED\n"
+                    f"{'='*80}\n"
+                    f"File: {filename}\n\n"
+                    f"TROUBLESHOOTING STEPS:\n"
+                    f"1. Verify if this change stems from an intentional engineering upgrade (e.g., a newly added \n"
+                    f"   metrics calculation layer, section refactor, or altered filter logic).\n"
+                    f"2. If the logic modification is legitimate, do NOT hack the test engine source files.\n"
+                    f"3. Automatically overwrite and recalibrate all Golden Master assets against the true \n"
+                    f"   offline test stream database by running the following command:\n\n"
+                    f"   👉 python .\\test_runner.py --update\n\n"
+                    f"4. Confirm that the newly minted json structures look sane before committing changes.\n"
+                    f"{'='*80}\n"
+                )
+
+                # Assertions enhanced with the diagnostic runbook output
+                self.assertDictEqual(
+                    temp_data.get("leaderboard", {}), 
+                    golden_data.get("leaderboard", {}),
+                    msg=f"Leaderboard data mismatch.{failure_runbook}"
+                )
+                self.assertDictEqual(
+                    temp_data.get("threat_profile", {}), 
+                    golden_data.get("threat_profile", {}),
+                    msg=f"Threat lifecycle profile classification mismatch.{failure_runbook}"
+                )
+                    
                 self.assertDictEqual(
                     temp_data.get("leaderboard", {}), 
                     golden_data.get("leaderboard", {}),
@@ -308,6 +354,34 @@ class TestThreatStreamScanner(unittest.TestCase):
                 
                 # Clean up the temporary file so we don't litter your output directory
                 if os.path.exists(temp_export_path):
-                    os.remove(temp_export_path)       
+                    os.remove(temp_export_path)   
+
+    def test_global_advisory_index_volume_baseline(self):
+        """Validates that the parsed global memory index does not suffer silent truncation regressions."""
+        # Pull the record count from your global tracking map
+        total_indexed_records = len(self.ghsa_lookup) if hasattr(self, 'ghsa_lookup') else 0
+        print(f"DEBUG:  Total number of records indexed is [{total_indexed_records}]")
+        # Hard threshold set to flag if data drops significantly below our ~570k baseline
+        minimum_safe_threshold = 560000
+        
+        self.assertGreaterEqual(
+            total_indexed_records,  # Aligned variable name
+            minimum_safe_threshold,
+            msg=(
+                f"\n\n{'='*80}\n"
+                f"⚠️  CRITICAL REGRESSION: GLOBAL ADVISORY INDEX TRUNCATION DETECTED\n"
+                f"{'='*80}\n"
+                f"Current Record Count: {total_indexed_records:,}\n"  # Aligned variable name
+                f"Expected Safe Floor:  {minimum_safe_threshold:,}\n\n"
+                f"POSSIBLE ROOT CAUSES:\n"
+                f"1. The local data cache file (`./cache/osv_master_all.zip`) was generated during an \n"
+                f"   incomplete download stream or write failure.\n"
+                f"2. The core upstream parsing engine (`build_ghsa_ecosystem_map`) dropped active records \n"
+                f"   due to an unhandled object nesting structure error.\n\n"
+                f"REMEDIATION:\n"
+                f"Nuke the stale asset cache directory and re-execute the loader to pull a fresh master stream.\n"
+                f"{'='*80}\n"
+            )
+        )                   
 if __name__ == '__main__':
     unittest.main()
