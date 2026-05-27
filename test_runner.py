@@ -256,10 +256,10 @@ class TestThreatStreamScanner(unittest.TestCase):
 
         # The locked files from your directory mapped to their date windows
         golden_files = [
-            ("2026-04-18", "2026-05-18", "18-04-26_to_18-05-26_app.json"),
-            ("2026-04-18", "2026-05-19", "18-04-26_to_19-05-26_app.json"),
-            ("2026-04-18", "2026-05-20", "18-04-26_to_20-05-26_app.json"),
-            ("2026-04-18", "2026-05-21", "18-04-26_to_21-05-26_app.json"),
+            ("2026-04-18", "2026-05-18", "threat_landscape_2026-05-18_app.json"),
+            ("2026-04-18", "2026-05-19", "threat_landscape_2026-05-19_app.json"),
+            ("2026-04-18", "2026-05-20", "threat_landscape_2026-05-20_app.json"),
+            ("2026-04-18", "2026-05-21", "threat_landscape_2026-05-21_app.json"),
         ]
 
         print(f"\n[*] Validating engine parity against Golden Master files using frozen state...")

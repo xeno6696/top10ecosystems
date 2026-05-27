@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-22T22:12:54.252354+00:00",
+        "generated_at": "2026-05-27T15:33:03.530062+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-19",
         "target_layer_filter": "app"
@@ -22,67 +22,77 @@
     "threat_profile": {
         "Malware (New Entry)": 1791,
         "Malware (Incremental Update)": 0,
-        "Vulnerability Fix (New Entry)": 1,
-        "Vulnerability Fix (Update)": 2589,
+        "Vulnerability Fix (New Entry)": 0,
+        "Vulnerability Fix (Update)": 2590,
         "Metadata Correction / Adjustments": 0
     },
     "malware_vectors": {
-        "Typosquatting / Brand Hijacking": 76,
+        "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 10,
-        "Data Exfiltration / Credential Stealer": 897,
+        "Data Exfiltration / Credential Stealer": 899,
         "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 799
+        "Unclassified Malicious Payload": 794
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 7.440340909090909,
-            "avg_dwell_cve": 56.02140672782875,
-            "avg_blast_radius": 1.9059165858389913
+            "avg_dwell_mal": 7.764204545454546,
+            "avg_dwell_cve": 56.05351681957187,
+            "avg_blast_radius": 1.924345295829292,
+            "avg_backlog_age": 384.2
         },
         "PyPI": {
             "avg_dwell_mal": 27.249097472924188,
-            "avg_dwell_cve": 316.25763358778624,
-            "avg_blast_radius": 57.37827715355805
+            "avg_dwell_cve": 316.2919847328244,
+            "avg_blast_radius": 57.37827715355805,
+            "avg_backlog_age": 234.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 65.57478632478633,
-            "avg_blast_radius": 0.32264957264957267
+            "avg_dwell_cve": 65.61752136752136,
+            "avg_blast_radius": 0.32264957264957267,
+            "avg_backlog_age": 29.4
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 72.24444444444444,
-            "avg_blast_radius": 110.41481481481482
+            "avg_blast_radius": 110.41481481481482,
+            "avg_backlog_age": 141.4
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 168.0095238095238,
-            "avg_blast_radius": 62.54761904761905
+            "avg_blast_radius": 62.54761904761905,
+            "avg_backlog_age": 410.0
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 93.725,
-            "avg_blast_radius": 0.32
+            "avg_blast_radius": 0.32,
+            "avg_backlog_age": 132.4
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 44.97260273972603,
-            "avg_blast_radius": 119.05479452054794
+            "avg_blast_radius": 119.05479452054794,
+            "avg_backlog_age": 475.0
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 102.86153846153846,
-            "avg_blast_radius": 105.0923076923077
+            "avg_dwell_cve": 102.96923076923076,
+            "avg_blast_radius": 105.0923076923077,
+            "avg_backlog_age": 378.0
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 3.658536585365854,
-            "avg_blast_radius": 46.146341463414636
+            "avg_blast_radius": 46.146341463414636,
+            "avg_backlog_age": 90.1
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 222.8,
-            "avg_blast_radius": 5.8
+            "avg_blast_radius": 5.8,
+            "avg_backlog_age": 174.1
         }
     },
     "outliers_leaderboards": {
@@ -91,6 +101,12 @@
                 34,
                 "Malware (New Entry)",
                 "@gusmano/reext",
+                10.0
+            ],
+            "MAL-2026-3757": [
+                24,
+                "Malware (New Entry)",
+                "claw-subagent-service",
                 10.0
             ],
             "MAL-2025-49456": [
@@ -237,6 +253,18 @@
                 "spr-i18n-labels",
                 10.0
             ],
+            "MAL-2026-2798": [
+                5,
+                "Malware (New Entry)",
+                "request-easy-validator",
+                10.0
+            ],
+            "MAL-2026-2930": [
+                5,
+                "Malware (New Entry)",
+                "path-internal",
+                10.0
+            ],
             "MAL-2026-3069": [
                 5,
                 "Malware (New Entry)",
@@ -367,24 +395,6 @@
                 5,
                 "Malware (New Entry)",
                 "@squawk/types",
-                10.0
-            ],
-            "MAL-2026-3455": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/units",
-                10.0
-            ],
-            "MAL-2026-3456": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/weather",
-                10.0
-            ],
-            "MAL-2026-3502": [
-                5,
-                "Malware (New Entry)",
-                "cross-stitch",
                 10.0
             ]
         },

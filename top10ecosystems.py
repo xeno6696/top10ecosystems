@@ -325,7 +325,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
 def generate_enterprise_threat_leaderboard(
     start_date, end_date, target_layer: str = None, debug_mode: bool = False, 
     custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, 
-    forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None
+    forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
+    manifest_rows: list = None  # <-- Add this keyword argument
     ):
     now = datetime.datetime.now(datetime.timezone.utc)
     final_leaderboard = Counter()
@@ -368,20 +369,41 @@ def generate_enterprise_threat_leaderboard(
     spatial_blast_radius = {k: [] for k in master_tracks}
     ecosystem_outlier_pools = {k: {} for k in master_tracks}
 
+    total_raw_rows = 0
+    project_intercept_alerts = []
+
+    bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
+    malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
+
+    spatial_dwell_malware = {k: [] for k in master_tracks}
+    spatial_dwell_cve = {k: [] for k in master_tracks}
+    spatial_blast_radius = {k: [] for k in master_tracks}
+    ecosystem_outlier_pools = {k: {} for k in master_tracks}
+
+    # Use pre-cached rows if available to eliminate back-to-back network hits
+    if manifest_rows is not None:
+        reader = manifest_rows
+    else:
+        try:
+            response = requests.get(manifest_url, stream=True, timeout=30)
+            response.raise_for_status()
+            lines = (line.decode('utf-8') for line in response.iter_lines())
+            reader = list(csv.reader(lines))
+        except Exception as e:
+            print(f"[-] Threat ledger stream connection error: {e}")
+            reader = []
+
     try:
-        response = requests.get(manifest_url, stream=True, timeout=30)
-        response.raise_for_status()
-        lines = (line.decode('utf-8') for line in response.iter_lines())
-        reader = csv.reader(lines)
         
         for row in reader:
             if not row: continue
             mod_time_str, path = row[0], row[1]
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
-            if mod_time > end_date: continue
-            if mod_time < start_date: break # Critical path reverse-chronological loop break optimization
             
-            speedway_counts[mod_time.hour] += 1 
+            # Robust bounding gates immune to stream sorting anomalies and backfills
+            if mod_time > end_date or mod_time < start_date: 
+                continue
+            
             total_raw_rows += 1
             raw_ecosystems = []
             update_type = "Metadata Correction / Adjustments"
@@ -454,10 +476,11 @@ def generate_enterprise_threat_leaderboard(
                             pool[current_id] = (meta_entry["blast_radius"], update_type, meta_entry["package_name"], meta_entry.get("cvss_score", 0.0))
                 final_leaderboard[eco_clean] += 1
     except Exception as e:
-        print(f"[-] Threat ledger stream disrupted: {e}")
+        print(f"[-] Threat ledger stream disrupted during processing: {e}")
         return
 
     filtered_results = sorted([(e, c, get_artifact_layer(e)) for e, c in final_leaderboard.items() if e not in ["Untagged Commit Hash/CVE Noise", "GIT"]], key=lambda x: x[1], reverse=True)
+    
     if is_project_mode:
         print("\n" + "="*95 + f"\n  {BOLD}LOCAL REPOSITORY INTERSECTION REPORT{RESET}\n" + "="*95)
         if project_intercept_alerts:
@@ -488,9 +511,6 @@ def generate_enterprise_threat_leaderboard(
         for vector_name, vector_count in malware_vector_counts.most_common():
             print(f"-> {vector_name:<38} | {vector_count:<4,} ({vector_count/sum(malware_vector_counts.values())*100:.1f}%)")
 
-    # ---------------------------------------------------------
-    # IV. ECOSYSTEM THREAT METABOLISM & SYSTEMIC BACKLOG MATRIX
-    # ---------------------------------------------------------
     print("\n" + "="*115)
     print(f"  {BOLD}IV. ECOSYSTEM THREAT METABOLISM & SYSTEMIC BACKLOG MATRIX{RESET}")
     print("  * SLA Legend: Green <= 30d | Yellow 31-60d | Red > 60d")
@@ -507,8 +527,9 @@ def generate_enterprise_threat_leaderboard(
         raw_avg_r = sum(r_list)/len(r_list) if r_list else 0.0
         
         valid_eco_records = []
+        eco_lower_matrix = eco.lower()
         for vuln_id, meta in ghsa_lookup.items():
-            if eco in meta.get('ecosystems', []) and isinstance(vuln_id, str) and vuln_id.strip():
+            if any(raw_eco.lower() in eco_lower_matrix for raw_eco in meta.get('ecosystems', [])) and isinstance(vuln_id, str) and vuln_id.strip():
                 meta_with_id = meta.copy()
                 meta_with_id['injected_id'] = vuln_id
                 valid_eco_records.append(meta_with_id)
@@ -557,27 +578,18 @@ def generate_enterprise_threat_leaderboard(
                 print(f"    #{rank:<2} | {item['id']:<20} | {item['name'][:25]:<28} | {item['cvss']:.1f} | {item['radius']:,} Vers | {item['type']}")
         else: export_outlier_manifests[eco] = {}
 
-    if run_speedway and speedway_counts:
-        print("\n" + "="*85 + f"\n  {BOLD}VI. SPEEDWAY THREAT STREAM VELOCITY (24-HOUR TRAFFIC DISTRIBUTION){RESET}\n" + "="*85)
-        print(f" {'Hour (UTC)':<10} | {'Volume':<8} | {'Traffic Intensity'}")
-        print("-" * 85)
-        for hour in range(24):
-            hits = speedway_counts.get(hour, 0)
-            bar = "█" * int((hits / max(speedway_counts.values())) * 40) if hits > 0 else "|"
-            print(f" {hour:02d}:00      | {hits:<8,} | {bar}")
-
-    # ---------------------------------------------------------
-    # VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT)
-    # ---------------------------------------------------------
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
-    print("="*105)
-    print(f"{'Ecosystem':<16} | {'Static Risk (Top 10 Global)':<32} | {'Artifact Name':<30} | {'Last Active'}")
-    print("-" * 105)
-    
+    print("="*95)
     for eco in active_matrix_ecosystems:
+        print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
+        print("-" * 95)
+        print(f"{'Static Risk (Top 10 Global)':<32} | {'Artifact Name':<30} | {'Last Active'}")
+        print("-" * 95)
+        
         valid_eco_records = []
+        eco_lower_def = eco.lower()
         for vuln_id, meta in ghsa_lookup.items():
-            if eco in meta.get('ecosystems', []) and isinstance(vuln_id, str) and vuln_id.strip():
+            if any(raw_eco.lower() in eco_lower_def for raw_eco in meta.get('ecosystems', [])) and isinstance(vuln_id, str) and vuln_id.strip():
                 meta_with_id = meta.copy()
                 meta_with_id['injected_id'] = vuln_id
                 valid_eco_records.append(meta_with_id)
@@ -594,13 +606,19 @@ def generate_enterprise_threat_leaderboard(
                 elif days_dormant <= 60: status_display = f"{YELLOW}{last_mod_str} ({days_dormant}d ago){RESET}"
                 else: status_display = f"{RED}{last_mod_str} ({days_dormant}d ago){RESET}"
             except ValueError: status_display = f"{RED}Invalid Date{RESET}"
-            print(f"{eco:<16} | {f'#{rank:<2} {v_id}':<32} | {p_name[:27]:<30} | {status_display}")
+            print(f"{f'#{rank:<2} {v_id}':<32} | {p_name[:27]:<30} | {status_display}")
+        print("-" * 95)
 
+    # -------------------------------------------------------------------------
+    # EXPORT MANAGER: VERIFIED SNAPSHOT PERSISTENCE LAYER
+    # -------------------------------------------------------------------------
     if custom_export_arg:
         output_dir = "./output"
         os.makedirs(output_dir, exist_ok=True)
-        if isinstance(custom_export_arg, str): export_path = custom_export_arg
-        else: export_path = os.path.join(output_dir, f"threat_landscape_{end_date.strftime('%Y-%m-%d')}_{target_layer if target_layer else 'all'}.json")
+        if isinstance(custom_export_arg, str): 
+            export_path = custom_export_arg
+        else: 
+            export_path = os.path.join(output_dir, f"threat_landscape_{end_date.strftime('%Y-%m-%d')}_{target_layer if target_layer else 'all'}.json")
 
         os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
         try:
@@ -614,7 +632,9 @@ def generate_enterprise_threat_leaderboard(
                     "outliers_leaderboards": export_outlier_manifests
                 }, ef, indent=4)
             print(f"[Static Snapshot Saved]: {export_path}")
-        except Exception as e: print(f"[-] Snapshot export write error: {e}")
+        except Exception as e: 
+            # SURFACING CRITICAL EXPORT EXCEPTIONS DIRECTLY
+            print(f"{RED}[-] CRITICAL FILE EXPORT FAIL: {e}{RESET}")
 
 def load_snapshots_from_dir(target_dir: str):
     snapshots = []
@@ -699,8 +719,34 @@ def main():
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     global_ghsa_lookup = build_ghsa_ecosystem_map()
+    
+    # Ingest the stream index exactly once for the entire batch run
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    print("[*] Staging upstream modification stream index into memory...")
+    try:
+        response = requests.get(manifest_url, timeout=30)
+        response.raise_for_status()
+        cached_manifest_rows = list(csv.reader(io.StringIO(response.text)))
+        print(f"[+] Cached {len(cached_manifest_rows):,} mutation rows cleanly. Commencing generation pipeline.")
+    except Exception as e:
+        print(f"{YELLOW}[!] Failed to pre-fetch stream index: {e}. Falling back to individual live connections.{RESET}")
+        cached_manifest_rows = None
+
     for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
-        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=args.export, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup)
+        print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
+        generate_enterprise_threat_leaderboard(
+            start_date=calculated_start, 
+            end_date=calculated_end,
+            target_layer=args.layer, 
+            debug_mode=args.debug,
+            custom_export_arg=args.export, 
+            run_speedway=args.speedway,
+            project_file_path=args.project_file, 
+            forced_format=args.project_format,
+            audit_mode=args.audit,
+            ghsa_lookup=global_ghsa_lookup,
+            manifest_rows=cached_manifest_rows  # <-- Pass the memory cache down here
+        )
 
 if __name__ == "__main__":
     main()

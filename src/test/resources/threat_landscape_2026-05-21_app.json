@@ -1,88 +1,98 @@
 {
     "metadata": {
-        "generated_at": "2026-05-22T22:12:55.946384+00:00",
+        "generated_at": "2026-05-27T15:33:21.036134+00:00",
         "interval_from": "2026-04-18",
-        "interval_to": "2026-05-20",
+        "interval_to": "2026-05-21",
         "target_layer_filter": "app"
     },
     "leaderboard": {
-        "npm": 2268,
-        "PyPI": 1254,
-        "Go (Golang)": 569,
-        "Packagist (PHP)": 281,
-        "Maven (Java)": 228,
-        "Crates.io": 223,
-        "NuGet": 74,
-        "RubyGems": 66,
+        "npm": 2318,
+        "PyPI": 1484,
+        "Go (Golang)": 600,
+        "Packagist (PHP)": 305,
+        "Maven (Java)": 236,
+        "Crates.io": 234,
+        "NuGet": 79,
+        "RubyGems": 67,
         "Hex": 42,
         "SwiftURL": 12,
         "Pub": 0,
         "ConanCenter": 0
     },
     "threat_profile": {
-        "Malware (New Entry)": 1820,
+        "Malware (New Entry)": 1839,
         "Malware (Incremental Update)": 0,
-        "Vulnerability Fix (New Entry)": 1,
-        "Vulnerability Fix (Update)": 3196,
+        "Vulnerability Fix (New Entry)": 0,
+        "Vulnerability Fix (Update)": 3538,
         "Metadata Correction / Adjustments": 0
     },
     "malware_vectors": {
-        "Typosquatting / Brand Hijacking": 76,
+        "Typosquatting / Brand Hijacking": 80,
         "Dependency Confusion Campaign": 10,
-        "Data Exfiltration / Credential Stealer": 911,
+        "Data Exfiltration / Credential Stealer": 931,
         "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 814
+        "Unclassified Malicious Payload": 809
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 7.338235294117647,
-            "avg_dwell_cve": 56.980712166172104,
-            "avg_blast_radius": 1.8820171265461465
+            "avg_dwell_mal": 7.624653739612189,
+            "avg_dwell_cve": 54.53107344632768,
+            "avg_blast_radius": 1.8847583643122676,
+            "avg_backlog_age": 386.2
         },
         "PyPI": {
-            "avg_dwell_mal": 28.167832167832167,
-            "avg_dwell_cve": 291.69166666666666,
-            "avg_blast_radius": 79.8274478330658
+            "avg_dwell_mal": 27.955017301038062,
+            "avg_dwell_cve": 364.787521079258,
+            "avg_blast_radius": 73.79457627118644,
+            "avg_backlog_age": 236.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.57644991212653,
-            "avg_blast_radius": 0.4727592267135325
+            "avg_dwell_cve": 85.8,
+            "avg_blast_radius": 0.5266666666666666,
+            "avg_backlog_age": 30.9
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 70.98545454545454,
-            "avg_blast_radius": 111.0909090909091
+            "avg_dwell_cve": 69.4113712374582,
+            "avg_blast_radius": 110.52842809364549,
+            "avg_backlog_age": 143.4
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 194.13274336283186,
-            "avg_blast_radius": 63.72566371681416
+            "avg_dwell_cve": 198.57264957264957,
+            "avg_blast_radius": 65.55982905982906,
+            "avg_backlog_age": 412.0
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 102.95945945945945,
-            "avg_blast_radius": 0.31981981981981983
+            "avg_dwell_cve": 98.21888412017168,
+            "avg_blast_radius": 0.463519313304721,
+            "avg_backlog_age": 134.2
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 44.37837837837838,
-            "avg_blast_radius": 117.79729729729729
+            "avg_dwell_cve": 41.56962025316456,
+            "avg_blast_radius": 122.55696202531645,
+            "avg_backlog_age": 477.0
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 101.71212121212122,
-            "avg_blast_radius": 104.68181818181819
+            "avg_dwell_cve": 100.34328358208955,
+            "avg_blast_radius": 103.74626865671642,
+            "avg_backlog_age": 380.0
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 3.5714285714285716,
-            "avg_blast_radius": 46.166666666666664
+            "avg_blast_radius": 46.166666666666664,
+            "avg_backlog_age": 91.9
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 311.4166666666667,
-            "avg_blast_radius": 15.083333333333334
+            "avg_blast_radius": 15.083333333333334,
+            "avg_backlog_age": 176.1
         }
     },
     "outliers_leaderboards": {
@@ -93,10 +103,22 @@
                 "@gusmano/reext",
                 10.0
             ],
+            "MAL-2026-3757": [
+                24,
+                "Malware (New Entry)",
+                "claw-subagent-service",
+                10.0
+            ],
             "MAL-2025-49456": [
                 20,
                 "Malware (New Entry)",
                 "0e",
+                10.0
+            ],
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
                 10.0
             ],
             "MAL-2026-3433": [
@@ -163,6 +185,12 @@
                 9,
                 "Malware (New Entry)",
                 "apple-app-store-server-library-poc",
+                10.0
+            ],
+            "MAL-2026-4230": [
+                9,
+                "Malware (New Entry)",
+                "cryptoco-auth",
                 10.0
             ],
             "MAL-2026-2712": [
@@ -235,6 +263,18 @@
                 5,
                 "Malware (New Entry)",
                 "spr-i18n-labels",
+                10.0
+            ],
+            "MAL-2026-2798": [
+                5,
+                "Malware (New Entry)",
+                "request-easy-validator",
+                10.0
+            ],
+            "MAL-2026-2930": [
+                5,
+                "Malware (New Entry)",
+                "path-internal",
                 10.0
             ],
             "MAL-2026-3069": [
@@ -356,36 +396,6 @@
                 "Malware (New Entry)",
                 "@squawk/procedure-data",
                 10.0
-            ],
-            "MAL-2026-3453": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/procedures",
-                10.0
-            ],
-            "MAL-2026-3454": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/types",
-                10.0
-            ],
-            "MAL-2026-3455": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/units",
-                10.0
-            ],
-            "MAL-2026-3456": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/weather",
-                10.0
-            ],
-            "MAL-2026-3502": [
-                5,
-                "Malware (New Entry)",
-                "cross-stitch",
-                10.0
             ]
         },
         "PyPI": {
@@ -459,6 +469,12 @@
                 20,
                 "Malware (New Entry)",
                 "swampo",
+                10.0
+            ],
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
                 10.0
             ],
             "MAL-2025-193014": [
@@ -659,6 +675,12 @@
                 "syntaxlogger",
                 10.0
             ],
+            "MAL-2026-4227": [
+                5,
+                "Malware (New Entry)",
+                "lognest",
+                10.0
+            ],
             "MAL-2025-191920": [
                 4,
                 "Malware (New Entry)",
@@ -676,26 +698,26 @@
                 "Malware (New Entry)",
                 "lyrox",
                 10.0
-            ],
-            "MAL-2026-3211": [
-                4,
-                "Malware (New Entry)",
-                "pycryptcore",
-                10.0
-            ],
-            "MAL-2026-3355": [
-                4,
-                "Malware (New Entry)",
-                "playwright-atoned",
-                10.0
             ]
         },
         "Go (Golang)": {
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
+                10.0
+            ],
             "GHSA-rqgh-gxv4-6657": [
                 1,
                 "Vulnerability Fix (Update)",
                 "github.com/gotenberg/gotenberg/v8",
                 9.8
+            ],
+            "GHSA-f396-4rp4-7v2j": [
+                18,
+                "Vulnerability Fix (Update)",
+                "github.com/boxlite-ai/boxlite/sdks/go",
+                9.6
             ],
             "GHSA-jwvw-v7c5-m82h": [
                 25,
@@ -714,6 +736,12 @@
                 "Vulnerability Fix (Update)",
                 "github.com/loft-sh/devspace",
                 7.7
+            ],
+            "GHSA-5wfc-hjrc-gq87": [
+                11,
+                "Vulnerability Fix (Update)",
+                "github.com/hjson/hjson-go/v4",
+                7.5
             ],
             "GHSA-7235-89m6-f4px": [
                 1,
@@ -884,6 +912,12 @@
                 "Vulnerability Fix (Update)",
                 "nabeel/phpvms",
                 9.4
+            ],
+            "GHSA-7p85-w9px-jpjp": [
+                242,
+                "Vulnerability Fix (Update)",
+                "twig/twig",
+                9.3
             ],
             "GHSA-w9f3-qc75-qgx9": [
                 103,
@@ -1058,12 +1092,6 @@
                 "Vulnerability Fix (Update)",
                 "ci4-cms-erp/ci4ms",
                 8.8
-            ],
-            "GHSA-f58v-p6j9-24c2": [
-                26,
-                "Vulnerability Fix (Update)",
-                "yeswiki/yeswiki",
-                8.8
             ]
         },
         "Maven (Java)": {
@@ -1143,6 +1171,12 @@
                 81,
                 "Vulnerability Fix (Update)",
                 "org.apache.tomcat.embed:tomcat-embed-core",
+                9.8
+            ],
+            "GHSA-fw88-pf9m-p947": [
+                39,
+                "Vulnerability Fix (Update)",
+                "org.apache.artemis:artemis-server",
                 9.8
             ],
             "GHSA-cx4m-2p55-rw7j": [
@@ -1360,15 +1394,15 @@
                 "Vulnerability Fix (Update)",
                 "org.apache.activemq:activemq-broker",
                 8.8
-            ],
-            "GHSA-4xwx-hvv7-7prj": [
-                50,
-                "Vulnerability Fix (Update)",
-                "org.apache.camel:camel-infinispan",
-                8.8
             ]
         },
         "Crates.io": {
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
+                10.0
+            ],
             "MAL-2026-3126": [
                 2,
                 "Vulnerability Fix (Update)",
@@ -1404,6 +1438,12 @@
                 "Vulnerability Fix (Update)",
                 "supertag",
                 10.0
+            ],
+            "GHSA-f396-4rp4-7v2j": [
+                18,
+                "Vulnerability Fix (Update)",
+                "github.com/boxlite-ai/boxlite/sdks/go",
+                9.6
             ],
             "GHSA-xx5w-cvp6-jv83": [
                 1,
@@ -1512,6 +1552,12 @@
                 "Vulnerability Fix (Update)",
                 "oxidize-pdf",
                 4.3
+            ],
+            "GHSA-22w3-693w-x895": [
+                1,
+                "Vulnerability Fix (Update)",
+                "webauthn-authenticator-rs",
+                2.3
             ],
             "GHSA-6wgr-89rj-399p": [
                 1,
@@ -1749,6 +1795,12 @@
                 "Magick.NET-Q8-x86",
                 6.2
             ],
+            "GHSA-jqq5-8px3-9m6m": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                6.2
+            ],
             "GHSA-5qwm-7pvp-w988": [
                 34,
                 "Vulnerability Fix (Update)",
@@ -1825,12 +1877,6 @@
                 229,
                 "Vulnerability Fix (Update)",
                 "Magick.NET-Q8-x86",
-                5.5
-            ],
-            "GHSA-9vj4-wc7r-p844": [
-                224,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q16-HDRI-AnyCPU",
                 5.5
             ]
         },
