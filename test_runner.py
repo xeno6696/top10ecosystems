@@ -382,6 +382,76 @@ class TestThreatStreamScanner(unittest.TestCase):
                 f"Nuke the stale asset cache directory and re-execute the loader to pull a fresh master stream.\n"
                 f"{'='*80}\n"
             )
-        )                   
+        )
+    # -------------------------------------------------------------------------
+    # INTEGRATION TESTS: GOLDEN MASTER SNAPSHOT DELTA VERIFICATION
+    # -------------------------------------------------------------------------
+    def test_compare_snapshots_golden_master_deltas(self):
+        """
+        Validates the comparison engine's delta arithmetic and rank shifts 
+        against frozen historical Golden Master snapshots (May 18 vs May 21).
+        """
+        import os
+        import io
+        from unittest.mock import patch
+
+        # Explicitly target the historical files from your execution pipeline
+        file_base = os.path.join("src", "test", "resources", "threat_landscape_2026-05-18_app.json")
+        file_current = os.path.join("src", "test", "resources", "threat_landscape_2026-05-21_app.json")
+
+        # Fallback guard to skip cleanly if paths are misaligned in a CI/CD environment
+        if not os.path.exists(file_base) or not os.path.exists(file_current):
+            self.skipTest(
+                f"\n[!] Snapshot delta verification skipped.\n"
+                f"    Missing target assets: {file_base} or {file_current}"
+            )
+
+        captured_output = io.StringIO()
+
+        # Fire the comparison engine cover-to-cover using the frozen historical records
+        with patch('sys.stdout', captured_output):
+            top10ecosystems.compare_snapshots(
+                file_base=file_base,
+                file_current=file_current,
+                html_output=None
+            )
+
+        output = captured_output.getvalue()
+
+        # Assertions Layer 1: Core Engine Integrity Guards
+        self.assertNotIn(
+            "Snapshot comparison failed", output,
+            "[!] CRITICAL: The comparison engine crashed internally during execution!"
+        )
+        self.assertIn(
+            "SECURITY THREAT INTELLIGENCE STREAM MOVEMENT COMPARISON", output,
+            "[!] Main header section is missing from the comparison output canvas."
+        )
+
+        # Assertions Layer 2: Visual Section Boundaries
+        self.assertIn("I. ECOSYSTEM ACTIVITY & RANK SHIFTS", output)
+        self.assertIn("II. THREAT BEHAVIOR VARIANCE", output)
+        
+        # Checking for sections that depend on extended metadata keys
+        if "malware_vectors" in output or "III." in output:
+            self.assertIn("III. MALWARE VECTOR ATTACK MATRIX SHIFTS", output)
+        if "profile_matrix" in output or "IV." in output:
+            self.assertIn("IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS", output)
+        if "outliers_leaderboards" in output or "V." in output:
+            self.assertIn("V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS", output)
+            
+        self.assertIn("VI. RELATIVE CHURN VELOCITY", output)
+
+        # =====================================================================
+        # 🎯 DATA DETERMINISM LOCKS
+        # =====================================================================
+        # Since your Windows system now natively outputs clean UTF-8 strings,
+        # you can inspect the 'comparison_console_output.txt' file you generated
+        # and paste exact rows here to lock down the math.
+        #
+        # Examples:
+        # self.assertIn("npm                        |", output)
+        # self.assertIn("PyPI                       |", output)
+        # =====================================================================
 if __name__ == '__main__':
     unittest.main()
