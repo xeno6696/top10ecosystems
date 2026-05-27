@@ -360,7 +360,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Validates that the parsed global memory index does not suffer silent truncation regressions."""
         # Pull the record count from your global tracking map
         total_indexed_records = len(self.ghsa_lookup) if hasattr(self, 'ghsa_lookup') else 0
-        print(f"DEBUG:  Total number of records indexed is [{total_indexed_records}]")
+        
         # Hard threshold set to flag if data drops significantly below our ~570k baseline
         minimum_safe_threshold = 560000
         
