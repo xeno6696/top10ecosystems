@@ -688,6 +688,394 @@ def run_velocity_update(args):
     snapshots = load_snapshots_from_dir(snapshot_dir)
     if snapshots: generate_html_report(snapshots, args.html if args.html else os.path.join(snapshot_dir, "briefing.html"))
 
+def compare_snapshots(file_base: str, file_current: str, html_output: str = None):
+    try:
+        with open(file_base, 'r', encoding='utf-8') as f1, open(file_current, 'r', encoding='utf-8') as f2:
+            base = json.load(f1)
+            current = json.load(f2)
+    except Exception as e:
+        print(f"[-] Snapshot comparison failed. Error loading files: {e}")
+        return
+
+    print("\n" + "="*85)
+    print(f"  {BOLD}SECURITY THREAT INTELLIGENCE STREAM MOVEMENT COMPARISON{RESET}")
+    print("="*85)
+    print(f"Base Document:    {file_base} (Generated: {base['metadata']['generated_at'][:10]})")
+    print(f"Current Document: {file_current} (Generated: {current['metadata']['generated_at'][:10]})")
+    print("="*85)
+
+    known_clean_keys = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", 
+                        "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL", "Debian", "Ubuntu", "MinimOS", 
+                        "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "GIT",
+                        "Android", "Untagged Commit Hash/CVE Noise"]
+
+    sanitized_base_leaderboard = Counter()
+    for eco, count in base["leaderboard"].items():
+        clean_name = "Android" if eco not in known_clean_keys else eco
+        sanitized_base_leaderboard[clean_name] += count
+
+    sanitized_curr_leaderboard = Counter()
+    for eco, count in current["leaderboard"].items():
+        clean_name = "Android" if eco not in known_clean_keys else eco
+        sanitized_curr_leaderboard[clean_name] += count
+
+    base_sorted = sorted(sanitized_base_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    curr_sorted = sorted(sanitized_curr_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
+
+    base_rank_map = {item[0]: rank for rank, item in enumerate(base_sorted, 1) if item[1] > 0}
+    curr_rank_map = {item[0]: rank for rank, item in enumerate(curr_sorted, 1) if item[1] > 0}
+
+    print(f"\n{BOLD}I. ECOSYSTEM ACTIVITY & RANK SHIFTS (TOP 10):{RESET}")
+    print("-"*95)
+    print(f"{'Rank':<4} | {'Ecosystem / Registry':<26} | {'Base Vol':<10} | {'Current Vol':<12} | {'Volume Delta':<14} | {'Rank Shift'}")
+    print("-"*95)
+
+    all_ecosystems = sorted(
+        list(set(sanitized_base_leaderboard.keys()).union(set(sanitized_curr_leaderboard.keys()))),
+        key=lambda x: (sanitized_curr_leaderboard.get(x, 0), sanitized_base_leaderboard.get(x, 0)),
+        reverse=True
+    )
+    
+    top_10_ecos = all_ecosystems[:10]
+    
+    for current_rank, eco in enumerate(top_10_ecos, start=1):
+        v1 = sanitized_base_leaderboard.get(eco, 0)
+        v2 = sanitized_curr_leaderboard.get(eco, 0)
+        v_diff = v2 - v1
+        
+        raw_v_str = f"{v_diff:+,}" if v_diff != 0 else "0"
+        padded_v_str = f"{raw_v_str:>14}"
+        
+        if v_diff > 0: v_str = f"{GREEN}{padded_v_str}{RESET}"
+        elif v_diff < 0: v_str = f"{RED}{padded_v_str}{RESET}"
+        else: v_str = padded_v_str
+
+        r1 = base_rank_map.get(eco, None)
+        r2 = curr_rank_map.get(eco, None)
+        
+        if r1 and r2:
+            r_diff = r1 - r2
+            if r_diff > 0: r_str = f"{GREEN}Moved up {r_diff} spots ({r1} -> {r2}){RESET}"
+            elif r_diff < 0: r_str = f"{RED}Moved down {abs(r_diff)} spots ({r1} -> {r2}){RESET}"
+            else: r_str = f"No Change ({r2})"
+        elif not r1 and r2: r_str = f"{GREEN}New Entry To Rank ({r2}){RESET}"
+        elif r1 and not r2: r_str = f"{RED}Dropped Out of Active Rankings (Was {r1}){RESET}"
+        else: r_str = "Inactive / Zero Activity Trace"
+
+        print(f"#{current_rank:<3} | {eco:<26} | {v1:<10,} | {v2:<12,} | {v_str} | {r_str}")
+
+    print(f"\n{BOLD}II. THREAT BEHAVIOR VARIANCE:{RESET}")
+    print("-"*85)
+    for category in base["threat_profile"].keys():
+        b_count = base["threat_profile"].get(category, 0)
+        c_count = current["threat_profile"].get(category, 0)
+        diff = c_count - b_count
+        
+        raw_diff_str = f"{diff:+,}" if diff != 0 else "0"
+        padded_diff_str = f"{raw_diff_str:>10}"
+        
+        if diff > 0: diff_str = f"{GREEN}{padded_diff_str}{RESET}"
+        elif diff < 0: diff_str = f"{RED}{padded_diff_str}{RESET}"
+        else: diff_str = padded_diff_str
+            
+        print(f"-> {category:<35} | Base: {b_count:<7,} | Current: {c_count:<7,} | Delta: {diff_str}")
+
+    if base.get("malware_vectors") or current.get("malware_vectors"):
+        print(f"\n{BOLD}III. MALWARE VECTOR ATTACK MATRIX SHIFTS:{RESET}")
+        print("-"*85)
+        all_vectors = sorted(list(set(base.get("malware_vectors", {}).keys()).union(set(current.get("malware_vectors", {}).keys()))))
+        for vec in all_vectors:
+            b_v = base.get("malware_vectors", {}).get(vec, 0)
+            c_v = current.get("malware_vectors", {}).get(vec, 0)
+            v_diff = c_v - b_v
+            
+            raw_v_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
+            padded_v_diff_str = f"{raw_v_diff_str:>10}"
+            
+            if v_diff > 0: v_diff_str = f"{GREEN}{padded_v_diff_str}{RESET}"
+            elif v_diff < 0: v_diff_str = f"{RED}{padded_v_diff_str}{RESET}"
+            else: v_diff_str = padded_v_diff_str
+                
+            print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
+
+    if "profile_matrix" in base and "profile_matrix" in current:
+        print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
+        print("="*115)
+        print(f"{'Ecosystem / Registry':<22} | {'Avg Dwell MAL Delta':<26} | {'Avg Dwell CVE Delta':<26} | {'Avg Blast Radius Delta'}")
+        print("-"*115)
+        
+        for eco in sorted(list(set(base["profile_matrix"].keys()).union(set(current["profile_matrix"].keys())))):
+            b_mat = base["profile_matrix"].get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+            c_mat = current["profile_matrix"].get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+            
+            dm_base = b_mat.get("avg_dwell_mal", 0.0)
+            dc_base = b_mat.get("avg_dwell_cve", 0.0)
+            br_base = b_mat.get("avg_blast_radius", 0.0)
+            
+            dm_diff = c_mat["avg_dwell_mal"] - dm_base
+            dc_diff = c_mat["avg_dwell_cve"] - dc_base
+            br_diff = c_mat["avg_blast_radius"] - br_base
+            
+            def color_metric_string(diff, base_val, suffix, width_size):
+                if abs(diff) < 0.05:
+                    diff = 0.0
+                    
+                diff_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
+                raw_str = f"{diff_str:<12} (from {base_val:.1f})"
+                padded_raw = f"{raw_str:<{width_size}}"
+                
+                if diff == 0.0:
+                    return padded_raw
+                
+                return f"{RED}{padded_raw}{RESET}" if diff > 0 else f"{GREEN}{padded_raw}{RESET}"
+
+            dm_str = color_metric_string(dm_diff, dm_base, " Days", 26)
+            dc_str = color_metric_string(dc_diff, dc_base, " Days", 26)
+            br_str = color_metric_string(br_diff, br_base, " Vers", 26)
+
+            print(f"{eco:<22} | {dm_str} | {dc_str} | {br_str}")
+        print("="*115)
+        
+    if "outliers_leaderboards" in base and "outliers_leaderboards" in current:
+        print(f"\n{BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS VARIANCE ANALYSIS:{RESET}")
+        print("="*145)
+        
+        for eco in sorted(list(current["outliers_leaderboards"].keys())):
+            base_pool = base["outliers_leaderboards"].get(eco, {})
+            curr_pool = current["outliers_leaderboards"].get(eco, {})
+            
+            if not base_pool and not curr_pool: continue
+                
+            print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts (Top 10):{RESET}")
+            w_rank, w_id, w_name, w_cvss, w_radius = 5, 20, 28, 6, 22
+            print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Current Impact':<16} | {'Impact Delta':<18} | {'Rank Shift'}")
+            print(f"    {'-'*135}")
+            
+            base_mapped = []
+            for r_id, item in base_pool.items():
+                score = item[3] if len(item) > 3 else 0.0
+                base_mapped.append({"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": score})
+                
+            curr_mapped = []
+            for r_id, item in curr_pool.items():
+                score = item[3] if len(item) > 3 else 0.0
+                curr_mapped.append({"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": score})
+            
+            base_sorted_pool = sorted(base_mapped, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
+            curr_sorted_pool = sorted(curr_mapped, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
+            
+            base_ranks = {item["id"]: rank for rank, item in enumerate(base_sorted_pool, 1) if item["radius"] > 0}
+            curr_ranks = {item["id"]: rank for rank, item in enumerate(curr_sorted_pool, 1) if item["radius"] > 0}
+            
+            sortable_pool = []
+            all_advisories = set(base_pool.keys()).union(set(curr_pool.keys()))
+            
+            for r_id in all_advisories:
+                b_item = next((x for x in base_sorted_pool if x["id"] == r_id), {"radius": 0, "name": "N/A", "cvss": 0.0})
+                c_item = next((x for x in curr_sorted_pool if x["id"] == r_id), {"radius": 0, "name": "N/A", "cvss": 0.0})
+                
+                p_name = c_item["name"] if c_item["name"] != "N/A" else b_item["name"]
+                c_score = c_item["cvss"] if c_item["cvss"] > 0.0 else b_item["cvss"]
+
+                sortable_pool.append({
+                    "id": r_id, "name": p_name, "b_radius": b_item["radius"], "c_radius": c_item["radius"], "cvss": c_score
+                })
+                
+            sorted_advisories = sorted(sortable_pool, key=lambda x: (-x["cvss"], -x["c_radius"], x["id"]))
+            current_top_10 = sorted_advisories[:10]
+            
+            base_top_10_ids = {item["id"] for item in base_sorted_pool[:10]}
+            curr_top_10_ids = {item["id"] for item in current_top_10}
+            dropped_out_ids = base_top_10_ids - curr_top_10_ids
+            dropped_out = [item for item in sorted_advisories if item["id"] in dropped_out_ids]
+            
+            has_shifts = False
+            
+            for rank, item in enumerate(current_top_10, 1):
+                r_id = item["id"]
+                p_name = item["name"]
+                b_radius = item["b_radius"]
+                c_radius = item["c_radius"]
+                radius_diff = c_radius - b_radius
+                
+                if radius_diff > 0: raw_diff_str = f"+{radius_diff:,} Vers"
+                elif radius_diff < 0: raw_diff_str = f"{radius_diff:,} Vers"
+                else: raw_diff_str = "No Change"
+                    
+                b_rank = base_ranks.get(r_id)
+                c_rank = curr_ranks.get(r_id)
+                
+                if b_rank and c_rank:
+                    r_diff = b_rank - c_rank
+                    if r_diff > 0: raw_r_str = f"Up {r_diff} ({b_rank}->{c_rank})"
+                    elif r_diff < 0: raw_r_str = f"Down {abs(r_diff)} ({b_rank}->{c_rank})"
+                    else: raw_r_str = "No Change"
+                elif not b_rank and c_rank:
+                    raw_r_str = "New to Radar"
+                else:
+                    raw_r_str = "-"
+                    
+                if radius_diff != 0 or (b_rank and c_rank and b_rank != c_rank) or (not b_rank and c_rank):
+                    has_shifts = True
+                    
+                if radius_diff > 0: diff_display = f"{GREEN}{raw_diff_str:<18}{RESET}"
+                elif radius_diff < 0: diff_display = f"{RED}{raw_diff_str:<18}{RESET}"
+                else: diff_display = f"{raw_diff_str:<18}"
+                    
+                if "Up" in raw_r_str or "New" in raw_r_str: r_display = f"{GREEN}{raw_r_str}{RESET}"
+                elif "Down" in raw_r_str: r_display = f"{RED}{raw_r_str}{RESET}"
+                else: r_display = raw_r_str
+                    
+                c_str = f"{c_radius:,} Vers"
+                p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
+                cvss_display = f"{item['cvss']:.1f}"
+                
+                print(f"    #{rank:<{w_rank-1}} | {r_id:<{w_id}} | {p_name_display:<{w_name}} | {cvss_display:<{w_cvss}} | {c_str:<16} | {diff_display} | {r_display}")
+                
+            if dropped_out:
+                print(f"    {'-'*135}")
+                print(f"    {YELLOW}* The following advisories mitigated or dropped out of the {eco} Top 10:{RESET}")
+                for item in dropped_out:
+                    r_id = item['id']
+                    b_rank = base_ranks.get(r_id, "N/A")
+                    c_rank = curr_ranks.get(r_id, ">50") if item['c_radius'] > 0 else "Mitigated (0)"
+                    p_name_display = item["name"][:25] + "..." if len(item["name"]) > 28 else item["name"]
+                    print(f"      - {r_id:<20} | {p_name_display:<28} | Base Rank: #{b_rank:<3} -> Current Rank: {c_rank}")
+                
+            if not has_shifts and not dropped_out:
+                print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
+        print("="*145 + "\n")
+
+    # -------------------------------------------------------------------------
+    # VI. ANSI TERMINAL COMPARISON GRAPH
+    # -------------------------------------------------------------------------
+    print(f"\n{BOLD}VI. RELATIVE CHURN VELOCITY (TERMINAL GRAPH){RESET}")
+    print("="*85)
+    print(f"{'Ecosystem / Registry':<26} | {'Delta':<10} | {'Visual Sparkline'}")
+    print("-" * 85)
+    
+    max_abs_diff = max([abs(sanitized_curr_leaderboard.get(e, 0) - sanitized_base_leaderboard.get(e, 0)) for e in top_10_ecos] + [1])
+    max_bar_width = 30
+    
+    for eco in top_10_ecos:
+        v1 = sanitized_base_leaderboard.get(eco, 0)
+        v2 = sanitized_curr_leaderboard.get(eco, 0)
+        v_diff = v2 - v1
+        
+        bar_len = int((abs(v_diff) / max_abs_diff) * max_bar_width)
+        bar_char = "█" * max(bar_len, 1) if v_diff != 0 else "|"
+        
+        if v_diff > 0: color, sign = GREEN, "+"
+        elif v_diff < 0: color, sign = RED, ""
+        else: color, sign = RESET, " "
+            
+        delta_str = f"{sign}{v_diff:,}"
+        print(f"{eco:<26} | {delta_str:<10} | {color}{bar_char}{RESET}")
+
+    # -------------------------------------------------------------------------
+    # CONDITIONAL COMPARISON HTML EXPORT
+    # -------------------------------------------------------------------------
+    if html_output:
+        print(f"\n[*] Generating base64-embedded HTML comparison visualization...")
+        try:
+            # --- Chart 1: Volume Delta (Grouped Bar) ---
+            b_vals = [sanitized_base_leaderboard.get(e, 0) for e in top_10_ecos]
+            c_vals = [sanitized_curr_leaderboard.get(e, 0) for e in top_10_ecos]
+            x = np.arange(len(top_10_ecos))
+            width = 0.35
+            
+            fig1, ax1 = mplplt.subplots(figsize=(12, 5))
+            ax1.bar(x - width/2, b_vals, width, label='Base Snapshot', color='#6c757d')
+            ax1.bar(x + width/2, c_vals, width, label='Current Snapshot', color='#007bff')
+            
+            ax1.set_ylabel('Vulnerability Count')
+            ax1.set_title('Ecosystem Vulnerability Delta (Base vs. Current)')
+            ax1.set_xticks(x)
+            ax1.set_xticklabels(top_10_ecos, rotation=45, ha='right')
+            ax1.legend()
+            mplplt.tight_layout()
+            
+            buf1 = io.BytesIO()
+            fig1.savefig(buf1, format='png', bbox_inches='tight')
+            buf1.seek(0)
+            img_str_vol = base64.b64encode(buf1.read()).decode('utf-8')
+            mplplt.close(fig1)
+
+            # --- Chart 2: Profile Matrix (Diverging Bars) ---
+            dm_deltas, dc_deltas, br_deltas = [], [], []
+            for eco in top_10_ecos:
+                b_mat = base.get("profile_matrix", {}).get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+                c_mat = current.get("profile_matrix", {}).get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
+                
+                dm_deltas.append(c_mat.get("avg_dwell_mal", 0.0) - b_mat.get("avg_dwell_mal", 0.0))
+                dc_deltas.append(c_mat.get("avg_dwell_cve", 0.0) - b_mat.get("avg_dwell_cve", 0.0))
+                br_deltas.append(c_mat.get("avg_blast_radius", 0.0) - b_mat.get("avg_blast_radius", 0.0))
+
+            fig2, axes = mplplt.subplots(1, 3, figsize=(15, 5), sharey=True)
+            y_pos = np.arange(len(top_10_ecos))
+
+            def plot_diverging(ax, data, title, xlabel):
+                colors = ['#dc3545' if val > 0 else '#28a745' for val in data]
+                ax.barh(y_pos, data, color=colors)
+                ax.set_title(title)
+                ax.set_xlabel(xlabel)
+                ax.axvline(0, color='black', linewidth=1)
+                ax.grid(axis='x', linestyle='--', alpha=0.7)
+
+            plot_diverging(axes[0], dm_deltas, "Malware Dwell Delta", "Days")
+            plot_diverging(axes[1], dc_deltas, "CVE Dwell Delta", "Days")
+            plot_diverging(axes[2], br_deltas, "Blast Radius Delta", "Versions")
+
+            axes[0].set_yticks(y_pos)
+            axes[0].set_yticklabels(top_10_ecos)
+            axes[0].invert_yaxis() 
+
+            mplplt.tight_layout()
+            buf2 = io.BytesIO()
+            fig2.savefig(buf2, format='png', bbox_inches='tight')
+            buf2.seek(0)
+            img_str_div = base64.b64encode(buf2.read()).decode('utf-8')
+            mplplt.close(fig2)
+            
+            # --- Assemble HTML ---
+            html_report = f"""<!DOCTYPE html>
+            <html>
+            <head>
+                <title>AppSec Threat Delta Report</title>
+                <style>
+                    body {{ background-color: #121212; color: #e0e0e0; font-family: sans-serif; padding: 40px; }}
+                    .container {{ max-width: 1400px; margin: auto; background: #1e1e1e; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }}
+                    h1 {{ color: #ffffff; border-bottom: 1px solid #333; padding-bottom: 10px; }}
+                    h2 {{ color: #bbbbbb; margin-top: 30px; font-weight: 300; }}
+                    .chart {{ text-align: center; margin-top: 20px; background: #ffffff; padding: 15px; border-radius: 4px; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>AppSec Threat Delta Report</h1>
+                    <p><strong>Base Snapshot:</strong> {file_base} <br><strong>Current Snapshot:</strong> {file_current}</p>
+                    
+                    <h2>I. Volume Shifts</h2>
+                    <div class="chart">
+                        <img src="data:image/png;base64,{img_str_vol}" alt="Volume Chart" style="max-width: 100%;" />
+                    </div>
+
+                    <h2>II. Spatial Dwell & Blast Radius Variance</h2>
+                    <div class="chart">
+                        <img src="data:image/png;base64,{img_str_div}" alt="Diverging Chart" style="max-width: 100%;" />
+                    </div>
+                </div>
+            </body>
+            </html>"""
+            
+            with open(html_output, "w", encoding="utf-8") as f: f.write(html_report)
+            print(f"[+] HTML Comparison Report generated: {html_output}")
+            
+        except Exception as e:
+            print(f"\n{RED}[!] Failed to generate HTML output: {e}{RESET}")
+
+    print("="*85 + "\n")
+
 def main(): 
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
