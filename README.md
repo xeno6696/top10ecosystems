@@ -23,7 +23,19 @@ python db_warehouse.py
 ```
 *Note: If your local folder is clean, this automatically initializes your tracking tables, provisions the performance B-Tree blocks (`database/threat_stream.db`), and streams down the full ~1GB upstream bulk master snapshot archive package seamlessly in sequential 1MB chunks to safeguard your memory footprint.*
 
-### 3. Run the Main Dashboard Engine
+### 3. Initial Baseline Calibration
+When running the suite for the first time, you will likely encounter unit test failures in the text alignment alignment gates. This is **expected behavior** as the system compares live execution output against local "Golden Master" baseline files.
+
+1. **Run the suite:** ```bash
+   python test_runner.py --database
+   ```
+2. **Investigate the failure:** The `AssertionError` output will display a surgical line-by-line delta. Review this output. If the differences represent expected system formatting (e.g., local path differences) rather than data regressions, proceed to re-mint the baseline.
+3. **Calibrate:** Use the `--update` flag to force the engine to overwrite the existing baselines with the current, verified environment output:
+   ```bash
+   python test_runner.py --database --update
+   ```
+
+### 4. Run the Main Dashboard Engine
 With your relational data asset successfully populated and synchronized, call the core application using the `--database` execution flag to isolate operations to your local index:
 ```bash
 # Analyze application registry layers over a distinct historical interval
@@ -31,12 +43,6 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 
 # Compare two distinct historical exported JSON snapshots natively
 python top10ecosystems.py --database --compare snapshot_a.json snapshot_b.json
-```
-
-### 4. Execute the Verification Suite
-To validate workspace integrity, execute the optimized mock testing suite against your active database warehouse:
-```bash
-python test_runner.py --database
 ```
 
 ---
