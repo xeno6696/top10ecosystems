@@ -31,6 +31,8 @@ import requests
 import io
 from collections import Counter
 from cvss import CVSS2, CVSS3, CVSS4 # 💡 Imported for production CVSS parity
+import time
+from contextlib import contextmanager
 
 # Storage Routing Baselines
 DB_DIR = "database"
@@ -51,6 +53,13 @@ RESET = "\033[0m"
 KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
 KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 MASTER_TRACKS = KNOWN_CONTAINERS + KNOWN_REGISTRIES + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
+
+@contextmanager
+def execution_timer(label):
+    start = time.perf_counter()
+    yield
+    elapsed = time.perf_counter() - start
+    print(f"{GREEN}[⏱️  PERF] {label} completed in {elapsed:.3f} seconds{RESET}")
 
 def init_database():
     """Deploys the complete production warehouse relational schema layout."""
@@ -381,10 +390,12 @@ if __name__ == "__main__":
     print("=== OSV RELATIONAL DATA WAREHOUSE PROTOTYPE ===")
     connection = init_database()
     
-    # Phase 1: Seed base mapping logs from offline media (downloading zip chunked if missing)
-    bootstrap_warehouse_from_zip(connection)
+    # Phase 1: Seed base mapping logs
+    with execution_timer("Bootstrap (Bulk Archive Load)"):
+        bootstrap_warehouse_from_zip(connection)
     
-    # Phase 2: Pull localized dynamic deltas since file package timestamp modification age
-    sync_incremental_window(connection)
+    # Phase 2: Pull localized dynamic deltas
+    with execution_timer("Incremental Sync (API Stream)"):
+        sync_incremental_window(connection)
     
     connection.close()
