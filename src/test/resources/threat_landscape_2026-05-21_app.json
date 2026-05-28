@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-28T14:52:00.876289+00:00",
+        "generated_at": "2026-05-28T17:41:47.283482+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app"
@@ -29,70 +29,70 @@
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 80,
         "Dependency Confusion Campaign": 10,
-        "Data Exfiltration / Credential Stealer": 642,
-        "Persistent Backdoor / Execution Shell": 15,
-        "Unclassified Malicious Payload": 1092
+        "Data Exfiltration / Credential Stealer": 930,
+        "Persistent Backdoor / Execution Shell": 9,
+        "Unclassified Malicious Payload": 810
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_mal": 7.663894663894664,
+            "avg_dwell_cve": 54.583333333333336,
             "avg_blast_radius": 1.8833100883310088,
             "avg_backlog_age": 386.2
         },
         "PyPI": {
-            "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_mal": 32.24913494809689,
+            "avg_dwell_cve": 364.91905564924116,
             "avg_blast_radius": 73.79457627118644,
-            "avg_backlog_age": 310.4
+            "avg_backlog_age": 236.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 85.88,
             "avg_blast_radius": 0.5266666666666666,
-            "avg_backlog_age": 140.4
+            "avg_backlog_age": 30.9
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 69.52508361204013,
             "avg_blast_radius": 110.52842809364549,
-            "avg_backlog_age": 172.4
+            "avg_backlog_age": 143.4
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 198.60683760683762,
             "avg_blast_radius": 65.55982905982906,
-            "avg_backlog_age": 336.5
+            "avg_backlog_age": 412.0
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 98.21888412017168,
             "avg_blast_radius": 0.463519313304721,
-            "avg_backlog_age": 217.7
+            "avg_backlog_age": 134.2
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 41.56962025316456,
             "avg_blast_radius": 122.55696202531645,
-            "avg_backlog_age": 523.7
+            "avg_backlog_age": 477.0
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 100.34328358208955,
             "avg_blast_radius": 103.74626865671642,
-            "avg_backlog_age": 452.8
+            "avg_backlog_age": 380.0
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 8.071428571428571,
             "avg_blast_radius": 46.166666666666664,
-            "avg_backlog_age": 46.4
+            "avg_backlog_age": 90.2
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 0.0,
+            "avg_dwell_cve": 311.4166666666667,
             "avg_blast_radius": 15.083333333333334,
-            "avg_backlog_age": 120.4
+            "avg_backlog_age": 176.1
         }
     },
     "outliers_leaderboards": {
@@ -113,6 +113,12 @@
                 20,
                 "Malware (New Entry)",
                 "0e",
+                10.0
+            ],
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
                 10.0
             ],
             "MAL-2026-3433": [
@@ -390,15 +396,45 @@
                 "Malware (New Entry)",
                 "@squawk/procedure-data",
                 10.0
-            ],
-            "MAL-2026-3453": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/procedures",
-                10.0
             ]
         },
         "PyPI": {
+            "GHSA-r23q-823p-vmf7": [
+                166,
+                "Vulnerability Fix (Update)",
+                "mlflow",
+                10.0
+            ],
+            "GHSA-7p94-766c-hgjp": [
+                63,
+                "Vulnerability Fix (Update)",
+                "nltk",
+                10.0
+            ],
+            "PYSEC-2026-96": [
+                63,
+                "Vulnerability Fix (Update)",
+                "nltk",
+                10.0
+            ],
+            "PYSEC-2026-99": [
+                63,
+                "Vulnerability Fix (Update)",
+                "nltk",
+                10.0
+            ],
+            "GHSA-5882-5rx9-xgxp": [
+                61,
+                "Vulnerability Fix (Update)",
+                "crawl4ai",
+                10.0
+            ],
+            "PYSEC-2026-33": [
+                61,
+                "Vulnerability Fix (Update)",
+                "crawl4ai",
+                10.0
+            ],
             "MAL-2025-191927": [
                 56,
                 "Malware (New Entry)",
@@ -411,6 +447,18 @@
                 "pipecat-ai",
                 10.0
             ],
+            "GHSA-69v7-xpr6-6gjm": [
+                46,
+                "Vulnerability Fix (Update)",
+                "lupa",
+                10.0
+            ],
+            "GHSA-q9r5-6hrr-9ph7": [
+                38,
+                "Vulnerability Fix (Update)",
+                "smolagents",
+                10.0
+            ],
             "MAL-2026-3369": [
                 24,
                 "Malware (New Entry)",
@@ -421,6 +469,12 @@
                 20,
                 "Malware (New Entry)",
                 "swampo",
+                10.0
+            ],
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
                 10.0
             ],
             "MAL-2025-193014": [
@@ -585,6 +639,12 @@
                 "ggfmttygl-new",
                 10.0
             ],
+            "GHSA-33p6-5jxp-p3x4": [
+                5,
+                "Vulnerability Fix (Update)",
+                "utcp-cli",
+                10.0
+            ],
             "MAL-2025-191916": [
                 5,
                 "Malware (New Entry)",
@@ -638,158 +698,98 @@
                 "Malware (New Entry)",
                 "lyrox",
                 10.0
-            ],
-            "MAL-2026-3211": [
-                4,
-                "Malware (New Entry)",
-                "pycryptcore",
-                10.0
-            ],
-            "MAL-2026-3355": [
-                4,
-                "Malware (New Entry)",
-                "playwright-atoned",
-                10.0
-            ],
-            "MAL-2026-3424": [
-                4,
-                "Malware (New Entry)",
-                "dlocal-cli",
-                10.0
-            ],
-            "MAL-2026-3834": [
-                4,
-                "Malware (New Entry)",
-                "foundry-utils",
-                10.0
-            ],
-            "MAL-2026-4194": [
-                4,
-                "Malware (New Entry)",
-                "libhmac",
-                10.0
-            ],
-            "MAL-2025-192386": [
-                3,
-                "Malware (New Entry)",
-                "telcoo",
-                10.0
-            ],
-            "MAL-2025-192686": [
-                3,
-                "Malware (New Entry)",
-                "runtimeutils",
-                10.0
-            ],
-            "MAL-2026-2542": [
-                3,
-                "Malware (New Entry)",
-                "databasetrace",
-                10.0
-            ],
-            "MAL-2026-2863": [
-                3,
-                "Malware (New Entry)",
-                "rblx-studio-api",
-                10.0
-            ],
-            "MAL-2026-2945": [
-                3,
-                "Malware (New Entry)",
-                "moonbit-locale-compat",
-                10.0
             ]
         },
         "Go (Golang)": {
-            "GHSA-qppj-fm5r-hxr3": [
-                118,
-                "Vulnerability Fix (Update)",
-                "com.typesafe.akka:akka-http-core_2.11",
-                0.0
-            ],
-            "GHSA-7j59-v9qr-6fq9": [
-                88,
-                "Vulnerability Fix (Update)",
-                "github.com/microsoft/kiota-http-go",
-                0.0
-            ],
-            "GHSA-45x7-px36-x8w8": [
-                30,
-                "Vulnerability Fix (Update)",
-                "golang.org/x/crypto",
-                0.0
-            ],
-            "GHSA-jwvw-v7c5-m82h": [
-                25,
-                "Vulnerability Fix (Update)",
-                "protobuf",
-                0.0
-            ],
-            "GHSA-f396-4rp4-7v2j": [
-                18,
-                "Vulnerability Fix (Update)",
-                "github.com/boxlite-ai/boxlite/sdks/go",
-                0.0
-            ],
             "GHSA-g6ww-w5j2-r7x3": [
                 18,
                 "Vulnerability Fix (Update)",
                 "boxlite-cli",
-                0.0
-            ],
-            "GHSA-5wfc-hjrc-gq87": [
-                11,
-                "Vulnerability Fix (Update)",
-                "github.com/hjson/hjson-go/v4",
-                0.0
-            ],
-            "GHSA-7235-89m6-f4px": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/osrg/gobgp/v4",
-                0.0
-            ],
-            "GHSA-96qj-4jj5-wcjc": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/traefik/traefik",
-                0.0
-            ],
-            "GHSA-hqwm-7x7x-8379": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/loft-sh/devspace",
-                0.0
-            ],
-            "GHSA-m7cf-4gh2-v4qg": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/mattermost/mattermost/server/v8",
-                0.0
-            ],
-            "GHSA-mh4x-rmrx-3hp4": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/mattermost/mattermost-server",
-                0.0
-            ],
-            "GHSA-mxqh-q9h6-v8pq": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/0xJacky/nginx-ui",
-                0.0
-            ],
-            "GHSA-p3w2-64xm-833j": [
-                1,
-                "Vulnerability Fix (Update)",
-                "github.com/osrg/gobgp/v4",
-                0.0
+                10.0
             ],
             "GHSA-rqgh-gxv4-6657": [
                 1,
                 "Vulnerability Fix (Update)",
                 "github.com/gotenberg/gotenberg/v8",
-                0.0
+                9.8
+            ],
+            "GHSA-f396-4rp4-7v2j": [
+                18,
+                "Vulnerability Fix (Update)",
+                "github.com/boxlite-ai/boxlite/sdks/go",
+                9.6
+            ],
+            "GHSA-jwvw-v7c5-m82h": [
+                25,
+                "Vulnerability Fix (Update)",
+                "protobuf",
+                8.8
+            ],
+            "GHSA-mxqh-q9h6-v8pq": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/0xJacky/nginx-ui",
+                8.1
+            ],
+            "GHSA-hqwm-7x7x-8379": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/loft-sh/devspace",
+                7.7
+            ],
+            "GHSA-5wfc-hjrc-gq87": [
+                11,
+                "Vulnerability Fix (Update)",
+                "github.com/hjson/hjson-go/v4",
+                7.5
+            ],
+            "GHSA-7235-89m6-f4px": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/osrg/gobgp/v4",
+                7.5
+            ],
+            "GHSA-p3w2-64xm-833j": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/osrg/gobgp/v4",
+                7.5
+            ],
+            "GHSA-7j59-v9qr-6fq9": [
+                88,
+                "Vulnerability Fix (Update)",
+                "github.com/microsoft/kiota-http-go",
+                7.0
+            ],
+            "GHSA-m7cf-4gh2-v4qg": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/mattermost/mattermost/server/v8",
+                6.8
+            ],
+            "GHSA-mh4x-rmrx-3hp4": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/mattermost/mattermost-server",
+                6.5
+            ],
+            "GHSA-96qj-4jj5-wcjc": [
+                1,
+                "Vulnerability Fix (Update)",
+                "github.com/traefik/traefik",
+                6.4
+            ],
+            "GHSA-45x7-px36-x8w8": [
+                30,
+                "Vulnerability Fix (Update)",
+                "golang.org/x/crypto",
+                5.9
+            ],
+            "GHSA-qppj-fm5r-hxr3": [
+                118,
+                "Vulnerability Fix (Update)",
+                "com.typesafe.akka:akka-http-core_2.11",
+                5.3
             ]
         },
         "Packagist (PHP)": {
@@ -811,6 +811,12 @@
                 "ci4-cms-erp/ci4ms",
                 10.0
             ],
+            "GHSA-gph2-j4c9-vhhr": [
+                18,
+                "Vulnerability Fix (Update)",
+                "wwbn/avideo",
+                10.0
+            ],
             "GHSA-gxxh-8vcj-w2mh": [
                 4,
                 "Vulnerability Fix (Update)",
@@ -823,580 +829,580 @@
                 "intercom-php",
                 10.0
             ],
-            "GHSA-27qh-8cxx-2cr5": [
-                2232,
+            "GHSA-w59f-67xm-rxx7": [
+                107,
                 "Vulnerability Fix (Update)",
-                "aws/aws-sdk-php",
-                0.0
+                "froxlor/froxlor",
+                9.9
             ],
-            "GHSA-pf9c-ch8r-2958": [
-                494,
+            "GHSA-85m8-g393-jcxf": [
+                47,
                 "Vulnerability Fix (Update)",
-                "statamic/cms",
-                0.0
-            ],
-            "GHSA-m24v-f7g5-gq67": [
-                493,
-                "Vulnerability Fix (Update)",
-                "statamic/cms",
-                0.0
-            ],
-            "GHSA-4jjr-vmv7-wh4w": [
-                492,
-                "Vulnerability Fix (Update)",
-                "statamic/cms",
-                0.0
-            ],
-            "DRUPAL-CORE-2026-001": [
-                445,
-                "Vulnerability Fix (Update)",
-                "drupal/core",
-                0.0
-            ],
-            "DRUPAL-CORE-2026-002": [
-                445,
-                "Vulnerability Fix (Update)",
-                "drupal/core",
-                0.0
-            ],
-            "GHSA-vvj3-c3rp-c85p": [
-                415,
-                "Vulnerability Fix (Update)",
-                "phpunit/phpunit",
-                0.0
-            ],
-            "GHSA-7fv8-6pp7-6h85": [
-                364,
-                "Vulnerability Fix (Update)",
-                "sulu/sulu",
-                0.0
-            ],
-            "GHSA-9m6v-8fxc-4r44": [
-                364,
-                "Vulnerability Fix (Update)",
-                "sulu/sulu",
-                0.0
-            ],
-            "GHSA-g6v3-wv4j-x9hg": [
-                343,
-                "Vulnerability Fix (Update)",
-                "october/rain",
-                0.0
-            ],
-            "GHSA-gcqv-f29m-67gr": [
-                343,
-                "Vulnerability Fix (Update)",
-                "october/rain",
-                0.0
+                "ci4-cms-erp/ci4ms",
+                9.9
             ],
             "GHSA-x7m9-mwc2-g6w2": [
                 325,
                 "Vulnerability Fix (Update)",
                 "verbb/formie",
-                0.0
-            ],
-            "GHSA-j274-39qw-32c9": [
-                321,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-6xx2-m8wv-756h": [
-                319,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-3446-6mgw-f79p": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-3f29-pqwf-v4j4": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-9695-8fr9-hw5q": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-c2q3-p4jr-c55f": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-gwfr-jfjf-92vv": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-hmcx-ch82-3fv2": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-pxm6-mhxr-q4mj": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-r7fx-8g49-7hhr": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-rr73-568v-28f8": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-vj3m-2g9h-vm4p": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-w48r-jppp-rcfw": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-w8cg-7jcj-4vv2": [
-                317,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-748w-hm6r-qc7v": [
-                314,
-                "Vulnerability Fix (Update)",
-                "code16/sharp",
-                0.0
-            ],
-            "DRUPAL-CORE-2026-004": [
-                302,
-                "Vulnerability Fix (Update)",
-                "drupal/core",
-                0.0
-            ],
-            "GHSA-fmg2-f5r9-24qc": [
-                284,
-                "Vulnerability Fix (Update)",
-                "getgrav/grav",
-                0.0
-            ],
-            "GHSA-hq28-crg7-95pr": [
-                274,
-                "Vulnerability Fix (Update)",
-                "snipe/snipe-it",
-                0.0
-            ],
-            "GHSA-r42m-953q-6vjx": [
-                274,
-                "Vulnerability Fix (Update)",
-                "snipe/snipe-it",
-                0.0
+                9.8
             ],
             "GHSA-xg82-2hrv-hf64": [
                 274,
                 "Vulnerability Fix (Update)",
                 "snipe/snipe-it",
-                0.0
+                9.8
             ],
-            "GHSA-g9pc-8g42-g6vq": [
-                254,
+            "GHSA-289f-fq7w-6q2w": [
+                170,
                 "Vulnerability Fix (Update)",
-                "spiral/roadrunner",
-                0.0
+                "phpmyfaq/phpmyfaq",
+                9.8
             ],
-            "GHSA-h6jm-f4hh-fw27": [
-                248,
+            "GHSA-8q4h-8crm-5cvc": [
+                74,
                 "Vulnerability Fix (Update)",
-                "october/october",
-                0.0
+                "studio-42/elfinder",
+                9.8
             ],
-            "GHSA-4j38-f5cw-54h7": [
-                242,
+            "GHSA-fm6c-rhcf-7439": [
+                60,
                 "Vulnerability Fix (Update)",
-                "twig/twig",
-                0.0
+                "cockpit-hq/cockpit",
+                9.8
             ],
-            "GHSA-7fxw-r6jv-74c8": [
-                242,
+            "GHSA-fg86-4c2r-7wxw": [
+                26,
                 "Vulnerability Fix (Update)",
-                "twig/twig",
-                0.0
+                "torrentpier/torrentpier",
+                9.8
+            ],
+            "GHSA-xr6f-h4x7-r6qp": [
+                18,
+                "Vulnerability Fix (Update)",
+                "wwbn/avideo",
+                9.8
+            ],
+            "GHSA-pxm6-mhxr-q4mj": [
+                317,
+                "Vulnerability Fix (Update)",
+                "getgrav/grav",
+                9.4
+            ],
+            "GHSA-xp9f-pvvc-57p4": [
+                52,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                9.4
+            ],
+            "GHSA-xv3r-vr59-95rg": [
+                52,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                9.4
+            ],
+            "GHSA-4rm2-28vj-fj39": [
+                20,
+                "Vulnerability Fix (Update)",
+                "dedoc/scramble",
+                9.4
+            ],
+            "GHSA-fv26-4939-62fh": [
+                12,
+                "Vulnerability Fix (Update)",
+                "nabeel/phpvms",
+                9.4
             ],
             "GHSA-7p85-w9px-jpjp": [
                 242,
                 "Vulnerability Fix (Update)",
                 "twig/twig",
-                0.0
+                9.3
             ],
-            "GHSA-vcc8-phrv-43wj": [
-                242,
+            "GHSA-w9f3-qc75-qgx9": [
+                103,
                 "Vulnerability Fix (Update)",
-                "twig/twig",
-                0.0
+                "prestashop/prestashop",
+                9.3
             ],
-            "GHSA-3m9m-24vh-39wx": [
-                240,
+            "GHSA-2cwr-gcf9-pvxr": [
+                91,
                 "Vulnerability Fix (Update)",
-                "craftcms/cms",
-                0.0
+                "openmage/magento-lts",
+                9.3
             ],
-            "GHSA-95wr-3f2v-v2wh": [
-                240,
+            "GHSA-pq8p-wc4f-vg7j": [
+                18,
                 "Vulnerability Fix (Update)",
-                "craftcms/cms",
-                0.0
+                "wwbn/avideo",
+                9.3
             ],
-            "GHSA-gj2p-p9m4-c8gw": [
-                240,
+            "GHSA-gr3r-crp5-qrrm": [
+                1,
                 "Vulnerability Fix (Update)",
-                "craftcms/cms",
-                0.0
+                "intercom/intercom-php",
+                9.3
             ],
-            "GHSA-qrgm-p9w5-rrfw": [
-                240,
+            "GHSA-q4q6-r8wh-5cgh": [
+                60,
                 "Vulnerability Fix (Update)",
-                "craftcms/cms",
-                0.0
+                "phpoffice/phpspreadsheet",
+                9.2
             ],
-            "GHSA-2h7v-4372-f6x2": [
-                233,
+            "GHSA-w48r-jppp-rcfw": [
+                317,
                 "Vulnerability Fix (Update)",
-                "getkirby/cms",
-                0.0
+                "getgrav/grav",
+                9.1
             ],
-            "GHSA-39cp-6679-8xv2": [
-                233,
+            "GHSA-g9pc-8g42-g6vq": [
+                254,
                 "Vulnerability Fix (Update)",
-                "getkirby/cms",
-                0.0
+                "spiral/roadrunner",
+                9.1
             ],
-            "GHSA-6gqr-mx34-wh8r": [
-                233,
+            "GHSA-9pq7-mfwh-xx2j": [
+                170,
                 "Vulnerability Fix (Update)",
-                "getkirby/cms",
-                0.0
+                "phpmyfaq/phpmyfaq",
+                9.1
+            ],
+            "GHSA-x645-6pf9-xwxw": [
+                130,
+                "Vulnerability Fix (Update)",
+                "librenms/librenms",
+                9.1
+            ],
+            "GHSA-w5j3-8fcr-h87w": [
+                112,
+                "Vulnerability Fix (Update)",
+                "dolibarr/dolibarr",
+                9.1
+            ],
+            "GHSA-gc9w-cc93-rjv8": [
+                107,
+                "Vulnerability Fix (Update)",
+                "froxlor/froxlor",
+                9.1
+            ],
+            "GHSA-5ghq-42rg-769x": [
+                49,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                9.1
+            ],
+            "GHSA-66m2-v9v9-95c3": [
+                47,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                9.1
+            ],
+            "GHSA-gcfj-cf7j-vwgj": [
+                47,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                9.1
+            ],
+            "GHSA-vr2g-rhm5-q4jr": [
+                56,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                9.0
+            ],
+            "GHSA-w8cg-7jcj-4vv2": [
+                317,
+                "Vulnerability Fix (Update)",
+                "getgrav/grav",
+                8.9
+            ],
+            "GHSA-hmcx-ch82-3fv2": [
+                317,
+                "Vulnerability Fix (Update)",
+                "getgrav/grav",
+                8.8
+            ],
+            "GHSA-xvp4-phqj-cjr3": [
+                171,
+                "Vulnerability Fix (Update)",
+                "phpmyfaq/phpmyfaq",
+                8.8
+            ],
+            "GHSA-gqw4-4w2p-838q": [
+                146,
+                "Vulnerability Fix (Update)",
+                "composer/composer",
+                8.8
+            ],
+            "GHSA-676v-wh57-p375": [
+                112,
+                "Vulnerability Fix (Update)",
+                "dolibarr/dolibarr",
+                8.8
+            ],
+            "GHSA-j2g9-rprv-hrhc": [
+                112,
+                "Vulnerability Fix (Update)",
+                "dolibarr/dolibarr",
+                8.8
+            ],
+            "GHSA-3j5q-7q7h-2hhv": [
+                90,
+                "Vulnerability Fix (Update)",
+                "openmage/magento-lts",
+                8.8
+            ],
+            "GHSA-q4ph-8x8g-95f8": [
+                80,
+                "Vulnerability Fix (Update)",
+                "azuracast/azuracast",
+                8.8
+            ],
+            "GHSA-vp2f-cqqp-478j": [
+                80,
+                "Vulnerability Fix (Update)",
+                "azuracast/azuracast",
+                8.8
+            ],
+            "GHSA-c3gj-q88f-7hqj": [
+                75,
+                "Vulnerability Fix (Update)",
+                "studio-42/elfinder",
+                8.8
+            ],
+            "GHSA-xwqr-rcqg-22mr": [
+                67,
+                "Vulnerability Fix (Update)",
+                "flightphp/core",
+                8.8
+            ],
+            "GHSA-j2rx-4jg9-79mw": [
+                60,
+                "Vulnerability Fix (Update)",
+                "cockpit-hq/cockpit",
+                8.8
+            ],
+            "GHSA-4rwr-8c3m-55f6": [
+                58,
+                "Vulnerability Fix (Update)",
+                "torrentpier/torrentpier",
+                8.8
+            ],
+            "GHSA-8fq3-c5w3-pj3q": [
+                47,
+                "Vulnerability Fix (Update)",
+                "ci4-cms-erp/ci4ms",
+                8.8
             ]
         },
         "Maven (Java)": {
-            "GHSA-3653-68v6-rq57": [
-                386,
+            "GHSA-8gpm-h2mh-36qc": [
+                9,
                 "Vulnerability Fix (Update)",
-                "ca.uhn.hapi.fhir:org.hl7.fhir.validation.cli",
-                0.0
+                "org.eclipse.basyx:basyx.sdk",
+                10.0
+            ],
+            "GHSA-695c-x5gc-94gj": [
+                6,
+                "Vulnerability Fix (Update)",
+                "org.apache.camel:camel-coap",
+                10.0
+            ],
+            "GHSA-f5w4-7ccj-5m75": [
+                1,
+                "Vulnerability Fix (Update)",
+                "com.shopizer:shopizer",
+                10.0
             ],
             "GHSA-69rw-45wj-g4v6": [
                 362,
                 "Vulnerability Fix (Update)",
                 "io.spinnaker.echo:echo-pipelinetriggers",
-                0.0
+                9.9
             ],
-            "GHSA-rc95-pcm8-65v9": [
-                356,
+            "GHSA-x3j7-7pgj-h87r": [
+                103,
                 "Vulnerability Fix (Update)",
-                "io.quarkus:quarkus-vertx-http",
-                0.0
+                "io.spinnaker.clouddriver:clouddriver-artifacts-gitrepo",
+                9.9
             ],
-            "GHSA-3x3v-w654-m28m": [
-                337,
+            "GHSA-7mqr-33rv-p3mp": [
+                47,
                 "Vulnerability Fix (Update)",
-                "io.undertow:undertow-core",
-                0.0
+                "io.openremote:openremote-manager",
+                9.9
             ],
-            "GHSA-3rfq-4wpf-qqw3": [
-                334,
+            "GHSA-8ggj-j522-h5qf": [
+                6,
                 "Vulnerability Fix (Update)",
-                "io.micronaut:micronaut-inject",
-                0.0
+                "org.apache.polaris:polaris-runtime-service",
+                9.9
             ],
-            "GHSA-5mp6-jrq3-r938": [
-                322,
+            "GHSA-fc3h-c6h7-r83j": [
+                6,
                 "Vulnerability Fix (Update)",
-                "org.apache.tomcat:tomcat-catalina",
-                0.0
+                "org.apache.polaris:polaris-core",
+                9.9
             ],
-            "GHSA-fv25-8xcx-gqjc": [
-                322,
+            "GHSA-vxgg-mqx2-3w59": [
+                6,
                 "Vulnerability Fix (Update)",
-                "org.apache.tomcat:tomcat-catalina",
-                0.0
+                "org.apache.polaris:polaris-core",
+                9.9
             ],
-            "GHSA-gx5v-xp9w-j4cg": [
-                322,
+            "GHSA-w76p-3cgp-qfcm": [
+                6,
                 "Vulnerability Fix (Update)",
-                "org.apache.tomcat:tomcat-catalina",
-                0.0
+                "org.apache.polaris:polaris-runtime-service",
+                9.9
             ],
             "GHSA-h6fc-48rj-7qqh": [
                 322,
                 "Vulnerability Fix (Update)",
                 "org.apache.tomcat:tomcat-catalina",
-                0.0
+                9.8
             ],
             "GHSA-r29c-68gh-xp6x": [
                 322,
                 "Vulnerability Fix (Update)",
                 "org.apache.tomcat:tomcat-catalina",
-                0.0
+                9.8
             ],
-            "GHSA-563x-q5rq-57qp": [
-                320,
+            "GHSA-c9hw-wf7x-jp9j": [
+                81,
                 "Vulnerability Fix (Update)",
                 "org.apache.tomcat.embed:tomcat-embed-core",
-                0.0
+                9.8
             ],
-            "GHSA-4fwr-mh5q-hchh": [
-                291,
+            "GHSA-fw88-pf9m-p947": [
+                39,
                 "Vulnerability Fix (Update)",
-                "io.quarkus:quarkus-resteasy",
-                0.0
+                "org.apache.artemis:artemis-server",
+                9.8
             ],
-            "GHSA-qmcv-hh7c-3m56": [
-                255,
+            "GHSA-cx4m-2p55-rw7j": [
+                36,
                 "Vulnerability Fix (Update)",
-                "ai.h2o:h2o-core",
-                0.0
+                "org.apache.opennlp:opennlp-tools",
+                9.8
             ],
-            "GHSA-6p4f-wcwh-5vvm": [
-                250,
+            "GHSA-8297-v2rf-2p32": [
+                28,
                 "Vulnerability Fix (Update)",
-                "org.springframework:spring-webmvc",
-                0.0
+                "org.apache.mina:mina-core",
+                9.8
             ],
-            "GHSA-wg35-8jpf-2xv3": [
-                250,
+            "GHSA-f2wh-grmh-r6jm": [
+                28,
                 "Vulnerability Fix (Update)",
-                "org.springframework:spring-webmvc",
-                0.0
+                "org.apache.mina:mina-core",
+                9.8
             ],
-            "GHSA-38f8-5428-x5cv": [
-                226,
+            "GHSA-5p34-5m6p-p58g": [
+                21,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-http",
-                0.0
+                "com.fasterxml.jackson.core:jackson-databind",
+                9.8
             ],
-            "GHSA-57rv-r2g8-2cj3": [
-                226,
+            "GHSA-4wrr-9h5r-m92w": [
+                16,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-http",
-                0.0
+                "org.apache.struts.xwork:xwork-core",
+                9.8
             ],
-            "GHSA-f6hv-jmp6-3vwv": [
-                226,
+            "GHSA-995c-6rp3-4m4x": [
+                12,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-http2",
-                0.0
+                "org.apache.mina:mina-core",
+                9.8
             ],
-            "GHSA-hm32-hfmw-rhvg": [
-                226,
+            "GHSA-vf5j-865m-mq7c": [
+                12,
                 "Vulnerability Fix (Update)",
-                "org.keycloak:keycloak-services",
-                0.0
+                "org.apache.mina:mina-core",
+                9.8
             ],
-            "GHSA-m4cv-j2px-7723": [
-                226,
+            "GHSA-84m3-f99p-cqx5": [
+                10,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-http",
-                0.0
+                "github.com/pytorch/executorch",
+                9.8
             ],
-            "GHSA-mj4r-2hfc-f8p6": [
-                226,
+            "GHSA-9m39-3mf3-xwch": [
+                10,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec",
-                0.0
+                "github.com/pytorch/executorch",
+                9.8
             ],
-            "GHSA-v8h7-rr48-vmmv": [
-                226,
+            "GHSA-f9hx-c6jf-3qxm": [
+                10,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-http",
-                0.0
+                "github.com/pytorch/executorch",
+                9.8
             ],
-            "GHSA-xxqh-mfjm-7mv9": [
-                226,
+            "GHSA-hj95-mhgf-jxc4": [
+                10,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-http",
-                0.0
+                "github.com/pytorch/executorch",
+                9.8
             ],
-            "GHSA-xfxp-ppx7-cqrp": [
-                224,
+            "GHSA-xc7w-r669-48pf": [
+                10,
                 "Vulnerability Fix (Update)",
-                "org.apache.camel:camel-infinispan",
-                0.0
+                "github.com/pytorch/executorch",
+                9.8
             ],
-            "GHSA-x4p7-7chp-64hq": [
-                221,
+            "GHSA-fvh3-672c-7p6c": [
+                9,
                 "Vulnerability Fix (Update)",
-                "org.keycloak:keycloak-server-spi-private",
-                0.0
+                "org.springframework.ai:spring-ai-vector-store",
+                9.8
             ],
-            "GHSA-wwpq-f5c3-7hvx": [
-                186,
+            "GHSA-fgh3-pwmp-3qw3": [
+                5,
                 "Vulnerability Fix (Update)",
-                "org.springframework.boot:spring-boot",
-                0.0
+                "org.apache.inlong:manager-pojo",
+                9.8
             ],
-            "GHSA-9vmh-whc4-7phg": [
-                175,
+            "GHSA-29xr-v42j-r956": [
+                2,
                 "Vulnerability Fix (Update)",
-                "org.open-metadata:openmetadata-service",
-                0.0
+                "org.webjars.npm:thenify",
+                9.8
             ],
-            "GHSA-p334-gfhq-c7w6": [
-                164,
+            "GHSA-vfww-5hm6-hx2j": [
+                58,
                 "Vulnerability Fix (Update)",
-                "org.jenkins-ci.plugins:script-security",
-                0.0
-            ],
-            "GHSA-wg26-8wmj-cf9p": [
-                162,
-                "Vulnerability Fix (Update)",
-                "org.jenkins-ci.plugins:github-branch-source",
-                0.0
-            ],
-            "GHSA-56v8-86gj-66jp": [
-                161,
-                "Vulnerability Fix (Update)",
-                "org.springframework.boot:spring-boot-devtools",
-                0.0
-            ],
-            "GHSA-cm33-6792-r9fm": [
-                148,
-                "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-dns",
-                0.0
-            ],
-            "GHSA-jfg9-48mv-9qgx": [
-                148,
-                "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-mqtt",
-                0.0
-            ],
-            "GHSA-45q3-82m4-75jr": [
-                145,
-                "Vulnerability Fix (Update)",
-                "io.netty:netty-handler-proxy",
-                0.0
-            ],
-            "GHSA-7xpr-hc2w-34m9": [
-                141,
-                "Vulnerability Fix (Update)",
-                "com.squareup.wire:wire-runtime",
-                0.0
-            ],
-            "GHSA-v4mm-q8fv-r2w5": [
-                141,
-                "Vulnerability Fix (Update)",
-                "org.wildfly.security:wildfly-elytron-realm-token",
-                0.0
-            ],
-            "GHSA-w9mf-83w3-fv49": [
-                140,
-                "Vulnerability Fix (Update)",
-                "org.keycloak:keycloak-parent",
-                0.0
+                "org.apache.tomcat:tomcat-catalina",
+                9.6
             ],
             "GHSA-2vqf-x7g4-7c2g": [
                 134,
                 "Vulnerability Fix (Update)",
                 "org.apache.camel:camel-mail",
-                0.0
+                9.4
             ],
-            "GHSA-5rc6-9qfp-8vwg": [
-                134,
+            "GHSA-prf8-cf2x-rhx7": [
+                58,
                 "Vulnerability Fix (Update)",
-                "org.apache.camel:camel-consul",
-                0.0
+                "org.hyperledger.fabric-sdk-java:fabric-sdk-java",
+                9.3
             ],
-            "GHSA-rgv9-q543-rqg4": [
-                134,
+            "GHSA-j7j9-5253-f7vh": [
+                55,
                 "Vulnerability Fix (Update)",
-                "com.fasterxml.jackson.core:jackson-databind",
-                0.0
+                "com.ritense.valtimo:contract",
+                9.1
+            ],
+            "GHSA-95jq-rwvf-vjx4": [
+                54,
+                "Vulnerability Fix (Update)",
+                "org.apache.tomcat:tomcat",
+                9.1
+            ],
+            "GHSA-4v8g-86x5-3vrc": [
+                36,
+                "Vulnerability Fix (Update)",
+                "org.apache.opennlp:opennlp-tools",
+                9.1
+            ],
+            "GHSA-qpjw-p3jg-59j6": [
+                29,
+                "Vulnerability Fix (Update)",
+                "org.apache.wicket:wicket-auth-roles",
+                9.1
+            ],
+            "GHSA-6g23-24mc-hx6x": [
+                11,
+                "Vulnerability Fix (Update)",
+                "org.springframework.cloud:spring-cloud-config-server",
+                9.1
+            ],
+            "GHSA-8v8j-3hxp-93wr": [
+                6,
+                "Vulnerability Fix (Update)",
+                "org.springframework.boot:spring-boot",
+                9.1
+            ],
+            "GHSA-qqcj-rghw-829x": [
+                6,
+                "Vulnerability Fix (Update)",
+                "io.unitycatalog:unitycatalog-server",
+                9.1
+            ],
+            "GHSA-x3r2-fj3r-g5mv": [
+                3,
+                "Vulnerability Fix (Update)",
+                "io.github.davidalmeidac:sealed-env-core",
+                9.1
+            ],
+            "GHSA-28jg-cgg7-j4wc": [
+                2,
+                "Vulnerability Fix (Update)",
+                "org.apache.kafka:kafka-clients",
+                9.1
+            ],
+            "GHSA-c9ph-gxww-7744": [
+                82,
+                "Vulnerability Fix (Update)",
+                "org.thymeleaf:thymeleaf-spring6",
+                9.0
+            ],
+            "GHSA-r4v4-5mwr-2fwr": [
+                81,
+                "Vulnerability Fix (Update)",
+                "org.thymeleaf:thymeleaf-spring6",
+                9.0
+            ],
+            "GHSA-xjw8-8c5c-9r79": [
+                81,
+                "Vulnerability Fix (Update)",
+                "org.thymeleaf:thymeleaf-spring6",
+                9.0
+            ],
+            "GHSA-fxc7-fm93-6q77": [
+                54,
+                "Vulnerability Fix (Update)",
+                "com.arcadedb:arcadedb-server",
+                9.0
+            ],
+            "GHSA-w22p-4x9f-486v": [
+                5,
+                "Vulnerability Fix (Update)",
+                "org.jenkins-ci.plugins:git",
+                9.0
+            ],
+            "GHSA-p93r-85wp-75v3": [
+                15,
+                "Vulnerability Fix (Update)",
+                "org.bouncycastle:bcprov-jdk18on",
+                8.9
             ],
             "GHSA-vpr3-2659-rw55": [
                 134,
                 "Vulnerability Fix (Update)",
                 "org.apache.camel:camel-mina",
-                0.0
+                8.8
             ],
-            "GHSA-rgrr-p7gp-5xj7": [
-                133,
+            "GHSA-mr6m-xj7v-3cv3": [
+                91,
                 "Vulnerability Fix (Update)",
-                "io.netty:netty-codec-redis",
-                0.0
+                "org.apache.activemq:activemq-broker",
+                8.8
             ],
-            "GHSA-8hjv-92q9-g4xj": [
-                126,
+            "GHSA-w3w2-mpp5-92gm": [
+                91,
                 "Vulnerability Fix (Update)",
-                "io.micronaut:micronaut-context",
-                0.0
-            ],
-            "GHSA-98qh-xjc8-98pq": [
-                125,
-                "Vulnerability Fix (Update)",
-                "org.postgresql:postgresql",
-                0.0
-            ],
-            "GHSA-qppj-fm5r-hxr3": [
-                118,
-                "Vulnerability Fix (Update)",
-                "com.typesafe.akka:akka-http-core_2.11",
-                0.0
-            ],
-            "GHSA-xw5c-jc7x-gf75": [
-                113,
-                "Vulnerability Fix (Update)",
-                "org.pac4j:pac4j-core",
-                0.0
-            ],
-            "GHSA-fmxf-pm6p-7xgm": [
-                110,
-                "Vulnerability Fix (Update)",
-                "org.asynchttpclient:async-http-client",
-                0.0
-            ],
-            "GHSA-cmxv-58fp-fm3g": [
-                109,
-                "Vulnerability Fix (Update)",
-                "org.asynchttpclient:async-http-client",
-                0.0
-            ],
-            "GHSA-hgrr-935x-pq79": [
-                109,
-                "Vulnerability Fix (Update)",
-                "org.apache.tomcat.embed:tomcat-embed-core",
-                0.0
-            ],
-            "GHSA-5843-p793-ghmm": [
-                108,
-                "Vulnerability Fix (Update)",
-                "org.springframework:spring-webflux",
-                0.0
-            ],
-            "GHSA-wmwf-9ccg-fff5": [
-                108,
-                "Vulnerability Fix (Update)",
-                "org.apache.tomcat.embed:tomcat-embed-core",
-                0.0
+                "org.apache.activemq:activemq-broker",
+                8.8
             ]
         },
         "Crates.io": {
+            "GHSA-g6ww-w5j2-r7x3": [
+                18,
+                "Vulnerability Fix (Update)",
+                "boxlite-cli",
+                10.0
+            ],
             "MAL-2026-3126": [
                 2,
                 "Vulnerability Fix (Update)",
@@ -1433,148 +1439,142 @@
                 "supertag",
                 10.0
             ],
-            "GHSA-45x7-px36-x8w8": [
-                30,
-                "Vulnerability Fix (Update)",
-                "golang.org/x/crypto",
-                0.0
-            ],
             "GHSA-f396-4rp4-7v2j": [
                 18,
                 "Vulnerability Fix (Update)",
                 "github.com/boxlite-ai/boxlite/sdks/go",
-                0.0
-            ],
-            "GHSA-g6ww-w5j2-r7x3": [
-                18,
-                "Vulnerability Fix (Update)",
-                "boxlite-cli",
-                0.0
-            ],
-            "GHSA-88q9-cmp2-c2vq": [
-                11,
-                "Vulnerability Fix (Update)",
-                "oxidize-pdf",
-                0.0
-            ],
-            "GHSA-fmq6-4w57-2w3v": [
-                5,
-                "Vulnerability Fix (Update)",
-                "wasm3",
-                0.0
-            ],
-            "GHSA-22w3-693w-x895": [
-                1,
-                "Vulnerability Fix (Update)",
-                "webauthn-authenticator-rs",
-                0.0
-            ],
-            "GHSA-394w-hwhg-8vgm": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-429q-fhh4-r6hj": [
-                1,
-                "Vulnerability Fix (Update)",
-                "anchor-lang",
-                0.0
-            ],
-            "GHSA-5qv7-j6w5-fr4m": [
-                1,
-                "Vulnerability Fix (Update)",
-                "imageproc",
-                0.0
-            ],
-            "GHSA-6wgr-89rj-399p": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-83hf-93m4-rgwq": [
-                1,
-                "Vulnerability Fix (Update)",
-                "hickory-recursor",
-                0.0
-            ],
-            "GHSA-cq8v-f236-94qc": [
-                1,
-                "Vulnerability Fix (Update)",
-                "rand",
-                0.0
-            ],
-            "GHSA-f984-pcp8-v2p7": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-hfr4-7c6c-48w2": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-hx6p-xpx3-jvvv": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-jhxm-h53p-jm7w": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-jxhv-7h78-9775": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-m758-wjhj-p3jq": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-m9w2-8782-2946": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-q49f-xg75-m9xw": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-qg8r-f7x3-25f7": [
-                1,
-                "Vulnerability Fix (Update)",
-                "imageproc",
-                0.0
-            ],
-            "GHSA-qqfj-4vcm-26hv": [
-                1,
-                "Vulnerability Fix (Update)",
-                "wasmtime",
-                0.0
-            ],
-            "GHSA-w5p8-4jcx-2j6r": [
-                1,
-                "Vulnerability Fix (Update)",
-                "imageproc",
-                0.0
+                9.6
             ],
             "GHSA-xx5w-cvp6-jv83": [
                 1,
                 "Vulnerability Fix (Update)",
                 "wasmtime",
+                9.2
+            ],
+            "GHSA-429q-fhh4-r6hj": [
+                1,
+                "Vulnerability Fix (Update)",
+                "anchor-lang",
+                8.7
+            ],
+            "GHSA-83hf-93m4-rgwq": [
+                1,
+                "Vulnerability Fix (Update)",
+                "hickory-recursor",
+                8.7
+            ],
+            "GHSA-fmq6-4w57-2w3v": [
+                5,
+                "Vulnerability Fix (Update)",
+                "wasm3",
+                8.4
+            ],
+            "GHSA-hx6p-xpx3-jvvv": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                8.1
+            ],
+            "GHSA-jhxm-h53p-jm7w": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                7.8
+            ],
+            "GHSA-m758-wjhj-p3jq": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                7.5
+            ],
+            "GHSA-q49f-xg75-m9xw": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                7.5
+            ],
+            "GHSA-5qv7-j6w5-fr4m": [
+                1,
+                "Vulnerability Fix (Update)",
+                "imageproc",
+                6.9
+            ],
+            "GHSA-qg8r-f7x3-25f7": [
+                1,
+                "Vulnerability Fix (Update)",
+                "imageproc",
+                6.9
+            ],
+            "GHSA-w5p8-4jcx-2j6r": [
+                1,
+                "Vulnerability Fix (Update)",
+                "imageproc",
+                6.9
+            ],
+            "GHSA-jxhv-7h78-9775": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                6.5
+            ],
+            "GHSA-m9w2-8782-2946": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                6.5
+            ],
+            "GHSA-394w-hwhg-8vgm": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                6.1
+            ],
+            "GHSA-f984-pcp8-v2p7": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                6.1
+            ],
+            "GHSA-45x7-px36-x8w8": [
+                30,
+                "Vulnerability Fix (Update)",
+                "golang.org/x/crypto",
+                5.9
+            ],
+            "GHSA-qqfj-4vcm-26hv": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                5.7
+            ],
+            "GHSA-88q9-cmp2-c2vq": [
+                11,
+                "Vulnerability Fix (Update)",
+                "oxidize-pdf",
+                4.3
+            ],
+            "GHSA-22w3-693w-x895": [
+                1,
+                "Vulnerability Fix (Update)",
+                "webauthn-authenticator-rs",
+                2.3
+            ],
+            "GHSA-6wgr-89rj-399p": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                2.3
+            ],
+            "GHSA-hfr4-7c6c-48w2": [
+                1,
+                "Vulnerability Fix (Update)",
+                "wasmtime",
+                1.0
+            ],
+            "GHSA-cq8v-f236-94qc": [
+                1,
+                "Vulnerability Fix (Update)",
+                "rand",
                 0.0
             ]
         },
@@ -1589,295 +1589,295 @@
                 341,
                 "Vulnerability Fix (Update)",
                 "Marten",
-                0.0
+                9.8
             ],
-            "GHSA-36wm-hprc-mcf5": [
-                231,
+            "GHSA-gvvw-8j96-8g5r": [
+                1,
                 "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-533m-3wf6-c33v": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-5r4x-w6p5-222q": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-7gg8-qqx7-92g5": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-7wff-wpr6-vmhm": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-cr6r-hmj8-pr7r": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-cwpj-h54c-xjpx": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-g5mf-wqq5-vwg6": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-jcqp-6r6f-3mfx": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-pfvh-m9xv-8966": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-rcr6-g7jc-f57g": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-vhrh-72hq-w8m7": [
-                231,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-26qp-ffjh-2x4v": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-5592-p365-24xh": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-5xg3-585r-9jh5": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-cr67-pvmx-2pp2": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-f4qm-vj5j-9xpw": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-fwvm-ggf6-2p4x": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-jqq5-8px3-9m6m": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-jvgr-9ph5-m8v4": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-pcvx-ph33-r5vv": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-pwg5-6jfc-crvh": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-qv2q-c278-pch5": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-r83h-crwp-3vm7": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-v67w-737x-v2c9": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-vf33-6r7x-66xx": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-x9h5-r9v2-vcww": [
-                229,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-9vj4-wc7r-p844": [
-                224,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q16-HDRI-AnyCPU",
-                0.0
-            ],
-            "GHSA-6hjr-v6g4-3fm8": [
-                222,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-wpp4-vqfq-v4hp": [
-                221,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q16-HDRI-arm64",
-                0.0
-            ],
-            "GHSA-cjc8-g9w8-chfw": [
-                217,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
-            ],
-            "GHSA-vmhh-8rxq-fp9g": [
-                216,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q16-HDRI-OpenMP-arm64",
-                0.0
-            ],
-            "GHSA-fff3-4rp7-px97": [
-                199,
-                "Vulnerability Fix (Update)",
-                "Magick.NET-Q8-x86",
-                0.0
+                "Microsoft.Native.Quic.MsQuic.OpenSSL",
+                9.8
             ],
             "GHSA-qr3m-xw4c-jqw3": [
                 190,
                 "Vulnerability Fix (Update)",
                 "HotChocolate.Language",
-                0.0
+                9.1
             ],
-            "GHSA-9j88-vvj5-vhgr": [
-                188,
+            "GHSA-9mv3-2cwr-p262": [
+                7,
                 "Vulnerability Fix (Update)",
-                "MailKit",
-                0.0
+                "Microsoft.AspNetCore.DataProtection",
+                9.1
             ],
-            "GHSA-2qjj-h6wp-c7h7": [
-                180,
+            "GHSA-jwvw-v7c5-m82h": [
+                25,
                 "Vulnerability Fix (Update)",
-                "Umbraco.Cms",
-                0.0
+                "protobuf",
+                8.8
+            ],
+            "GHSA-xhw7-j96h-c3g5": [
+                16,
+                "Vulnerability Fix (Update)",
+                "YAFNET.Core",
+                8.8
             ],
             "GHSA-24c8-4792-22hx": [
                 131,
                 "Vulnerability Fix (Update)",
                 "scriban",
-                0.0
+                8.7
             ],
-            "GHSA-6c8g-7p36-r338": [
-                102,
+            "GHSA-33gv-fc78-qgf5": [
+                16,
                 "Vulnerability Fix (Update)",
-                "SharpCompress",
-                0.0
-            ],
-            "GHSA-vr9v-27gg-qgx4": [
-                98,
-                "Vulnerability Fix (Update)",
-                "Umbraco.Cms",
-                0.0
-            ],
-            "GHSA-7j59-v9qr-6fq9": [
-                88,
-                "Vulnerability Fix (Update)",
-                "github.com/microsoft/kiota-http-go",
-                0.0
-            ],
-            "GHSA-c55g-rp4x-fx84": [
-                66,
-                "Vulnerability Fix (Update)",
-                "directxtk_uwp",
-                0.0
+                "YAFNET.Core",
+                8.1
             ],
             "GHSA-ffq7-898w-9jc4": [
                 66,
                 "Vulnerability Fix (Update)",
                 "DotNetNuke.Core",
-                0.0
+                8.0
             ],
-            "GHSA-fpj4-9qhx-5m6m": [
-                66,
+            "GHSA-cjc8-g9w8-chfw": [
+                217,
                 "Vulnerability Fix (Update)",
-                "DotNetNuke.Core",
-                0.0
+                "Magick.NET-Q8-x86",
+                7.6
             ],
-            "GHSA-5r97-79vw-qvm4": [
-                63,
+            "GHSA-36wm-hprc-mcf5": [
+                231,
                 "Vulnerability Fix (Update)",
-                "directxtk12_uwp",
-                0.0
+                "Magick.NET-Q8-x86",
+                7.5
+            ],
+            "GHSA-7gg8-qqx7-92g5": [
+                231,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                7.5
+            ],
+            "GHSA-fwvm-ggf6-2p4x": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                7.5
+            ],
+            "GHSA-x9h5-r9v2-vcww": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                7.5
+            ],
+            "GHSA-6hjr-v6g4-3fm8": [
+                222,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                7.5
+            ],
+            "GHSA-vmhh-8rxq-fp9g": [
+                216,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q16-HDRI-OpenMP-arm64",
+                7.5
             ],
             "GHSA-2cwq-pwfr-wcw3": [
                 47,
                 "Vulnerability Fix (Update)",
                 "Nerdbank.MessagePack",
-                0.0
+                7.5
             ],
-            "GHSA-h39g-6x3c-7fq9": [
-                45,
+            "GHSA-9v76-4qcc-frgh": [
+                26,
                 "Vulnerability Fix (Update)",
-                "Zio",
-                0.0
+                "Microsoft.AspNetCore.App.Runtime.osx-x64",
+                7.5
             ],
-            "GHSA-88hf-wf7h-7w4m": [
-                42,
+            "GHSA-rg75-q538-x34v": [
+                26,
                 "Vulnerability Fix (Update)",
-                "OpenTelemetry.Exporter.Zipkin",
-                0.0
+                "Microsoft.NetCore.App.Runtime.win-x86",
+                7.5
             ],
-            "GHSA-g94r-2vxg-569j": [
-                38,
+            "GHSA-37gx-xxp4-5rgx": [
+                15,
                 "Vulnerability Fix (Update)",
-                "OpenTelemetry.Extensions.Propagators",
-                0.0
+                "System.Security.Cryptography.Xml",
+                7.5
+            ],
+            "GHSA-w3x6-4m5h-cxqf": [
+                15,
+                "Vulnerability Fix (Update)",
+                "System.Security.Cryptography.Xml",
+                7.5
+            ],
+            "GHSA-pggp-6c3x-2xmx": [
+                13,
+                "Vulnerability Fix (Update)",
+                "Snappier",
+                7.5
+            ],
+            "GHSA-8x9c-mqxv-q2pp": [
+                26,
+                "Vulnerability Fix (Update)",
+                "Microsoft.WindowsDesktop.App.Runtime.win-x86",
+                7.3
+            ],
+            "GHSA-2hx3-vp6r-mg3f": [
+                1,
+                "Vulnerability Fix (Update)",
+                "kiota",
+                7.3
+            ],
+            "GHSA-7j59-v9qr-6fq9": [
+                88,
+                "Vulnerability Fix (Update)",
+                "github.com/microsoft/kiota-http-go",
+                7.0
+            ],
+            "GHSA-c55g-rp4x-fx84": [
+                66,
+                "Vulnerability Fix (Update)",
+                "directxtk_uwp",
+                6.9
+            ],
+            "GHSA-5r97-79vw-qvm4": [
+                63,
+                "Vulnerability Fix (Update)",
+                "directxtk12_uwp",
+                6.9
+            ],
+            "GHSA-9j88-vvj5-vhgr": [
+                188,
+                "Vulnerability Fix (Update)",
+                "MailKit",
+                6.5
+            ],
+            "GHSA-4625-4j76-fww9": [
+                14,
+                "Vulnerability Fix (Update)",
+                "OpenTelemetry.Exporter.OpenTelemetryProtocol",
+                6.5
+            ],
+            "GHSA-wfr5-454p-mjc2": [
+                8,
+                "Vulnerability Fix (Update)",
+                "OpenTelemetry.Exporter.Instana",
+                6.5
+            ],
+            "GHSA-2rhw-gw3f-477j": [
+                7,
+                "Vulnerability Fix (Update)",
+                "DotNetNuke.Core",
+                6.5
+            ],
+            "GHSA-5r4x-w6p5-222q": [
+                231,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                6.2
+            ],
+            "GHSA-rcr6-g7jc-f57g": [
+                231,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                6.2
+            ],
+            "GHSA-5592-p365-24xh": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                6.2
+            ],
+            "GHSA-5xg3-585r-9jh5": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                6.2
+            ],
+            "GHSA-jqq5-8px3-9m6m": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                6.2
+            ],
+            "GHSA-5qwm-7pvp-w988": [
+                34,
+                "Vulnerability Fix (Update)",
+                "OpenMcdf",
+                6.2
+            ],
+            "GHSA-jxpf-xq2m-q525": [
+                33,
+                "Vulnerability Fix (Update)",
+                "OpenMcdf",
+                6.2
+            ],
+            "GHSA-v67w-737x-v2c9": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.9
+            ],
+            "GHSA-6c8g-7p36-r338": [
+                102,
+                "Vulnerability Fix (Update)",
+                "SharpCompress",
+                5.9
+            ],
+            "GHSA-38h3-2333-qx47": [
+                27,
+                "Vulnerability Fix (Update)",
+                "OpenTelemetry.Exporter.Jaeger",
+                5.9
+            ],
+            "GHSA-28xm-prxc-5866": [
+                4,
+                "Vulnerability Fix (Update)",
+                "OpenTelemetry.Resources.AWS",
+                5.9
+            ],
+            "GHSA-vhrh-72hq-w8m7": [
+                231,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.7
+            ],
+            "GHSA-jcqp-6r6f-3mfx": [
+                231,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.5
+            ],
+            "GHSA-f4qm-vj5j-9xpw": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.5
+            ],
+            "GHSA-jvgr-9ph5-m8v4": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.5
+            ],
+            "GHSA-pcvx-ph33-r5vv": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.5
+            ],
+            "GHSA-pwg5-6jfc-crvh": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.5
+            ],
+            "GHSA-r83h-crwp-3vm7": [
+                229,
+                "Vulnerability Fix (Update)",
+                "Magick.NET-Q8-x86",
+                5.5
             ]
         },
         "RubyGems": {
@@ -1923,567 +1923,567 @@
                 "knot-simple-formatter",
                 10.0
             ],
-            "GHSA-qc5p-3mg5-9fh8": [
-                569,
-                "Vulnerability Fix (Update)",
-                "avo",
-                0.0
-            ],
-            "GHSA-2j26-frm8-cmj9": [
-                482,
-                "Vulnerability Fix (Update)",
-                "activesupport",
-                0.0
-            ],
-            "GHSA-89vf-4333-qx8v": [
-                482,
-                "Vulnerability Fix (Update)",
-                "activesupport",
-                0.0
-            ],
-            "GHSA-cg4j-q9v8-6v38": [
-                482,
-                "Vulnerability Fix (Update)",
-                "activesupport",
-                0.0
-            ],
             "GHSA-3hhc-qp5v-9p2j": [
                 362,
                 "Vulnerability Fix (Update)",
                 "activerecord",
-                0.0
-            ],
-            "GHSA-v55j-83pf-r9cq": [
-                286,
-                "Vulnerability Fix (Update)",
-                "actionview",
-                0.0
-            ],
-            "GHSA-c4rq-3m3g-8wgx": [
-                193,
-                "Vulnerability Fix (Update)",
-                "nokogiri",
-                0.0
-            ],
-            "GHSA-v2fc-qm4h-8hqv": [
-                193,
-                "Vulnerability Fix (Update)",
-                "nokogiri",
-                0.0
-            ],
-            "GHSA-jp94-3292-c3xv": [
-                172,
-                "Vulnerability Fix (Update)",
-                "devise",
-                0.0
-            ],
-            "GHSA-73f9-jhhh-hr5m": [
-                161,
-                "Vulnerability Fix (Update)",
-                "activestorage",
-                0.0
-            ],
-            "GHSA-9xrj-h377-fr87": [
-                161,
-                "Vulnerability Fix (Update)",
-                "activestorage",
-                0.0
-            ],
-            "GHSA-p9fm-f462-ggrg": [
-                161,
-                "Vulnerability Fix (Update)",
-                "activestorage",
-                0.0
-            ],
-            "GHSA-qcfx-2mfw-w4cg": [
-                161,
-                "Vulnerability Fix (Update)",
-                "activestorage",
-                0.0
-            ],
-            "GHSA-r46p-8f7g-vvvg": [
-                161,
-                "Vulnerability Fix (Update)",
-                "activestorage",
-                0.0
-            ],
-            "GHSA-fc46-r95f-hq7g": [
-                158,
-                "Vulnerability Fix (Update)",
-                "decidim-core",
-                0.0
-            ],
-            "GHSA-2x79-gwq3-vxxm": [
-                135,
-                "Vulnerability Fix (Update)",
-                "iodine",
-                0.0
-            ],
-            "GHSA-7mqq-6cf9-v2qp": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-8vqr-qjwx-82mw": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-h2jq-g4cq-5ppq": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-q2ww-5357-x388": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-q4qf-9j86-f5mh": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-qv7j-4883-hwh7": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-v569-hp3g-36wr": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-vgpv-f759-9wx3": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-x8cg-fq8g-mxfx": [
-                123,
-                "Vulnerability Fix (Update)",
-                "rack",
-                0.0
-            ],
-            "GHSA-3jfp-46x4-xgfj": [
-                96,
-                "Vulnerability Fix (Update)",
-                "yard",
-                0.0
-            ],
-            "GHSA-w5xj-99cg-rccm": [
-                81,
-                "Vulnerability Fix (Update)",
-                "decidim-core",
-                0.0
-            ],
-            "GHSA-ffq5-qpvf-xq7x": [
-                78,
-                "Vulnerability Fix (Update)",
-                "openc3",
-                0.0
+                9.8
             ],
             "GHSA-2wvh-87g2-89hr": [
                 76,
                 "Vulnerability Fix (Update)",
                 "openc3",
-                0.0
+                9.6
+            ],
+            "GHSA-v529-vhwc-wfc5": [
+                15,
+                "Vulnerability Fix (Update)",
+                "openc3",
+                9.6
+            ],
+            "GHSA-33qg-7wpp-89cq": [
+                3,
+                "Vulnerability Fix (Update)",
+                "rack-session",
+                9.1
+            ],
+            "GHSA-qc5p-3mg5-9fh8": [
+                569,
+                "Vulnerability Fix (Update)",
+                "avo",
+                8.8
             ],
             "GHSA-fmx4-26r3-wxpf": [
                 75,
                 "Vulnerability Fix (Update)",
                 "commonmarker",
-                0.0
+                8.8
             ],
-            "GHSA-4cx3-3c38-j9vv": [
-                74,
+            "GHSA-fc46-r95f-hq7g": [
+                158,
                 "Vulnerability Fix (Update)",
-                "katalyst-koi",
-                0.0
+                "decidim-core",
+                8.7
             ],
-            "GHSA-4jvx-93h3-f45h": [
-                73,
+            "GHSA-2x79-gwq3-vxxm": [
+                135,
                 "Vulnerability Fix (Update)",
-                "openc3",
-                0.0
+                "iodine",
+                8.7
             ],
             "GHSA-wgx6-g857-jjf7": [
                 73,
                 "Vulnerability Fix (Update)",
                 "openc3",
-                0.0
+                8.1
             ],
-            "GHSA-ff6c-w6qf-7xqc": [
-                60,
+            "GHSA-hc36-c89j-5f4j": [
+                10,
                 "Vulnerability Fix (Update)",
-                "css_parser",
-                0.0
+                "bsv-wallet",
+                8.1
             ],
-            "GHSA-jp5v-5gx4-jmj9": [
-                55,
+            "GHSA-q339-8rmv-2mhv": [
+                10,
                 "Vulnerability Fix (Update)",
-                "actionpack",
-                0.0
+                "erb",
+                8.1
             ],
-            "GHSA-c32j-vqhx-rx3x": [
-                54,
+            "GHSA-9xrj-h377-fr87": [
+                161,
                 "Vulnerability Fix (Update)",
-                "jwt",
-                0.0
+                "activestorage",
+                8.0
             ],
-            "GHSA-7f3r-gwc9-2995": [
-                53,
+            "GHSA-vcgp-9326-pqcp": [
+                25,
                 "Vulnerability Fix (Update)",
-                "view_component",
-                0.0
+                "net-imap",
+                7.6
             ],
-            "GHSA-hg3h-g7xc-f7vp": [
-                53,
+            "GHSA-c4rq-3m3g-8wgx": [
+                193,
                 "Vulnerability Fix (Update)",
-                "view_component",
-                0.0
+                "nokogiri",
+                7.5
             ],
-            "GHSA-xv9c-mjw8-79gf": [
-                52,
-                "Vulnerability Fix (Update)",
-                "sidekiq-cron",
-                0.0
-            ],
-            "GHSA-jw5g-f64p-6x78": [
-                47,
-                "Vulnerability Fix (Update)",
-                "camaleon_cms",
-                0.0
-            ],
-            "GHSA-g2pf-xv49-m2h5": [
-                46,
+            "GHSA-8vqr-qjwx-82mw": [
+                123,
                 "Vulnerability Fix (Update)",
                 "rack",
-                0.0
+                7.5
             ],
-            "GHSA-qfgr-crr9-7r49": [
-                46,
+            "GHSA-h2jq-g4cq-5ppq": [
+                123,
                 "Vulnerability Fix (Update)",
                 "rack",
-                0.0
+                7.5
+            ],
+            "GHSA-v569-hp3g-36wr": [
+                123,
+                "Vulnerability Fix (Update)",
+                "rack",
+                7.5
+            ],
+            "GHSA-w5xj-99cg-rccm": [
+                81,
+                "Vulnerability Fix (Update)",
+                "decidim-core",
+                7.5
             ],
             "GHSA-v6x5-cg8r-vv6x": [
                 46,
                 "Vulnerability Fix (Update)",
                 "rack",
-                0.0
+                7.5
+            ],
+            "GHSA-h27x-rffw-24p4": [
+                24,
+                "Vulnerability Fix (Update)",
+                "addressable",
+                7.5
+            ],
+            "GHSA-j4pr-3wm6-xx2r": [
+                16,
+                "Vulnerability Fix (Update)",
+                "uri",
+                7.5
+            ],
+            "GHSA-9hfr-gw99-8rhx": [
+                14,
+                "Vulnerability Fix (Update)",
+                "bsv-sdk",
+                7.5
+            ],
+            "GHSA-4cx3-3c38-j9vv": [
+                74,
+                "Vulnerability Fix (Update)",
+                "katalyst-koi",
+                7.4
+            ],
+            "GHSA-c32j-vqhx-rx3x": [
+                54,
+                "Vulnerability Fix (Update)",
+                "jwt",
+                7.4
+            ],
+            "GHSA-cg4j-q9v8-6v38": [
+                482,
+                "Vulnerability Fix (Update)",
+                "activesupport",
+                6.9
+            ],
+            "GHSA-3jfp-46x4-xgfj": [
+                96,
+                "Vulnerability Fix (Update)",
+                "yard",
+                6.9
+            ],
+            "GHSA-2j26-frm8-cmj9": [
+                482,
+                "Vulnerability Fix (Update)",
+                "activesupport",
+                6.6
+            ],
+            "GHSA-73f9-jhhh-hr5m": [
+                161,
+                "Vulnerability Fix (Update)",
+                "activestorage",
+                6.6
+            ],
+            "GHSA-r46p-8f7g-vvvg": [
+                161,
+                "Vulnerability Fix (Update)",
+                "activestorage",
+                6.6
+            ],
+            "GHSA-p9fm-f462-ggrg": [
+                161,
+                "Vulnerability Fix (Update)",
+                "activestorage",
+                6.5
+            ],
+            "GHSA-7f3r-gwc9-2995": [
+                53,
+                "Vulnerability Fix (Update)",
+                "view_component",
+                6.5
+            ],
+            "GHSA-jw5g-f64p-6x78": [
+                47,
+                "Vulnerability Fix (Update)",
+                "camaleon_cms",
+                6.5
+            ],
+            "GHSA-jp94-3292-c3xv": [
+                172,
+                "Vulnerability Fix (Update)",
+                "devise",
+                6.1
+            ],
+            "GHSA-xv9c-mjw8-79gf": [
+                52,
+                "Vulnerability Fix (Update)",
+                "sidekiq-cron",
+                6.1
+            ],
+            "GHSA-87pf-fpwv-p7m7": [
+                25,
+                "Vulnerability Fix (Update)",
+                "net-imap",
+                6.0
+            ],
+            "GHSA-qv7j-4883-hwh7": [
+                123,
+                "Vulnerability Fix (Update)",
+                "rack",
+                5.9
+            ],
+            "GHSA-hg3h-g7xc-f7vp": [
+                53,
+                "Vulnerability Fix (Update)",
+                "view_component",
+                5.9
+            ],
+            "GHSA-6r34-94wq-jhrc": [
+                26,
+                "Vulnerability Fix (Update)",
+                "rdiscount",
+                5.9
+            ],
+            "GHSA-ff6c-w6qf-7xqc": [
+                60,
+                "Vulnerability Fix (Update)",
+                "css_parser",
+                5.8
+            ],
+            "GHSA-75xq-5h9v-w6px": [
+                45,
+                "Vulnerability Fix (Update)",
+                "net-imap",
+                5.8
+            ],
+            "GHSA-hm49-wcqc-g2xg": [
+                45,
+                "Vulnerability Fix (Update)",
+                "net-imap",
+                5.8
+            ],
+            "GHSA-89vf-4333-qx8v": [
+                482,
+                "Vulnerability Fix (Update)",
+                "activesupport",
+                5.3
+            ],
+            "GHSA-v2fc-qm4h-8hqv": [
+                193,
+                "Vulnerability Fix (Update)",
+                "nokogiri",
+                5.3
             ]
         },
         "Hex": {
-            "EEF-CVE-2026-39805": [
-                116,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "GHSA-c67r-gc9j-2qf7": [
-                116,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "GHSA-q6v9-r226-v65f": [
-                107,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "EEF-CVE-2026-42788": [
-                106,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
             "EEF-CVE-2026-42786": [
                 91,
                 "Vulnerability Fix (Update)",
                 "bandit",
-                0.0
+                8.7
             ],
             "GHSA-pf94-94m9-536p": [
                 91,
                 "Vulnerability Fix (Update)",
                 "bandit",
-                0.0
+                8.7
             ],
             "EEF-CVE-2026-43967": [
                 88,
                 "Vulnerability Fix (Update)",
                 "absinthe",
-                0.0
+                8.7
             ],
             "GHSA-9mhv-8h52-q7q2": [
                 88,
                 "Vulnerability Fix (Update)",
                 "absinthe",
-                0.0
-            ],
-            "GHSA-frh3-6pv6-rc8j": [
-                83,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "EEF-CVE-2026-39804": [
-                82,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "EEF-CVE-2026-8468": [
-                55,
-                "Vulnerability Fix (Update)",
-                "plug",
-                0.0
-            ],
-            "EEF-CVE-2026-39807": [
-                52,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "GHSA-468c-vq7p-gh64": [
-                47,
-                "Vulnerability Fix (Update)",
-                "plug",
-                0.0
-            ],
-            "EEF-CVE-2026-43970": [
-                42,
-                "Vulnerability Fix (Update)",
-                "cowlib",
-                0.0
-            ],
-            "EEF-CVE-2026-42793": [
-                41,
-                "Vulnerability Fix (Update)",
-                "absinthe",
-                0.0
-            ],
-            "GHSA-375f-4r2h-f99j": [
-                41,
-                "Vulnerability Fix (Update)",
-                "bandit",
-                0.0
-            ],
-            "EEF-CVE-2026-42794": [
-                39,
-                "Vulnerability Fix (Update)",
-                "absinthe_plug",
-                0.0
-            ],
-            "GHSA-c62g-j346-39v5": [
-                39,
-                "Vulnerability Fix (Update)",
-                "absinthe_plug",
-                0.0
-            ],
-            "EEF-CVE-2026-8466": [
-                38,
-                "Vulnerability Fix (Update)",
-                "cowboy",
-                0.0
+                8.7
             ],
             "EEF-CVE-2026-7790": [
                 36,
                 "Vulnerability Fix (Update)",
                 "cowlib",
-                0.0
-            ],
-            "GHSA-qf4g-9fqq-mmm7": [
-                34,
-                "Vulnerability Fix (Update)",
-                "absinthe",
-                0.0
-            ],
-            "EEF-CVE-2026-32686": [
-                33,
-                "Vulnerability Fix (Update)",
-                "decimal",
-                0.0
-            ],
-            "GHSA-rhv4-8758-jx7v": [
-                33,
-                "Vulnerability Fix (Update)",
-                "decimal",
-                0.0
+                8.7
             ],
             "EEF-CVE-2026-39803": [
                 32,
                 "Vulnerability Fix (Update)",
                 "bandit",
-                0.0
+                8.7
             ],
             "GHSA-32p9-57cr-4x65": [
                 32,
                 "Vulnerability Fix (Update)",
                 "cowlib",
-                0.0
-            ],
-            "GHSA-84f2-rp86-235p": [
-                32,
-                "Vulnerability Fix (Update)",
-                "cowlib",
-                0.0
+                8.7
             ],
             "GHSA-9q9q-324x-93r2": [
                 32,
                 "Vulnerability Fix (Update)",
                 "bandit",
-                0.0
+                8.7
             ],
             "EEF-CVE-2026-32689": [
                 31,
                 "Vulnerability Fix (Update)",
                 "phoenix",
-                0.0
+                8.7
             ],
             "EEF-CVE-2026-32688": [
                 26,
                 "Vulnerability Fix (Update)",
                 "plug_cowboy",
-                0.0
+                8.7
             ],
             "GHSA-q8x4-x7mp-5vg2": [
                 26,
                 "Vulnerability Fix (Update)",
                 "plug_cowboy",
-                0.0
-            ],
-            "EEF-CVE-2026-32687": [
-                22,
-                "Vulnerability Fix (Update)",
-                "postgrex",
-                0.0
+                8.7
             ],
             "GHSA-628h-q48j-jr6q": [
                 22,
                 "Vulnerability Fix (Update)",
                 "phoenix",
-                0.0
-            ],
-            "GHSA-jfc2-q6qh-g5x8": [
-                22,
-                "Vulnerability Fix (Update)",
-                "cowboy",
-                0.0
-            ],
-            "GHSA-r73h-97w8-m54h": [
-                22,
-                "Vulnerability Fix (Update)",
-                "postgrex",
-                0.0
-            ],
-            "GHSA-4w98-xf39-23gp": [
-                21,
-                "Vulnerability Fix (Update)",
-                "ewe",
-                0.0
+                8.7
             ],
             "GHSA-qwfw-ggxw-577c": [
                 21,
                 "Vulnerability Fix (Update)",
                 "ex_webrtc",
-                0.0
+                8.7
             ],
             "GHSA-rf5q-vwxw-gmrf": [
                 21,
                 "Vulnerability Fix (Update)",
                 "bandit",
-                0.0
+                8.7
             ],
             "EEF-CVE-2026-39806": [
                 20,
                 "Vulnerability Fix (Update)",
                 "bandit",
-                0.0
+                8.7
+            ],
+            "GHSA-frh3-6pv6-rc8j": [
+                83,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                8.2
+            ],
+            "EEF-CVE-2026-39804": [
+                82,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                8.2
+            ],
+            "EEF-CVE-2026-8468": [
+                55,
+                "Vulnerability Fix (Update)",
+                "plug",
+                8.2
+            ],
+            "GHSA-468c-vq7p-gh64": [
+                47,
+                "Vulnerability Fix (Update)",
+                "plug",
+                8.2
+            ],
+            "EEF-CVE-2026-43970": [
+                42,
+                "Vulnerability Fix (Update)",
+                "cowlib",
+                8.2
+            ],
+            "EEF-CVE-2026-42793": [
+                41,
+                "Vulnerability Fix (Update)",
+                "absinthe",
+                8.2
+            ],
+            "EEF-CVE-2026-8466": [
+                38,
+                "Vulnerability Fix (Update)",
+                "cowboy",
+                8.2
+            ],
+            "GHSA-qf4g-9fqq-mmm7": [
+                34,
+                "Vulnerability Fix (Update)",
+                "absinthe",
+                8.2
+            ],
+            "GHSA-84f2-rp86-235p": [
+                32,
+                "Vulnerability Fix (Update)",
+                "cowlib",
+                8.2
+            ],
+            "GHSA-jfc2-q6qh-g5x8": [
+                22,
+                "Vulnerability Fix (Update)",
+                "cowboy",
+                8.2
+            ],
+            "EEF-CVE-2026-32687": [
+                22,
+                "Vulnerability Fix (Update)",
+                "postgrex",
+                7.5
+            ],
+            "GHSA-r73h-97w8-m54h": [
+                22,
+                "Vulnerability Fix (Update)",
+                "postgrex",
+                7.5
+            ],
+            "GHSA-4w98-xf39-23gp": [
+                21,
+                "Vulnerability Fix (Update)",
+                "ewe",
+                7.5
+            ],
+            "GHSA-q6v9-r226-v65f": [
+                107,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                6.9
+            ],
+            "EEF-CVE-2026-42788": [
+                106,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                6.9
+            ],
+            "EEF-CVE-2026-32686": [
+                33,
+                "Vulnerability Fix (Update)",
+                "decimal",
+                6.9
+            ],
+            "GHSA-rhv4-8758-jx7v": [
+                33,
+                "Vulnerability Fix (Update)",
+                "decimal",
+                6.9
+            ],
+            "EEF-CVE-2026-39805": [
+                116,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                6.3
+            ],
+            "GHSA-c67r-gc9j-2qf7": [
+                116,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                6.3
+            ],
+            "EEF-CVE-2026-39807": [
+                52,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                6.3
+            ],
+            "GHSA-375f-4r2h-f99j": [
+                41,
+                "Vulnerability Fix (Update)",
+                "bandit",
+                6.3
             ],
             "EEF-CVE-2026-43968": [
                 19,
                 "Vulnerability Fix (Update)",
                 "cowlib",
-                0.0
+                6.3
             ],
             "GHSA-hv23-4qp7-8c8r": [
                 17,
                 "Vulnerability Fix (Update)",
                 "cowlib",
-                0.0
+                6.3
+            ],
+            "EEF-CVE-2026-42794": [
+                39,
+                "Vulnerability Fix (Update)",
+                "absinthe_plug",
+                2.3
+            ],
+            "GHSA-c62g-j346-39v5": [
+                39,
+                "Vulnerability Fix (Update)",
+                "absinthe_plug",
+                2.3
             ],
             "GHSA-g2wm-735q-3f56": [
                 12,
                 "Vulnerability Fix (Update)",
                 "cowlib",
-                0.0
+                2.1
             ],
             "EEF-CVE-2026-43969": [
                 11,
                 "Vulnerability Fix (Update)",
                 "cowlib",
-                0.0
+                2.1
             ]
         },
         "SwiftURL": {
-            "GHSA-qppj-fm5r-hxr3": [
-                118,
-                "Vulnerability Fix (Update)",
-                "com.typesafe.akka:akka-http-core_2.11",
-                0.0
-            ],
             "GHSA-84m3-f99p-cqx5": [
                 10,
                 "Vulnerability Fix (Update)",
                 "github.com/pytorch/executorch",
-                0.0
+                9.8
             ],
             "GHSA-9m39-3mf3-xwch": [
                 10,
                 "Vulnerability Fix (Update)",
                 "github.com/pytorch/executorch",
-                0.0
+                9.8
             ],
             "GHSA-f9hx-c6jf-3qxm": [
                 10,
                 "Vulnerability Fix (Update)",
                 "github.com/pytorch/executorch",
-                0.0
+                9.8
             ],
             "GHSA-hj95-mhgf-jxc4": [
                 10,
                 "Vulnerability Fix (Update)",
                 "github.com/pytorch/executorch",
-                0.0
+                9.8
             ],
             "GHSA-xc7w-r669-48pf": [
                 10,
                 "Vulnerability Fix (Update)",
                 "github.com/pytorch/executorch",
-                0.0
-            ],
-            "GHSA-h952-963h-rv99": [
-                8,
-                "Vulnerability Fix (Update)",
-                "github.com/pytorch/executorch",
-                0.0
+                9.8
             ],
             "GHSA-fmq6-4w57-2w3v": [
                 5,
                 "Vulnerability Fix (Update)",
                 "wasm3",
-                0.0
+                8.4
+            ],
+            "GHSA-h952-963h-rv99": [
+                8,
+                "Vulnerability Fix (Update)",
+                "github.com/pytorch/executorch",
+                8.1
+            ],
+            "GHSA-qppj-fm5r-hxr3": [
+                118,
+                "Vulnerability Fix (Update)",
+                "com.typesafe.akka:akka-http-core_2.11",
+                5.3
             ]
         }
     }

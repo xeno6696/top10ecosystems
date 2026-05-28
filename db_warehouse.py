@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
+# Copyright (C) 2026 xeno6696
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+
 """
-OSV Relational Data Warehouse Coordinator - Version 1.5 (Repaired)
+OSV Relational Data Warehouse Coordinator - Version 1.6
 =================================================================================
 Parallel warehousing backend engineered to bulk-seed from a master snapshot cache 
 (auto-downloading if missing) and execute chronological dynamic sync updates.
@@ -15,6 +30,7 @@ import datetime
 import requests
 import io
 from collections import Counter
+from cvss import CVSS2, CVSS3, CVSS4 # 💡 Imported for production CVSS parity
 
 # Storage Routing Baselines
 DB_DIR = "database"
@@ -52,20 +68,22 @@ def init_database():
         print(f"[*] Deploying fresh global relational catalog tables at: {DB_PATH}")
         
         # 1. Core Global Index: Houses all individual advisory elements
+        # 💡 SCHEMA EXPANDED: Now explicitly includes 'dwell_days' for 10-column parity
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS vulnerabilities (
                 advisory_id TEXT PRIMARY KEY,
                 package_name TEXT,
-                ecosystem TEXT,
+                ecosystems TEXT,
                 cvss_score REAL,
                 blast_radius INTEGER,
                 threat_profile TEXT,
                 last_modified TEXT,
                 malware_vector TEXT,
-                vulnerable_versions TEXT --
+                vulnerable_versions TEXT,
+                dwell_days REAL 
             );
         """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystem);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
         
         # 2. Snapshot Anchors: Log chronological lookback window states
         cursor.execute("""
@@ -118,59 +136,77 @@ def download_master_archive():
         if os.path.exists(LOCAL_ZIP_PATH):
             os.remove(LOCAL_ZIP_PATH)
 
-def extract_basic_score(vuln_data):
-    """Fallback scoring extraction loop matching master mapping behaviors."""
-    v_id = vuln_data.get("id", "")
-    if v_id.startswith("MAL-") or "malware" in json.dumps(vuln_data).lower():
+def extract_production_cvss(vuln_data):
+    """Parses OSV severity vectors using the official FIRST cvss library for complete parity."""
+    vuln_id = vuln_data.get("id", "")
+    if vuln_id.startswith("MAL-") or "malware" in json.dumps(vuln_data).lower():
         return 10.0
-    for sev in vuln_data.get("severity", []):
-        score_str = sev.get("score", "")
-        if "CVSS:" in score_str:
-            try:
-                parts = score_str.split("/")
-                for p in parts:
-                    if p.startswith("BASE:") or p.startswith("B:"):
-                        return float(p.split(":")[-1])
-            except Exception: pass
+        
+    severity_list = vuln_data.get("severity", [])
+    if not severity_list: return 0.0
+        
+    for sev in severity_list:
+        sev_type = sev.get("type", "")
+        vector_str = sev.get("score", "")
+        if not vector_str: continue
+            
+        try:
+            if sev_type == "CVSS_V3" or "CVSS:3" in vector_str:
+                return float(CVSS3(vector_str).base_score)
+            elif sev_type == "CVSS_V4" or "CVSS:4" in vector_str:
+                return float(CVSS4(vector_str).base_score)
+            elif sev_type == "CVSS_V2" or "RUSTSEC" in vuln_id:
+                return float(CVSS2(vector_str).base_score)
+        except Exception: continue
+            
     return 0.0
 
 def parse_osv_json(vuln_data):
     """Translates raw nested OSV JSON structures into normalized flat relational database rows."""
     v_id = vuln_data.get("id", "")
-    if not v_id: return (None, None, None, 0.0, 0, None, None, None)
+    if not v_id: return (None, None, None, 0.0, 0, None, None, None, None, None)
 
-    modified_str = vuln_data.get("modified", "1970-01-01")[:10]
+    published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
+    modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
+    
+    # 💡 UPGRADED: Dynamic chronological TTR/Dwell window calculation restored natively
+    dwell_days = 0.0
+    try:
+        p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
+        m_dt = datetime.datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
+        dwell_days = max(0.0, (m_dt - p_dt).days)
+    except ValueError: pass
+
     has_fixes = False
     is_malware = v_id.startswith("MAL-")
     
     summary = vuln_data.get("summary", "").lower()
     details = vuln_data.get("details", "").lower()
-    text_pool = summary + " " + details
-    if "backdoor" in summary or "typosquat" in summary: is_malware = True
-    
+    if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: is_malware = True
+
     m_vector = "Unclassified Malicious Payload"
-    if "typosquat" in text_pool or "brand hijacking" in text_pool:
-        m_vector = "Typosquatting / Brand Hijacking"
-    elif "dependency confusion" in text_pool:
-        m_vector = "Dependency Confusion Campaign"
-    elif "exfiltrat" in text_pool or "credential stealer" in text_pool or "token stealer" in text_pool:
-        m_vector = "Data Exfiltration / Credential Stealer"
-    elif "backdoor" in text_pool or "execution shell" in text_pool or "reverse shell" in text_pool:
-        m_vector = "Persistent Backdoor / Execution Shell"
+    if is_malware:
+        if "typosquat" in summary or "typosquat" in details: 
+            m_vector = "Typosquatting / Brand Hijacking"
+        elif "dependency confusion" in summary or "dependency confusion" in details: 
+            m_vector = "Dependency Confusion Campaign"
+        elif any(x in summary or x in details for x in ["exfiltrat", "token", "credential", "steal"]): 
+            m_vector = "Data Exfiltration / Credential Stealer"
+        elif any(x in summary or x in details for x in ["reverse shell", "backdoor", "remote code"]): 
+            m_vector = "Persistent Backdoor / Execution Shell"
 
     p_name = "N/A"
-    eco_clean = "Android"
     max_versions = 0
-    all_versions = set() # 💡 Track full unique explicit version set
+    all_versions = set()
+    ecosystems_set = set() # 💡 CHANGED: Track all unique ecosystems for this advisory
     
     for affected in vuln_data.get("affected", []):
         eco = affected.get("package", {}).get("ecosystem")
         name = affected.get("package", {}).get("name")
         if name: p_name = name.strip()
         
-        # Pull explicitly listed strings if present
         for v in affected.get("versions", []):
-            all_versions.add(str(v))
+            all_versions.add(str(v).strip())
             
         v_len = len(affected.get("versions", []))
         if v_len > max_versions: max_versions = v_len
@@ -183,22 +219,27 @@ def parse_osv_json(vuln_data):
             eco_lower = eco.strip().lower()
             hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
             eco_clean = hard_mappings.get(eco_lower, None)
-            pass
             if not eco_clean:
                 for track in MASTER_TRACKS:
                     if eco_lower in track.lower() or track.lower() in eco_lower:
                         eco_clean = track
                         break
             if not eco_clean: eco_clean = "Android"
-            
-    if is_malware: t_profile = "Malware (New Entry)"
-    elif has_fixes: t_profile = "Vulnerability Fix (Update)"
-    else: t_profile = "Metadata Correction / Adjustments"
+            ecosystems_set.add(eco_clean) # 💡 CHANGED: Accumulate every platform impacted
+
+    if not ecosystems_set:
+        ecosystems_set.add("Android")
+
+    is_new_entry = (published_str == modified_str)
+    if is_malware: classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
+    elif has_fixes: classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
+    else: classification = "Metadata Correction / Adjustments"
     
-    cvss_score = extract_basic_score(vuln_data)
-    # Serialize the set into a clean flat string array payload
+    cvss_score = extract_production_cvss(vuln_data)
     v_versions_json = json.dumps(list(all_versions))
-    return (v_id, p_name, eco_clean, cvss_score, max_versions, t_profile, modified_str, m_vector, v_versions_json)
+    ecosystems_json = json.dumps(list(ecosystems_set)) # 💡 CHANGED: Serialize the platform array
+    
+    return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days)
 
 def bootstrap_warehouse_from_zip(conn):
     """Parses local master archive data and bulk-loads the database using transactional blocks."""
@@ -243,12 +284,12 @@ def bootstrap_warehouse_from_zip(conn):
                             total_scanned += 1
                     except Exception: continue
                     
-        # 💡 FIXED HERE: Changed {len(...):?} to {len(...):,}
         print(f"[*] Committing {len(vulnerabilities_batch):,} entries down to SQLite storage blocks...")
+        # 💡 UPGRADED: 10-column value mapping block integrated cleanly
         cursor.executemany("""
-            INSERT OR REPLACE INTO vulnerabilities (advisory_id, package_name, ecosystem, cvss_score, blast_radius, threat_profile, last_modified, malware_vector, vulnerable_versions)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, vulnerabilities_batch) 
+            INSERT OR REPLACE INTO vulnerabilities (advisory_id, package_name, ecosystems, cvss_score, blast_radius, threat_profile, last_modified, malware_vector, vulnerable_versions, dwell_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cursor.execute("""
@@ -328,10 +369,11 @@ def sync_incremental_window(conn):
         
     if updates_batch:
         print(f"[*] Executing transactional upsert for {len(updates_batch):,} localized stream elements...")
+        # 💡 UPGRADED: Aligned incremental sync upsert query layout with the 10-column blueprint
         cursor.executemany("""
-            INSERT OR REPLACE INTO vulnerabilities (advisory_id, package_name, ecosystem, cvss_score, blast_radius, threat_profile, last_modified, malware_vector, vulnerable_versions)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, updates_batch) # 💡 FIXED: Changed from vulnerabilities_batch to updates_batch
+            INSERT OR REPLACE INTO vulnerabilities (advisory_id, package_name, ecosystems, cvss_score, blast_radius, threat_profile, last_modified, malware_vector, vulnerable_versions, dwell_days)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, updates_batch)
         conn.commit()
         print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized.{RESET}")
 
