@@ -89,7 +89,8 @@ def init_database():
                 last_modified TEXT,
                 malware_vector TEXT,
                 vulnerable_versions TEXT,
-                dwell_days REAL 
+                dwell_days REAL,
+                withdrawn_date TEXT 
             );
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
@@ -177,8 +178,9 @@ def parse_osv_json(vuln_data):
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
     modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
+    withdrawn_str = vuln_data.get("withdrawn", None)
     
-    # 💡 UPGRADED: Dynamic chronological TTR/Dwell window calculation restored natively
+    # Calculate standard lookup timelines natively
     dwell_days = 0.0
     try:
         p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
@@ -203,7 +205,21 @@ def parse_osv_json(vuln_data):
             m_vector = "Data Exfiltration / Credential Stealer"
         elif any(x in summary or x in details for x in ["reverse shell", "backdoor", "remote code"]): 
             m_vector = "Persistent Backdoor / Execution Shell"
-
+            
+    # 💡 FIX: Wrap everything else in an 'else' block so withdrawn status never gets clobbered
+    if withdrawn_str:
+        classification = "Withdrawn / Retracted Advisory"
+        w_date = withdrawn_str[:10]
+    else:
+        w_date = None
+        is_new_entry = (published_str == modified_str)
+        if is_malware: 
+            classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
+        elif has_fixes: 
+            classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
+        else: 
+            classification = "Metadata Correction / Adjustments"
+        
     p_name = "N/A"
     max_versions = 0
     all_versions = set()
@@ -248,7 +264,7 @@ def parse_osv_json(vuln_data):
     v_versions_json = json.dumps(list(all_versions))
     ecosystems_json = json.dumps(list(ecosystems_set)) # 💡 CHANGED: Serialize the platform array
     
-    return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days)
+    return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days, w_date)
 
 def bootstrap_warehouse_from_zip(conn):
     """Parses local master archive data and bulk-loads the database using transactional blocks."""
@@ -284,7 +300,6 @@ def bootstrap_warehouse_from_zip(conn):
                 with z.open(file_name) as f:
                     try:
                         vuln_data = json.load(f)
-                        if "withdrawn" in vuln_data: continue
                         
                         parsed_row = parse_osv_json(vuln_data)
                         if parsed_row[0]:
@@ -296,8 +311,11 @@ def bootstrap_warehouse_from_zip(conn):
         print(f"[*] Committing {len(vulnerabilities_batch):,} entries down to SQLite storage blocks...")
         # 💡 UPGRADED: 10-column value mapping block integrated cleanly
         cursor.executemany("""
-            INSERT OR REPLACE INTO vulnerabilities (advisory_id, package_name, ecosystems, cvss_score, blast_radius, threat_profile, last_modified, malware_vector, vulnerable_versions, dwell_days)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO vulnerabilities (
+                advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
+                threat_profile, last_modified, malware_vector, vulnerable_versions, 
+                dwell_days, withdrawn_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -380,8 +398,11 @@ def sync_incremental_window(conn):
         print(f"[*] Executing transactional upsert for {len(updates_batch):,} localized stream elements...")
         # 💡 UPGRADED: Aligned incremental sync upsert query layout with the 10-column blueprint
         cursor.executemany("""
-            INSERT OR REPLACE INTO vulnerabilities (advisory_id, package_name, ecosystems, cvss_score, blast_radius, threat_profile, last_modified, malware_vector, vulnerable_versions, dwell_days)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO vulnerabilities (
+                advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
+                threat_profile, last_modified, malware_vector, vulnerable_versions, 
+                dwell_days, withdrawn_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
         conn.commit()
         print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized.{RESET}")

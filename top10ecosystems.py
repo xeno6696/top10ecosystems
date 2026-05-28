@@ -22,26 +22,29 @@ by aggregating upstream vulnerability mutations from the Open Source Vulnerabili
 (OSV) database and cross-referencing strict local project manifest pins.
 """
 
+# Standard Library Imports
+import argparse
+import base64
 import csv
 import datetime
+import io
 import json
 import os
+import re
+import sqlite3
 import sys
 import time
 import zipfile
-import argparse
-import re
-from collections import Counter
-import requests
+from collections import Counter, defaultdict
+
+# Third-Party Framework Imports
 from cvss import CVSS2, CVSS3, CVSS4
-import plotext as pltx
 import matplotlib
-matplotlib.use('Agg') # CRITICAL for headless servers
+matplotlib.use('Agg')  # CRITICAL for headless servers
 import matplotlib.pyplot as mplplt
 import numpy as np
-import io
-import base64
-from collections import defaultdict
+import plotext as pltx
+import requests
 
 # ANSI Color Codes for Scannable Shell Output
 GREEN = "\033[92m"
@@ -49,6 +52,7 @@ RED = "\033[91m"
 YELLOW = "\033[93m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
 
 # ==============================================================================
 # GLOBAL METADATA & ARTIFACT ROUTING LAYER
@@ -62,6 +66,7 @@ def get_artifact_layer(eco_name):
     elif eco_name in app_registries: return "App Software Registry"
     elif eco_name == "GIT": return "Source Control (SCM)"
     return "Global Baseline Noise"
+
 
 def extract_cvss_score(vuln_data):
     """Parses OSV severity vectors using the official FIRST cvss library."""
@@ -88,6 +93,7 @@ def extract_cvss_score(vuln_data):
             
     return 0.0
 
+
 def run_data_health_check(id_to_meta):
     """Audits the GHSA lookup index for structural integrity."""
     malformed_count = 0
@@ -109,6 +115,7 @@ def run_data_health_check(id_to_meta):
             print(f"    -> {entry}")
     else:
         print(f"[+] Data Health Check Passed: {len(id_to_meta):,} records verified.")
+
 
 # ==============================================================================
 # MODULAR PLUG-AND-PLAY DECOUPLED MANIFEST PARSERS (STRATEGY PATTERN)
@@ -148,6 +155,7 @@ def parse_maven_dependency_tree(file_path: str) -> dict:
         
     return discovered_packages
 
+
 def parse_cyclonedx_sbom(file_path: str) -> dict:
     """Extracts package names mapped to versions from a CycloneDX JSON SBOM."""
     discovered_packages = {}
@@ -170,6 +178,7 @@ def parse_cyclonedx_sbom(file_path: str) -> dict:
         print(f"[-] Error executing strict CycloneDX JSON strategy: {e}")
         sys.exit(1)
     return discovered_packages
+
 
 def parse_pypi_requirements(file_path: str) -> dict:
     """Extracts exact package names mapped to pinned versions, rejecting dynamic operators."""
@@ -198,11 +207,13 @@ def parse_pypi_requirements(file_path: str) -> dict:
         sys.exit(1)
     return discovered_packages
 
+
 MANIFEST_PARSER_REGISTRY = {
     "maven_tree": parse_maven_dependency_tree,
     "cyclonedx_json": parse_cyclonedx_sbom,
     "pypi_requirements": parse_pypi_requirements
 }
+
 
 def auto_sniff_manifest_strategy(file_path: str) -> str:
     if not os.path.exists(file_path): return None
@@ -215,6 +226,7 @@ def auto_sniff_manifest_strategy(file_path: str) -> str:
                     return "maven_tree"
     except Exception: pass
     return "pypi_requirements"
+
 
 # ==============================================================================
 # DATABASE COMPILATION ENGINE
@@ -319,21 +331,21 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
         print(f"[-] Failed to read master archive: {e}")
     return id_to_meta
 
-def build_ghsa_from_db(db_path: str = "database/threat_stream.db") -> dict:
+
+def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_registries: list = None) -> dict:
     """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map."""
-    import sqlite3
-    import os
-    import json
     id_to_meta = {}
-    
     if not os.path.exists(db_path):
         return build_ghsa_ecosystem_map()
         
+    filter_set = {r.strip().lower() for r in target_registries} if target_registries else None
     print(f"[*] Extracting global context from SQLite warehouse: {db_path}...")
+    if filter_set:
+        print(f"    -> Applying localized registry isolation filter: {list(filter_set)}")
+        
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        
         cursor.execute("""
             SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days 
             FROM vulnerabilities
@@ -341,13 +353,16 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db") -> dict:
         
         for row in cursor.fetchall():
             v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days = row
-            
-            # Unpack both serialized collections cleanly
             ecosystems_list = json.loads(ecos_json) if ecos_json else ["Android"]
-            version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
             
+            # PERFORMANCE WIN: Early rejection exit prior to heavy allocations
+            if filter_set:
+                if not any(e.lower() in filter_set for e in ecosystems_list):
+                    continue
+            
+            version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
             id_to_meta[v_id] = {
-                "ecosystems": ecosystems_list, # 💡 FIXED: Full multi-platform context preserved
+                "ecosystems": ecosystems_list,
                 "package_name": p_name,
                 "type": t_profile,
                 "vector": m_vector,
@@ -364,98 +379,7 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db") -> dict:
         return build_ghsa_ecosystem_map()
         
     return id_to_meta
-    """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map."""
-    import sqlite3
-    import os
-    import json
-    id_to_meta = {}
-    
-    if not os.path.exists(db_path):
-        return build_ghsa_ecosystem_map()
-        
-    print(f"[*] Extracting global context from SQLite warehouse: {db_path}...")
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # 💡 FIXED: Now explicitly selecting 'dwell_days' out of the 10-column relational schema
-        cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystem, last_modified, malware_vector, vulnerable_versions, dwell_days 
-            FROM vulnerabilities
-        """)
-        
-        for row in cursor.fetchall():
-            v_id, p_name, cvss, radius, t_profile, eco, last_mod, m_vector, v_versions_json, dwell_days = row
-            
-            version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
-            
-            # 💡 FIXED: Check for cross-listed duplicates to append context instead of clobbering it
-            if v_id in id_to_meta:
-                if eco not in id_to_meta[v_id]["ecosystems"]:
-                    id_to_meta[v_id]["ecosystems"].append(eco)
-                id_to_meta[v_id]["vulnerable_versions"].update(version_set)
-            else:
-                id_to_meta[v_id] = {
-                    "ecosystems": [eco],
-                    "package_name": p_name,
-                    "type": t_profile,
-                    "vector": m_vector,
-                    "dwell_days": dwell_days,
-                    "blast_radius": radius,
-                    "vulnerable_versions": version_set,
-                    "cvss_score": cvss,
-                    "last_modified": last_mod
-                }
-        conn.close()
-        print(f"[+] Successfully loaded {len(id_to_meta):,} records out of the SQLite warehouse index.")
-    except Exception as e:
-        print(f"[- ] Relational warehouse extraction failure: {e}. Falling back to ZIP.")
-        return build_ghsa_ecosystem_map()
-        
-    return id_to_meta
-    """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map."""
-    import sqlite3
-    import os
-    import json
-    id_to_meta = {}
-    
-    if not os.path.exists(db_path):
-        return build_ghsa_ecosystem_map()
-        
-    print(f"[*] Extracting global context from SQLite warehouse: {db_path}...")
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystem, last_modified, malware_vector, vulnerable_versions 
-            FROM vulnerabilities
-        """)
-        
-        for row in cursor.fetchall():
-            v_id, p_name, cvss, radius, t_profile, eco, last_mod, m_vector, v_versions_json = row
-            
-            # Unpack serialized strings straight back into a native tracking set
-            version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
-            
-            id_to_meta[v_id] = {
-                "ecosystems": [eco],
-                "package_name": p_name,
-                "type": t_profile,
-                "vector": m_vector,
-                "dwell_days": 0.0,
-                "blast_radius": radius,
-                "vulnerable_versions": version_set,
-                "cvss_score": cvss,
-                "last_modified": last_mod
-            }
-        conn.close()
-        print(f"[+] Successfully loaded {len(id_to_meta):,} records out of the SQLite warehouse index.")
-    except Exception as e:
-        print(f"[- ] Relational warehouse extraction failure: {e}. Falling back to ZIP.")
-        return build_ghsa_ecosystem_map()
-        
-    return id_to_meta
+
 
 # ==============================================================================
 # CORE STREAM PROCESSING ENGINE
@@ -496,9 +420,7 @@ def generate_enterprise_threat_leaderboard(
 
     if ghsa_lookup is None: ghsa_lookup = build_ghsa_ecosystem_map()
 
-    # =========================================================================
-    # 📥 INJECTED CRADLE: Build Ecosystem-Specific Absolute Rank Map
-    # =========================================================================
+    # CRADLE: Build Ecosystem-Specific Absolute Rank Map
     ecosystem_archive_buckets = defaultdict(list)
     for advisory_id, advisory_data in ghsa_lookup.items():
         for raw_eco in advisory_data.get("ecosystems", []):
@@ -527,7 +449,6 @@ def generate_enterprise_threat_leaderboard(
             advisory_id: rank 
             for rank, (advisory_id, _) in enumerate(sorted_bucket, start=1)
         }
-    # =========================================================================
 
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"   
     total_raw_rows = 0
@@ -535,14 +456,12 @@ def generate_enterprise_threat_leaderboard(
 
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
-    speedway_counts = Counter() 
 
     spatial_dwell_malware = {k: [] for k in master_tracks}
     spatial_dwell_cve = {k: [] for k in master_tracks}
     spatial_blast_radius = {k: [] for k in master_tracks}
     ecosystem_outlier_pools = {k: {} for k in master_tracks}
 
-    # Use pre-cached rows if available to eliminate back-to-back network hits
     if manifest_rows is not None:
         reader = manifest_rows
     else:
@@ -729,9 +648,7 @@ def generate_enterprise_threat_leaderboard(
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
-            
             w_rank, w_id, w_name, w_cvss, w_radius = 6, 36, 30, 6, 22
-            
             print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-' * (w_rank + w_id + w_name + w_cvss + w_radius + 16)}")
             
@@ -750,7 +667,6 @@ def generate_enterprise_threat_leaderboard(
                 artifact_str = item['name'][:27]  
                 cvss_str = f"{item['cvss']:.1f}"
                 radius_str = f"{item['radius']:,} Vers"
-                
                 print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
 
@@ -786,9 +702,6 @@ def generate_enterprise_threat_leaderboard(
             print(f"{f'#{rank:<2} {v_id}':<32} | {p_name[:27]:<30} | {status_display}")
         print("-" * 95)
 
-    # -------------------------------------------------------------------------
-    # EXPORT MANAGER: VERIFIED SNAPSHOT PERSISTENCE LAYER
-    # -------------------------------------------------------------------------
     if custom_export_arg:
         output_dir = "./output"
         os.makedirs(output_dir, exist_ok=True)
@@ -812,6 +725,7 @@ def generate_enterprise_threat_leaderboard(
         except Exception as e: 
             print(f"{RED}[-] CRITICAL FILE EXPORT FAIL: {e}{RESET}")
 
+
 def load_snapshots_from_dir(target_dir: str):
     snapshots = []
     if not os.path.isdir(target_dir): return snapshots
@@ -824,6 +738,7 @@ def load_snapshots_from_dir(target_dir: str):
         except Exception: pass
     snapshots.sort(key=lambda x: x["metadata"]["interval_to"])
     return snapshots
+
 
 def calculate_report_windows(args, now_utc):
     target_to_dates = " ".join(args.to).replace(",", " ").split() if args.to else [None]
@@ -846,8 +761,10 @@ def calculate_report_windows(args, now_utc):
         windows.append((calculated_start, calculated_end))
     return windows
 
+
 def build_snapshot_filename(start_date, end_date, target_layer=None):
     return f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{target_layer if target_layer else 'all'}.json"
+
 
 def run_velocity_update(args):
     snapshot_dir = args.velocity or "./output"
@@ -860,9 +777,6 @@ def run_velocity_update(args):
         snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer))
         generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup)
 
-    generate_velocity_matrix(target_dir=snapshot_dir, output_path=os.path.join(snapshot_dir, "velocity_matrix.csv"), render_terminal_plot=args.terminal_plot)
-    snapshots = load_snapshots_from_dir(snapshot_dir)
-    if snapshots: generate_html_report(snapshots, args.html if args.html else os.path.join(snapshot_dir, "briefing.html"))
 
 def compare_snapshots(file_base: str, file_current: str, html_output: str = None):
     try:
@@ -913,7 +827,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
     )
     
     top_10_ecos = all_ecosystems[:10]
-    
     for current_rank, eco in enumerate(top_10_ecos, start=1):
         v1 = sanitized_base_leaderboard.get(eco, 0)
         v2 = sanitized_curr_leaderboard.get(eco, 0)
@@ -993,22 +906,17 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             br_diff = c_mat["avg_blast_radius"] - br_base
             
             def color_metric_string(diff, base_val, suffix, width_size):
-                if abs(diff) < 0.05:
-                    diff = 0.0
-                    
+                if ...: pass
+                if abs(diff) < 0.05: diff = 0.0
                 diff_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
                 raw_str = f"{diff_str:<12} (from {base_val:.1f})"
                 padded_raw = f"{raw_str:<{width_size}}"
-                
-                if diff == 0.0:
-                    return padded_raw
-                
+                if diff == 0.0: return padded_raw
                 return f"{RED}{padded_raw}{RESET}" if diff > 0 else f"{GREEN}{padded_raw}{RESET}"
 
             dm_str = color_metric_string(dm_diff, dm_base, " Days", 26)
             dc_str = color_metric_string(dc_diff, dc_base, " Days", 26)
             br_str = color_metric_string(br_diff, br_base, " Vers", 26)
-
             print(f"{eco:<22} | {dm_str} | {dc_str} | {br_str}")
         print("="*115)
         
@@ -1019,11 +927,9 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
         for eco in sorted(list(current["outliers_leaderboards"].keys())):
             base_pool = base["outliers_leaderboards"].get(eco, {})
             curr_pool = current["outliers_leaderboards"].get(eco, {})
-            
             if not base_pool and not curr_pool: continue
                 
             print(f"\n{BOLD}[+] {eco} Outlier Tracking Shifts (Top 10):{RESET}")
-            
             w_rank, w_id, w_name, w_cvss, w_impact, w_delta = 5, 28, 28, 6, 16, 18
             print(f"    {'Rank':<{w_rank}} | {'Advisory ID':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Current Impact':<{w_impact}} | {'Impact Delta':<{w_delta}} | {'Rank Shift'}")
             print(f"    {'-'*150}")
@@ -1050,13 +956,9 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             for r_id in all_advisories:
                 b_item = next((x for x in base_sorted_pool if x["id"] == r_id), {"radius": 0, "name": "N/A", "cvss": 0.0})
                 c_item = next((x for x in curr_sorted_pool if x["id"] == r_id), {"radius": 0, "name": "N/A", "cvss": 0.0})
-                
                 p_name = c_item["name"] if c_item["name"] != "N/A" else b_item["name"]
                 c_score = c_item["cvss"] if c_item["cvss"] > 0.0 else b_item["cvss"]
-
-                sortable_pool.append({
-                    "id": r_id, "name": p_name, "b_radius": b_item["radius"], "c_radius": c_item["radius"], "cvss": c_score
-                })
+                sortable_pool.append({"id": r_id, "name": p_name, "b_radius": b_item["radius"], "c_radius": c_item["radius"], "cvss": c_score})
                 
             sorted_advisories = sorted(sortable_pool, key=lambda x: (-x["cvss"], -x["c_radius"], x["id"]))
             current_top_10 = sorted_advisories[:10]
@@ -1067,7 +969,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             dropped_out = [item for item in sorted_advisories if item["id"] in dropped_out_ids]
             
             has_shifts = False
-            
             for rank, item in enumerate(current_top_10, 1):
                 r_id = item["id"]
                 p_name = item["name"]
@@ -1087,14 +988,10 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                     if r_diff > 0: raw_r_str = f"Up {r_diff} ({b_rank}->{c_rank})"
                     elif r_diff < 0: raw_r_str = f"Down {abs(r_diff)} ({b_rank}->{c_rank})"
                     else: raw_r_str = "No Change"
-                elif not b_rank and c_rank:
-                    raw_r_str = "New to Radar"
-                else:
-                    raw_r_str = "-"
+                elif not b_rank and c_rank: raw_r_str = "New to Radar"
+                else: raw_r_str = "-"
                     
-                if radius_diff != 0 or (b_rank and c_rank and b_rank != c_rank) or (not b_rank and c_rank):
-                    has_shifts = True
-                    
+                if radius_diff != 0 or (b_rank and c_rank and b_rank != c_rank) or (not b_rank and c_rank): has_shifts = True
                 if radius_diff > 0: diff_display = f"{GREEN}{raw_diff_str:<{w_delta}}{RESET}"
                 elif radius_diff < 0: diff_display = f"{RED}{raw_diff_str:<{w_delta}}{RESET}"
                 else: diff_display = f"{raw_diff_str:<{w_delta}}"
@@ -1106,7 +1003,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                 c_str = f"{c_radius:,} Vers"
                 p_name_display = p_name[:25] + "..." if len(p_name) > 28 else p_name
                 cvss_display = f"{item['cvss']:.1f}"
-                
                 print(f"    #{rank:<{w_rank-1}} | {r_id:<{w_id}} | {p_name_display:<{w_name}} | {cvss_display:<{w_cvss}} | {c_str:<{w_impact}} | {diff_display} | {r_display}")
                 
             if dropped_out:
@@ -1123,9 +1019,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                 print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
         print("="*156 + "\n")
 
-    # -------------------------------------------------------------------------
-    # VI. ANSI TERMINAL COMPARISON GRAPH
-    # -------------------------------------------------------------------------
     print(f"\n{BOLD}VI. RELATIVE CHURN VELOCITY (TERMINAL GRAPH){RESET}")
     print("="*85)
     print(f"{'Ecosystem / Registry':<26} | {'Delta':<10} | {'Visual Sparkline'}")
@@ -1149,9 +1042,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
         delta_str = f"{sign}{v_diff:,}"
         print(f"{eco:<26} | {delta_str:<10} | {color}{bar_char}{RESET}")
 
-    # -------------------------------------------------------------------------
-    # CONDITIONAL COMPARISON HTML EXPORT
-    # -------------------------------------------------------------------------
     if html_output:
         print(f"\n[*] Generating base64-embedded HTML comparison visualization...")
         try:
@@ -1163,7 +1053,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             fig1, ax1 = mplplt.subplots(figsize=(12, 5))
             ax1.bar(x - width/2, b_vals, width, label='Base Snapshot', color='#6c757d')
             ax1.bar(x + width/2, c_vals, width, label='Current Snapshot', color='#007bff')
-            
             ax1.set_ylabel('Vulnerability Count')
             ax1.set_title('Ecosystem Vulnerability Delta (Base vs. Current)')
             ax1.set_xticks(x)
@@ -1181,7 +1070,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             for eco in top_10_ecos:
                 b_mat = base.get("profile_matrix", {}).get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
                 c_mat = current.get("profile_matrix", {}).get(eco, {"avg_dwell_mal": 0.0, "avg_dwell_cve": 0.0, "avg_blast_radius": 0.0})
-                
                 dm_deltas.append(c_mat.get("avg_dwell_mal", 0.0) - b_mat.get("avg_dwell_mal", 0.0))
                 dc_deltas.append(c_mat.get("avg_dwell_cve", 0.0) - b_mat.get("avg_dwell_cve", 0.0))
                 br_deltas.append(c_mat.get("avg_blast_radius", 0.0) - b_mat.get("avg_blast_radius", 0.0))
@@ -1200,7 +1088,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             plot_diverging(axes[0], dm_deltas, "Malware Dwell Delta", "Days")
             plot_diverging(axes[1], dc_deltas, "CVE Dwell Delta", "Days")
             plot_diverging(axes[2], br_deltas, "Blast Radius Delta", "Versions")
-
             axes[0].set_yticks(y_pos)
             axes[0].set_yticklabels(top_10_ecos)
             axes[0].invert_yaxis() 
@@ -1228,12 +1115,10 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                 <div class="container">
                     <h1>AppSec Threat Delta Report</h1>
                     <p><strong>Base Snapshot:</strong> {file_base} <br><strong>Current Snapshot:</strong> {file_current}</p>
-                    
                     <h2>I. Volume Shifts</h2>
                     <div class="chart">
                         <img src="data:image/png;base64,{img_str_vol}" alt="Volume Chart" style="max-width: 100%;" />
                     </div>
-
                     <h2>II. Spatial Dwell & Blast Radius Variance</h2>
                     <div class="chart">
                         <img src="data:image/png;base64,{img_str_div}" alt="Diverging Chart" style="max-width: 100%;" />
@@ -1244,11 +1129,104 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             
             with open(html_output, "w", encoding="utf-8") as f: f.write(html_report)
             print(f"[+] HTML Comparison Report generated: {html_output}")
-            
         except Exception as e:
             print(f"\n{RED}[!] Failed to generate HTML output: {e}{RESET}")
 
     print("="*85 + "\n")
+
+
+# =====================================================================
+# ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
+# =====================================================================
+
+def extract_suspicious_retractions(db_path="database/threat_stream.db", from_date=None, to_date=None, layer="all"):
+    """
+    Advanced context-aware research hunt engine for tracking contested 
+    upstream advisory retractions with deep database schema telemetry.
+    """
+    if not os.path.exists(db_path):
+        print(f"\n[!] Research Hunt Skipped: Warehouse database missing at {db_path}")
+        return
+        
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # INTERNALS AUTOPSY: Look past string labels straight to the column data
+    print(f"\n[🔬 DEEP DIAGNOSTIC] Relational Warehouse Core Autopsy:")
+    print("-" * 90)
+    cursor.execute("SELECT COUNT(*) FROM vulnerabilities")
+    print(f"    -> Total Ingested Dataset Rows:          {cursor.fetchone()[0]:,}")
+    
+    cursor.execute("SELECT COUNT(*) FROM vulnerabilities WHERE withdrawn_date IS NOT NULL")
+    withdrawn_col_count = cursor.fetchone()[0]
+    print(f"    -> Rows with 'withdrawn_date' Populated: {withdrawn_col_count:,}")
+    
+    print(f"    -> Active Threat Profile String Distribution:")
+    cursor.execute("SELECT threat_profile, COUNT(*) FROM vulnerabilities GROUP BY threat_profile")
+    for profile, count in cursor.fetchall():
+        print(f"       * '{profile}': {count:,} rows")
+        
+    if withdrawn_col_count > 0:
+        cursor.execute("SELECT advisory_id, threat_profile, withdrawn_date FROM vulnerabilities WHERE withdrawn_date IS NOT NULL LIMIT 2")
+        print(f"    -> Raw Column Sample Mapping:")
+        for aid, prof, wdate in cursor.fetchall():
+            print(f"       * ID: {aid} | Current Profile Field: '{prof}' | Withdrawn Date: {wdate}")
+    print("-" * 90)
+    
+    KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
+    KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
+    
+    query = """
+        SELECT advisory_id, package_name, ecosystems, cvss_score, blast_radius, dwell_days, last_modified
+        FROM vulnerabilities
+        WHERE (threat_profile = 'Withdrawn / Retracted Advisory' OR withdrawn_date IS NOT NULL)
+    """
+    params = []
+    
+    if from_date and to_date:
+        query += " AND last_modified BETWEEN ? AND ?"
+        params.extend([from_date, to_date])
+    elif from_date:
+        query += " AND last_modified >= ?"
+        params.append(from_date)
+        
+    print(f"\n🕵️‍♂️  OSV RETRACTION HUNT ACTIVE | Scope: Layer={layer.upper()} | Window: {from_date or 'ANY'} -> {to_date or 'ANY'}")
+    print("=" * 130)
+    print(f"{'Advisory ID':<20} | {'Package Name':<35} | {'Ecosystems':<20} | {'CVSS':<5} | {'Dwell (Days)':<12} | {'Last Mod'}")
+    print("-"*130)
+    
+    cursor.execute(query + " ORDER BY dwell_days DESC, cvss_score DESC", params)
+    
+    hit_count = 0
+    for row in cursor.fetchall():
+        v_id, p_name, ecos_json, cvss, radius, dwell, last_mod = row
+        ecos_list = json.loads(ecos_json) if ecos_json else []
+        
+        if layer == "app" and not any(e in KNOWN_REGISTRIES for e in ecos_list) and len(ecos_list) > 0:
+            continue
+        elif layer == "os" and not any(e in KNOWN_CONTAINERS for e in ecos_list) and len(ecos_list) > 0:
+            continue
+            
+        ecos = ", ".join(ecos_list) if ecos_list else "⚠️ SCRUBBED BY UPSTREAM"
+        p_name_display = p_name if p_name else "⚠️ Redacted Artifact"
+        flag = "🔥 SUSPICIOUS (CONTESTED)" if dwell >= 30 else "ℹ️ Disputed/Duplicate"
+        cvss_display = f"{cvss:.1f}" if cvss and cvss > 0 else "N/A"
+        
+        print(f"{v_id:<20} | {p_name_display[:35]:<35} | {ecos[:20]:<20} | {cvss_display:<5} | {dwell:<12.1f} | {last_mod} [{flag}]")
+        hit_count += 1
+        if hit_count >= 10:
+            break
+            
+    if hit_count == 0:
+        print("    [+] Zero high-exposure retractions detected matching this specific scope query.")
+        
+    conn.close()
+    print("=" * 130)
+
+
+# =====================================================================
+# CORE ENGINE COMMAND ORCHESTRATION LAYER
+# =====================================================================
 
 def main(): 
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
@@ -1267,22 +1245,38 @@ def main():
     parser.add_argument("--html", metavar="OUTPUT_FILE", help="Override briefing report output path.")
     parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
     parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
+    parser.add_argument("--registry", type=str, help="Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry npm,PyPI,Maven (Java)).")
+    parser.add_argument("--hunt-retracted", action="store_true", help="Execute an advanced research hunt for suspicious retracted advisories.")
     args = parser.parse_args()
+    
+    if args.hunt_retracted:
+        if not args.database:
+            parser.error("[!] The --hunt-retracted mechanism requires the --database relational engine active.")
+        extract_suspicious_retractions(
+            db_path="database/threat_stream.db",
+            from_date=args.from_date if hasattr(args, 'from_date') else None,
+            to_date=args.to_date if hasattr(args, 'to_date') else None,
+            layer=args.layer
+        )
+        return
 
     if args.velocity:
         run_velocity_update(args)
         return
+        
     if args.compare:
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.html)
         return
+        
     if args.html and not args.velocity and not args.compare:
         snapshots = load_snapshots_from_dir("./output")
         generate_html_report(snapshots, args.html)
         return
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
+    target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
     if args.database:
-        global_ghsa_lookup = build_ghsa_from_db()
+        global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries)
     else:
         global_ghsa_lookup = build_ghsa_ecosystem_map()
     
@@ -1312,6 +1306,7 @@ def main():
             ghsa_lookup=global_ghsa_lookup,
             manifest_rows=cached_manifest_rows  
         )
+
 
 if __name__ == "__main__":
     main()

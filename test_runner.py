@@ -75,6 +75,51 @@ class TestThreatStreamScanner(unittest.TestCase):
                 
         return 0, captured_output.getvalue()
 
+    def test_03_retraction_hunt_parameter_matrix(self):
+        """
+        Validates that extract_suspicious_retractions cleanly processes all 
+        permitted architectural layer selections without throwing exceptions.
+        """
+        from top10ecosystems import extract_suspicious_retractions
+        
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping parameters matrix verification.")
+
+        # Exercise the query engine across all layer boundaries using mock intervals
+        try:
+            for target_layer in ["all", "app", "os"]:
+                extract_suspicious_retractions(
+                    db_path=test_db,
+                    from_date="2019-01-01",
+                    to_date="2026-05-28",
+                    layer=target_layer
+                )
+        except Exception as e:
+            self.fail(f"[!] Regression Detected: Retraction hunt failed during layer matrix execution: {e}")
+
+    def test_04_retraction_hunt_scrubbed_metadata_resilience(self):
+        """
+        Ensures the hunt engine safely processes completely uncapped, un-bounded
+        time windows and handles scrubbed upstream data models gracefully.
+        """
+        from top10ecosystems import extract_suspicious_retractions
+        
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping resilience verification.")
+
+        try:
+            # Exercise open boundaries (None dates) which replicate standard global scans
+            extract_suspicious_retractions(
+                db_path=test_db,
+                from_date=None,
+                to_date=None,
+                layer="all"
+            )
+        except Exception as e:
+            self.fail(f"[!] Regression Detected: Open window retraction hunt crashed: {e}")
+
     # -------------------------------------------------------------------------
     # PYPI / REQUIREMENTS.TXT STRATEGY MATRIX
     # -------------------------------------------------------------------------

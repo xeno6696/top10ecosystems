@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-28T17:41:36.661359+00:00",
+        "generated_at": "2026-05-28T21:58:15.520430+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
         "target_layer_filter": "app"
@@ -29,21 +29,21 @@
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 10,
-        "Data Exfiltration / Credential Stealer": 918,
+        "Data Exfiltration / Credential Stealer": 920,
         "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 804
+        "Unclassified Malicious Payload": 802
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 7.726890756302521,
-            "avg_dwell_cve": 57.066765578635014,
-            "avg_blast_radius": 1.9034253092293054,
+            "avg_dwell_mal": 24.689700130378096,
+            "avg_dwell_cve": 53.79291553133515,
+            "avg_blast_radius": 1.7649911816578483,
             "avg_backlog_age": 385.2
         },
         "PyPI": {
             "avg_dwell_mal": 32.54195804195804,
-            "avg_dwell_cve": 291.8666666666667,
-            "avg_blast_radius": 79.8274478330658,
+            "avg_dwell_cve": 292.5754132231405,
+            "avg_blast_radius": 79.96969696969697,
             "avg_backlog_age": 235.0
         },
         "Go (Golang)": {
@@ -54,21 +54,21 @@
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 71.08727272727273,
-            "avg_blast_radius": 111.0909090909091,
+            "avg_dwell_cve": 78.75444839857651,
+            "avg_blast_radius": 111.73309608540926,
             "avg_backlog_age": 142.4
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 194.16814159292036,
-            "avg_blast_radius": 63.72566371681416,
-            "avg_backlog_age": 411.0
+            "avg_dwell_cve": 200.80263157894737,
+            "avg_blast_radius": 64.38157894736842,
+            "avg_backlog_age": 329.8
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 102.95945945945945,
-            "avg_blast_radius": 0.31981981981981983,
-            "avg_backlog_age": 133.3
+            "avg_dwell_cve": 102.56502242152466,
+            "avg_blast_radius": 0.3183856502242152,
+            "avg_backlog_age": 131.3
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
@@ -86,7 +86,7 @@
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 8.071428571428571,
             "avg_blast_radius": 46.166666666666664,
-            "avg_backlog_age": 89.4
+            "avg_backlog_age": 98.9
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
