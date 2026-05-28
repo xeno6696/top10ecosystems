@@ -1124,6 +1124,87 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
 
     print("="*85 + "\n")
 
+def build_ghsa_from_db(db_path: str = "database/threat_stream.db") -> dict:
+    """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map."""
+    import sqlite3
+    import os
+    import json
+    id_to_meta = {}
+    
+    if not os.path.exists(db_path):
+        return build_ghsa_ecosystem_map()
+        
+    print(f"[*] Extracting global context from SQLite warehouse: {db_path}...")
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystem, last_modified, malware_vector, vulnerable_versions 
+            FROM vulnerabilities
+        """)
+        
+        for row in cursor.fetchall():
+            v_id, p_name, cvss, radius, t_profile, eco, last_mod, m_vector, v_versions_json = row
+            
+            # Unpack serialized strings straight back into a native tracking set
+            version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
+            
+            id_to_meta[v_id] = {
+                "ecosystems": [eco],
+                "package_name": p_name,
+                "type": t_profile,
+                "vector": m_vector,
+                "dwell_days": 0.0,
+                "blast_radius": radius,
+                "vulnerable_versions": version_set, # 💡 FULL PARITY RESTORED
+                "cvss_score": cvss,
+                "last_modified": last_mod
+            }
+        conn.close()
+        print(f"[+] Successfully loaded {len(id_to_meta):,} records out of the SQLite warehouse index.")
+    except Exception as e:
+        print(f"[- ] Relational warehouse extraction failure: {e}. Falling back to ZIP.")
+        return build_ghsa_ecosystem_map()
+        
+    return id_to_meta
+    import sqlite3
+    import os
+    id_to_meta = {}
+    
+    if not os.path.exists(db_path):
+        return build_ghsa_ecosystem_map()
+        
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # 💡 GRAB THE NEW VECTOR COLUMN
+        cursor.execute("""
+            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystem, last_modified, malware_vector 
+            FROM vulnerabilities
+        """)
+        
+        for row in cursor.fetchall():
+            v_id, p_name, cvss, radius, t_profile, eco, last_mod, m_vector = row
+            
+            id_to_meta[v_id] = {
+                "ecosystems": [eco],
+                "package_name": p_name,
+                "type": t_profile,
+                "vector": m_vector,  # 💡 DYNAMIC VARIANCE INJECTED NATIVELY
+                "dwell_days": 0.0,
+                "blast_radius": radius,
+                "vulnerable_versions": set(), 
+                "cvss_score": cvss,
+                "last_modified": last_mod
+            }
+        conn.close()
+    except Exception as e:
+        return build_ghsa_ecosystem_map()
+        
+    return id_to_meta
+
 def main(): 
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
@@ -1140,6 +1221,7 @@ def main():
     parser.add_argument("--velocity", nargs="?", const="./output", metavar="DIR_PATH", help="Stitch snapshots into historical matrix.")
     parser.add_argument("--html", metavar="OUTPUT_FILE", help="Override briefing report output path.")
     parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
+    parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
     args = parser.parse_args()
 
     if args.velocity:
@@ -1154,7 +1236,11 @@ def main():
         return
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    global_ghsa_lookup = build_ghsa_ecosystem_map()
+    # Polymorphic selection gate handles data loading transparently
+    if args.database:
+        global_ghsa_lookup = build_ghsa_from_db()
+    else:
+        global_ghsa_lookup = build_ghsa_ecosystem_map()
     
     # Ingest the stream index exactly once for the entire batch run
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
