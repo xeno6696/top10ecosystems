@@ -90,7 +90,8 @@ def init_database():
                 malware_vector TEXT,
                 vulnerable_versions TEXT,
                 dwell_days REAL,
-                withdrawn_date TEXT 
+                withdrawn_date TEXT,
+                published_date TEXT 
             );
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
@@ -177,6 +178,7 @@ def parse_osv_json(vuln_data):
     if not v_id: return (None, None, None, 0.0, 0, None, None, None, None, None)
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
+    p_date_clean = published_str[:10] # e.g., "2006-07-21"
     modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
     withdrawn_str = vuln_data.get("withdrawn", None)
     
@@ -264,7 +266,7 @@ def parse_osv_json(vuln_data):
     v_versions_json = json.dumps(list(all_versions))
     ecosystems_json = json.dumps(list(ecosystems_set)) # 💡 CHANGED: Serialize the platform array
     
-    return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days, w_date)
+    return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, p_date_clean)
 
 def bootstrap_warehouse_from_zip(conn):
     """Parses local master archive data and bulk-loads the database using transactional blocks."""
@@ -314,8 +316,8 @@ def bootstrap_warehouse_from_zip(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -401,8 +403,8 @@ def sync_incremental_window(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
         conn.commit()
         print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized.{RESET}")

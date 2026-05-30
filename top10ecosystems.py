@@ -1139,7 +1139,186 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
 # ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
 # =====================================================================
 
+def display_all_time_retraction_stats(db_path="database/threat_stream.db"):
+    """
+    Computes global macro-distribution metrics and age brackets for all 
+    withdrawn advisories relative to today's date.
+    """
+    if not os.path.exists(db_path):
+        print(f"\n[!] Analytics Skipped: Target database missing at {db_path}")
+        return
+
+    # Establish explicit chronological boundary reference for today
+    today = datetime.date(2026, 5, 28)
+    
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # Extract raw structural metrics for all populated retractions
+    cursor.execute("""
+        SELECT advisory_id, withdrawn_date, dwell_days 
+        FROM vulnerabilities 
+        WHERE withdrawn_date IS NOT NULL
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    
+    total_retracted = len(rows)
+    if total_retracted == 0:
+        print("\n[!] Zero retracted entries found in the relational schema index.")
+        return
+
+    # Define standard analytical age spreads (in days)
+    brackets = [
+        {"label": "< 1 Year",      "min_d": 0,          "max_d": 365},
+        {"label": "1 - 3 Years",   "min_d": 365,        "max_d": 365 * 3},
+        {"label": "3 - 5 Years",   "min_d": 365 * 3,    "max_d": 365 * 5},
+        {"label": "5 - 10 Years",  "min_d": 365 * 5,    "max_d": 365 * 10},
+        {"label": "10 - 15 Years", "min_d": 365 * 10,   "max_d": 365 * 15},
+        {"label": "15+ Years",     "min_d": 365 * 15,   "max_d": 999999}
+    ]
+    
+    # Initialize allocation grids
+    retraction_counts = {b["label"]: 0 for b in brackets}
+    vintage_counts = {b["label"]: 0 for b in brackets}
+    
+    # Compute chronological metrics across the raw rows
+    for r_id, w_date_str, dwell_days in rows:
+        try:
+            w_date = datetime.datetime.strptime(w_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+            
+        # Metric 1: Retraction Age (Time elapsed since withdrawal)
+        days_since_retraction = (today - w_date).days
+        
+        # Metric 2: Historical Vintage (Time elapsed since original publication)
+        pub_date = w_date - datetime.timedelta(days=int(dwell_days))
+        total_advisory_age = (today - pub_date).days
+        
+        # Assign to matching retraction interval bracket
+        for b in brackets:
+            if b["min_d"] <= days_since_retraction < b["max_d"]:
+                retraction_counts[b["label"]] += 1
+                break
+                
+        # Assign to matching vintage interval bracket
+        for b in brackets:
+            if b["min_d"] <= total_advisory_age < b["max_d"]:
+                vintage_counts[b["label"]] += 1
+                break
+
+    # Render Macro Consolidated Dashboard Report
+    print(f"\n📊 GLOBAL ARCHIVE SUMMARY: ALL-TIME WITHDRAWN ADVISORY SPREAD")
+    print(f"Total Relational Retraction Base: {total_retracted:,} Advisories")
+    print("=" * 110)
+    print(f"{'Age Bracket (From Today)':<25} | {'Retraction Volume':<20} | {'Retraction %':<14} | {'Vintage Volume':<16} | {'Vintage %'}")
+    print("-" * 110)
+    
+    for b in brackets:
+        label = b["label"]
+        r_count = retraction_counts[label]
+        v_count = vintage_counts[label]
+        
+        r_pct = (r_count / total_retracted) * 100
+        v_pct = (v_count / total_retracted) * 100
+        
+        print(f"{label:<25} | {r_count:<20,} | {r_pct:<14.2f}% | {v_count:<16,} | {v_pct:.2f}%")
+        
+    print("=" * 110)
+
+# =====================================================================
+# ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
+# =====================================================================
 def extract_suspicious_retractions(db_path="database/threat_stream.db", from_date=None, to_date=None, layer="all"):
+    """
+    Advanced context-aware research hunt engine for tracking contested 
+    upstream advisory retractions with deep database schema telemetry.
+    """
+    if not os.path.exists(db_path):
+        print(f"\n[!] Research Hunt Skipped: Warehouse database missing at {db_path}")
+        return
+        
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    
+    # 🔬 INTERNALS AUTOPSY: Look past string labels straight to the column data
+    print(f"\n[🔬 DEEP DIAGNOSTIC] Relational Warehouse Core Autopsy:")
+    print("-" * 90)
+    cursor.execute("SELECT COUNT(*) FROM vulnerabilities")
+    print(f"    -> Total Ingested Dataset Rows:          {cursor.fetchone()[0]:,}")
+    
+    cursor.execute("SELECT COUNT(*) FROM vulnerabilities WHERE withdrawn_date IS NOT NULL")
+    withdrawn_col_count = cursor.fetchone()[0]
+    print(f"    -> Rows with 'withdrawn_date' Populated: {withdrawn_col_count:,}")
+    
+    print(f"    -> Active Threat Profile String Distribution:")
+    cursor.execute("SELECT threat_profile, COUNT(*) FROM vulnerabilities GROUP BY threat_profile")
+    for profile, count in cursor.fetchall():
+        print(f"       * '{profile}': {count:,} rows")
+        
+    if withdrawn_col_count > 0:
+        cursor.execute("SELECT advisory_id, threat_profile, withdrawn_date FROM vulnerabilities WHERE withdrawn_date IS NOT NULL LIMIT 2")
+        print(f"    -> Raw Column Sample Mapping:")
+        for aid, prof, wdate in cursor.fetchall():
+            print(f"       * ID: {aid} | Current Profile Field: '{prof}' | Withdrawn Date: {wdate}")
+    print("-" * 90)
+    
+    KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
+    KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
+    
+    # 💡 INSERTION 1: Added 'published_date' directly into the core SELECT template string
+    query = """
+        SELECT advisory_id, package_name, ecosystems, cvss_score, blast_radius, dwell_days, last_modified, published_date
+        FROM vulnerabilities
+        WHERE (threat_profile = 'Withdrawn / Retracted Advisory' OR withdrawn_date IS NOT NULL)
+    """
+    params = []
+    
+    if from_date and to_date:
+        query += " AND last_modified BETWEEN ? AND ?"
+        params.extend([from_date, to_date])
+    elif from_date:
+        query += " AND last_modified >= ?"
+        params.append(from_date)
+        
+    print(f"\n🕵️‍♂️  OSV RETRACTION HUNT ACTIVE | Scope: Layer={layer.upper()}")
+    print("=" * 145)
+    # 💡 INSERTION 2: Re-aligned the console header line to accommodate 'First Seen' column bounds
+    print(f"{'Advisory ID':<20} | {'Package Name':<25} | {'Ecosystems':<18} | {'CVSS':<5} | {'First Seen':<12} | {'Dwell (Days)':<12} | {'Last Mod'}")
+    print("-"*145)
+    
+    cursor.execute(query + " ORDER BY dwell_days DESC, cvss_score DESC", params)
+    
+    hit_count = 0
+    for row in cursor.fetchall():
+        # 💡 INSERTION 3: Unpack the 8th 'pub_date' element out of the database fetch execution array
+        v_id, p_name, ecos_json, cvss, radius, dwell, last_mod, pub_date = row
+        ecos_list = json.loads(ecos_json) if ecos_json else []
+        
+        if layer == "app" and not any(e in KNOWN_REGISTRIES for e in ecos_list) and len(ecos_list) > 0:
+            continue
+        elif layer == "os" and not any(e in KNOWN_CONTAINERS for e in ecos_list) and len(ecos_list) > 0:
+            continue
+            
+        ecos = ", ".join(ecos_list) if ecos_list else "⚠️ SCRUBBED BY UPSTREAM"
+        p_name_display = p_name if p_name else "⚠️ Redacted Artifact"
+        
+        # 💡 INSERTION 4: Flag historical items with greater than 5 years (1,825 days) of shelf life
+        flag = "🔥 DEEP HISTORICAL IMPORT" if dwell > 1825 else "ℹ️ Standard Dispute"
+        cvss_display = f"{cvss:.1f}" if cvss and cvss > 0 else "N/A"
+        
+        # 💡 INSERTION 5: Updated print wrapper incorporating spatial formatting matching the layout headers
+        print(f"{v_id:<20} | {p_name_display[:25]:<25} | {ecos[:18]:<18} | {cvss_display:<5} | {pub_date:<12} | {dwell:<12.1f} | {last_mod} [{flag}]")
+        hit_count += 1
+        if hit_count >= 10:
+            break
+            
+    if hit_count == 0:
+        print("    [+] Zero high-exposure retractions detected matching this specific scope query.")
+        
+    conn.close()
+    print("=" * 145)
     """
     Advanced context-aware research hunt engine for tracking contested 
     upstream advisory retractions with deep database schema telemetry.
@@ -1252,6 +1431,8 @@ def main():
     if args.hunt_retracted:
         if not args.database:
             parser.error("[!] The --hunt-retracted mechanism requires the --database relational engine active.")
+        
+        display_all_time_retraction_stats(db_path="database/threat_stream.db")
         extract_suspicious_retractions(
             db_path="database/threat_stream.db",
             from_date=args.from_date if hasattr(args, 'from_date') else None,

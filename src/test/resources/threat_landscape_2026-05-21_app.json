@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-28T21:58:26.526050+00:00",
+        "generated_at": "2026-05-30T14:48:17.986078+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app"
@@ -28,33 +28,33 @@
     },
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 80,
-        "Dependency Confusion Campaign": 10,
+        "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 933,
         "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 807
+        "Unclassified Malicious Payload": 806
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 24.454838709677418,
+            "avg_dwell_mal": 25.517419354838708,
             "avg_dwell_cve": 51.6484375,
             "avg_blast_radius": 1.7497842968075927,
             "avg_backlog_age": 386.2
         },
         "PyPI": {
             "avg_dwell_mal": 32.24913494809689,
-            "avg_dwell_cve": 368.79330543933054,
+            "avg_dwell_cve": 368.93054393305437,
             "avg_blast_radius": 74.00269541778975,
             "avg_backlog_age": 236.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.88,
+            "avg_dwell_cve": 85.92833333333333,
             "avg_blast_radius": 0.5266666666666666,
             "avg_backlog_age": 30.9
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 76.61967213114754,
+            "avg_dwell_cve": 76.62295081967213,
             "avg_blast_radius": 111.1311475409836,
             "avg_backlog_age": 143.4
         },
@@ -78,8 +78,8 @@
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 100.34328358208955,
-            "avg_blast_radius": 103.74626865671642,
+            "avg_dwell_cve": 103.4776119402985,
+            "avg_blast_radius": 103.71641791044776,
             "avg_backlog_age": 380.0
         },
         "Hex": {
@@ -1936,7 +1936,7 @@
                 9.6
             ],
             "GHSA-v529-vhwc-wfc5": [
-                15,
+                13,
                 "Vulnerability Fix (Update)",
                 "openc3",
                 9.6

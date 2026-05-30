@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-28T21:58:15.520430+00:00",
+        "generated_at": "2026-05-30T14:48:06.901415+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
         "target_layer_filter": "app"
@@ -28,27 +28,27 @@
     },
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 79,
-        "Dependency Confusion Campaign": 10,
+        "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 920,
         "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 802
+        "Unclassified Malicious Payload": 801
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 24.689700130378096,
+            "avg_dwell_mal": 25.763363754889177,
             "avg_dwell_cve": 53.79291553133515,
             "avg_blast_radius": 1.7649911816578483,
             "avg_backlog_age": 385.2
         },
         "PyPI": {
             "avg_dwell_mal": 32.54195804195804,
-            "avg_dwell_cve": 292.5754132231405,
+            "avg_dwell_cve": 292.7448347107438,
             "avg_blast_radius": 79.96969696969697,
             "avg_backlog_age": 235.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.69595782073814,
+            "avg_dwell_cve": 85.7469244288225,
             "avg_blast_radius": 0.4727592267135325,
             "avg_backlog_age": 30.0
         },
@@ -78,8 +78,8 @@
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 101.81818181818181,
-            "avg_blast_radius": 104.68181818181819,
+            "avg_dwell_cve": 105.0,
+            "avg_blast_radius": 104.65151515151516,
             "avg_backlog_age": 379.0
         },
         "Hex": {
@@ -1900,7 +1900,7 @@
                 9.6
             ],
             "GHSA-v529-vhwc-wfc5": [
-                15,
+                13,
                 "Vulnerability Fix (Update)",
                 "openc3",
                 9.6

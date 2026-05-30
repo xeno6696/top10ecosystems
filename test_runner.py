@@ -30,10 +30,10 @@ class TestThreatStreamScanner(unittest.TestCase):
     def setUpClass(cls):
         """Executes once before the suite starts. Clean binary operational fork."""
         print("[*] Initializing Global Testing Harness...")
-        cls.cache_dir = "./cache"
-        cls.cache_filepath = "./cache/osv_master_all.zip"
+        cls.cache_dir = "cache/"
+        cls.cache_filepath = "cache/osv_master_all.zip"
         
-        # 💡 ZERO CROSS-TALK: Absolute mutual exclusivity enforcement
+        #   ZERO CROSS-TALK: Absolute mutual exclusivity enforcement
         if USE_DATABASE_WAREHOUSE:
             print("[*] Mode Flag Active: Forcing test execution 100% against SQLite warehouse index.")
             cls.ghsa_lookup = top10ecosystems.build_ghsa_from_db()
@@ -46,7 +46,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         if not cls.ghsa_lookup:
             raise ValueError("[!] CRITICAL: Global advisory index mapping initialized completely empty.")
             
-        # 💡 CACHE THE 750K ROW STREAM: Avoid reading a massive CSV from disk repeatedly
+        #   CACHE THE 750K ROW STREAM: Avoid reading a massive CSV from disk repeatedly
         cls.frozen_csv_path = os.path.join("src", "test", "resources", "frozen_modified_id.csv")
         cls.cached_stream_lines = []
         if os.path.exists(cls.frozen_csv_path):
@@ -63,7 +63,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         
         captured_output = io.StringIO()
         
-        # 💡 TARGETS LOCKED: Patch BOTH potential dictionary load pipelines simultaneously
+        #   TARGETS LOCKED: Patch BOTH potential dictionary load pipelines simultaneously
         with patch.object(sys, 'argv', full_args), \
              patch('sys.stdout', captured_output), \
              patch('top10ecosystems.build_ghsa_ecosystem_map', return_value=self.ghsa_lookup), \
@@ -415,7 +415,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             with open(good_baseline_path, "r", encoding="utf-16") as f:
                 expected_output = f.read()
 
-        # 💡 DYNAMIC DIFF CALCULATOR: Runs only if an inequality is detected
+        #   DYNAMIC DIFF CALCULATOR: Runs only if an inequality is detected
         if live_output != expected_output:
             live_lines = live_output.splitlines(keepends=True)
             expected_lines = expected_output.splitlines(keepends=True)
