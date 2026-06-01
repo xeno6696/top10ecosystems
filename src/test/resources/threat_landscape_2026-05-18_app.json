@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-30T14:47:44.917671+00:00",
+        "generated_at": "2026-06-01T15:26:03.185439+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-18",
         "target_layer_filter": "app"
@@ -66,7 +66,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 90.35602094240838,
+            "avg_dwell_cve": 90.49214659685863,
             "avg_blast_radius": 0.3298429319371728,
             "avg_backlog_age": 129.5
         },

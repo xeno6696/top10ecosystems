@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-30T14:48:17.986078+00:00",
+        "generated_at": "2026-06-01T15:26:36.141581+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app"
@@ -35,7 +35,7 @@
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 25.517419354838708,
+            "avg_dwell_mal": 25.521290322580644,
             "avg_dwell_cve": 51.6484375,
             "avg_blast_radius": 1.7497842968075927,
             "avg_backlog_age": 386.2
@@ -48,7 +48,7 @@
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.92833333333333,
+            "avg_dwell_cve": 85.97666666666667,
             "avg_blast_radius": 0.5266666666666666,
             "avg_backlog_age": 30.9
         },
@@ -66,7 +66,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 97.86324786324786,
+            "avg_dwell_cve": 97.97435897435898,
             "avg_blast_radius": 0.46153846153846156,
             "avg_backlog_age": 132.2
         },

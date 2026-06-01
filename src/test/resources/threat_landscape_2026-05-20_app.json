@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-05-30T14:48:06.901415+00:00",
+        "generated_at": "2026-06-01T15:26:25.126194+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
         "target_layer_filter": "app"
@@ -35,7 +35,7 @@
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 25.763363754889177,
+            "avg_dwell_mal": 25.76727509778357,
             "avg_dwell_cve": 53.79291553133515,
             "avg_blast_radius": 1.7649911816578483,
             "avg_backlog_age": 385.2
@@ -66,7 +66,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 102.56502242152466,
+            "avg_dwell_cve": 102.68161434977578,
             "avg_blast_radius": 0.3183856502242152,
             "avg_backlog_age": 131.3
         },

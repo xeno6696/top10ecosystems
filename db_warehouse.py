@@ -15,7 +15,7 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-OSV Relational Data Warehouse Coordinator - Version 1.6
+OSV Relational Data Warehouse Coordinator - Version 1.7
 =================================================================================
 Parallel warehousing backend engineered to bulk-seed from a master snapshot cache 
 (auto-downloading if missing) and execute chronological dynamic sync updates.
@@ -29,9 +29,10 @@ import zipfile
 import datetime
 import requests
 import io
-from collections import Counter
-from cvss import CVSS2, CVSS3, CVSS4 # 💡 Imported for production CVSS parity
 import time
+import concurrent.futures
+from collections import Counter
+from cvss import CVSS2, CVSS3, CVSS4 
 from contextlib import contextmanager
 
 # Storage Routing Baselines
@@ -76,8 +77,7 @@ def init_database():
     if not db_exists:
         print(f"[*] Deploying fresh global relational catalog tables at: {DB_PATH}")
         
-        # 1. Core Global Index: Houses all individual advisory elements
-        # 💡 SCHEMA EXPANDED: Now explicitly includes 'dwell_days' for 10-column parity
+        # Core Global Index: Houses all individual advisory elements (12-column specification)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS vulnerabilities (
                 advisory_id TEXT PRIMARY KEY,
@@ -96,7 +96,7 @@ def init_database():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
         
-        # 2. Snapshot Anchors: Log chronological lookback window states
+        # Snapshot Anchors: Log chronological lookback window states
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS snapshots (
                 snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,13 +107,13 @@ def init_database():
             );
         """)
         
-        # 3. Volumetric Metrics Table
+        # Volumetric Metrics Table
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS ecosystem_metrics (
                 snapshot_id INTEGER,
-                ecosystem TEXT NOT NULL,
+                text_ecosystem TEXT NOT NULL,
                 activity_count INTEGER NOT NULL,
-                PRIMARY KEY (snapshot_id, ecosystem),
+                PRIMARY KEY (snapshot_id, text_ecosystem),
                 FOREIGN KEY(snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
             );
         """)
@@ -131,7 +131,6 @@ def download_master_archive():
         response = requests.get(MASTER_ZIP_URL, stream=True, timeout=120)
         response.raise_for_status()
         
-        # Stream chunks sequentially to preserve active working memory space
         with open(LOCAL_ZIP_PATH, 'wb') as local_file:
             chunk_count = 0
             for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB blocks
@@ -175,14 +174,14 @@ def extract_production_cvss(vuln_data):
 def parse_osv_json(vuln_data):
     """Translates raw nested OSV JSON structures into normalized flat relational database rows."""
     v_id = vuln_data.get("id", "")
-    if not v_id: return (None, None, None, 0.0, 0, None, None, None, None, None)
+    if not v_id: return (None, None, None, 0.0, 0, None, None, None, None, None, None, None)
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
-    p_date_clean = published_str[:10] # e.g., "2006-07-21"
+    p_date_clean = published_str[:10]
     modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
     withdrawn_str = vuln_data.get("withdrawn", None)
+    w_date = withdrawn_str[:10] if withdrawn_str else None
     
-    # Calculate standard lookup timelines natively
     dwell_days = 0.0
     try:
         p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
@@ -208,24 +207,10 @@ def parse_osv_json(vuln_data):
         elif any(x in summary or x in details for x in ["reverse shell", "backdoor", "remote code"]): 
             m_vector = "Persistent Backdoor / Execution Shell"
             
-    # 💡 FIX: Wrap everything else in an 'else' block so withdrawn status never gets clobbered
-    if withdrawn_str:
-        classification = "Withdrawn / Retracted Advisory"
-        w_date = withdrawn_str[:10]
-    else:
-        w_date = None
-        is_new_entry = (published_str == modified_str)
-        if is_malware: 
-            classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
-        elif has_fixes: 
-            classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
-        else: 
-            classification = "Metadata Correction / Adjustments"
-        
     p_name = "N/A"
     max_versions = 0
     all_versions = set()
-    ecosystems_set = set() # 💡 CHANGED: Track all unique ecosystems for this advisory
+    ecosystems_set = set()
     
     for affected in vuln_data.get("affected", []):
         eco = affected.get("package", {}).get("ecosystem")
@@ -252,19 +237,23 @@ def parse_osv_json(vuln_data):
                         eco_clean = track
                         break
             if not eco_clean: eco_clean = "Android"
-            ecosystems_set.add(eco_clean) # 💡 CHANGED: Accumulate every platform impacted
+            ecosystems_set.add(eco_clean)
 
     if not ecosystems_set:
         ecosystems_set.add("Android")
 
-    is_new_entry = (published_str == modified_str)
-    if is_malware: classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
-    elif has_fixes: classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
-    else: classification = "Metadata Correction / Adjustments"
-    
+    # Unified logic branch ensures withdrawn states are never unconditionally overwritten
+    if withdrawn_str:
+        classification = "Withdrawn / Retracted Advisory"
+    else:
+        is_new_entry = (published_str == modified_str)
+        if is_malware: classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
+        elif has_fixes: classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
+        else: classification = "Metadata Correction / Adjustments"
+        
     cvss_score = extract_production_cvss(vuln_data)
     v_versions_json = json.dumps(list(all_versions))
-    ecosystems_json = json.dumps(list(ecosystems_set)) # 💡 CHANGED: Serialize the platform array
+    ecosystems_json = json.dumps(list(ecosystems_set))
     
     return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, p_date_clean)
 
@@ -276,7 +265,6 @@ def bootstrap_warehouse_from_zip(conn):
         print("[+] Relational catalog already populated. Skipping bootstrap seed stage.")
         return
 
-    # Trigger chunked download fallback gate if file isn't present in execution scope
     if not os.path.exists(LOCAL_ZIP_PATH):
         download_master_archive()
 
@@ -302,7 +290,6 @@ def bootstrap_warehouse_from_zip(conn):
                 with z.open(file_name) as f:
                     try:
                         vuln_data = json.load(f)
-                        
                         parsed_row = parse_osv_json(vuln_data)
                         if parsed_row[0]:
                             vulnerabilities_batch.append(parsed_row)
@@ -311,7 +298,6 @@ def bootstrap_warehouse_from_zip(conn):
                     except Exception: continue
                     
         print(f"[*] Committing {len(vulnerabilities_batch):,} entries down to SQLite storage blocks...")
-        # 💡 UPGRADED: 10-column value mapping block integrated cleanly
         cursor.executemany("""
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
@@ -330,7 +316,7 @@ def bootstrap_warehouse_from_zip(conn):
         metric_rows = [(snapshot_id, eco, count) for eco, count in global_leaderboard.items()]
         
         cursor.executemany("""
-            INSERT OR REPLACE INTO ecosystem_metrics (snapshot_id, ecosystem, activity_count)
+            INSERT OR REPLACE INTO ecosystem_metrics (snapshot_id, text_ecosystem, activity_count)
             VALUES (?, ?, ?)
         """, metric_rows)
         
@@ -341,20 +327,39 @@ def bootstrap_warehouse_from_zip(conn):
         print(f"{RED}[- ] Critical failure loading structural database frames: {e}{RESET}")
 
 def sync_incremental_window(conn):
-    """Dynamically calculates lookback windows based on file properties to sync the database."""
+    """Dynamically calculates lookback windows based on relational snapshots and runs parallel syncs."""
     cursor = conn.cursor()
     
+    # 1. Establish the baseline interval from the local zip archive state
     if os.path.exists(LOCAL_ZIP_PATH):
         cache_mtime = os.path.getmtime(LOCAL_ZIP_PATH)
         cache_dt = datetime.datetime.fromtimestamp(cache_mtime, datetime.timezone.utc)
         start_date = cache_dt - datetime.timedelta(hours=1)
         print(f"\n[*] Dynamic Sync Engine Active.")
         print(f"    -> Local Cache Write Time: {cache_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        print(f"    -> Ingestion Boundary Gate: {start_date.strftime('%Y-%m-%d %H:%M:%S')} UTC (Includes 1hr padding)")
     else:
         start_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
         print(f"\n{YELLOW}[!] Cache zip missing. Falling back to static 24-hour delta gate.{RESET}")
     
+    # 2. STATE INTEGRATION: Check relational warehouse snapshot anchors for a newer high-water mark
+    try:
+        cursor.execute("SELECT MAX(interval_to) FROM snapshots")
+        max_snapshot_row = cursor.fetchone()
+        if max_snapshot_row and max_snapshot_row[0]:
+            raw_val = max_snapshot_row[0]
+            snapshot_dt = datetime.datetime.fromisoformat(raw_val.replace("Z", "+00:00"))
+            
+            if snapshot_dt.tzinfo is None:
+                snapshot_dt = snapshot_dt.replace(tzinfo=datetime.timezone.utc)
+            
+            if snapshot_dt > start_date:
+                start_date = snapshot_dt
+                print(f"    -> Relational High-Water Mark Found: {start_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    except Exception as e:
+        print(f"{YELLOW}[!] Notice: Could not process snapshot matrix tracking: {e}{RESET}")
+
+    print(f"    -> Ingestion Boundary Gate: {start_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+
     try:
         response = requests.get(MANIFEST_URL, timeout=30)
         response.raise_for_status()
@@ -377,28 +382,42 @@ def sync_incremental_window(conn):
                 target_ids.add(v_id)
                 
     if not target_ids:
-        print(f"{GREEN}[+] Zero late mutations detected upstream since cache compilation. Warehouse completely current.{RESET}")
+        print(f"{GREEN}[+] Zero late mutations detected upstream since last compilation. Warehouse completely current.{RESET}")
         return
         
     print(f"[+] Identified {len(target_ids):,} modern stream modifications to update.")
     
     updates_batch = []
-    for idx, v_id in enumerate(sorted(target_ids), start=1):
-        if idx % 100 == 0 or idx == len(target_ids):
-            print(f"    -> Syncing stream entries: {idx:,} / {len(target_ids):,}")
-            
+    
+    def fetch_vulnerability_payload(http_session, advisory_id):
         try:
-            res = requests.get(f"{OSV_API_URL}{v_id}", timeout=10)
+            res = http_session.get(f"{OSV_API_URL}{advisory_id}", timeout=10)
             if res.status_code == 200:
                 vuln_payload = res.json()
                 parsed_row = parse_osv_json(vuln_payload)
                 if parsed_row[0]:
-                    updates_batch.append(parsed_row)
-        except Exception: continue
+                    return parsed_row
+        except Exception: pass
+        return None
+
+    # High-performance parallel download loop execution block
+    with requests.Session() as session:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+            future_to_id = {
+                executor.submit(fetch_vulnerability_payload, session, v_id): v_id 
+                for v_id in sorted(target_ids)
+            }
+            
+            for idx, future in enumerate(concurrent.futures.as_completed(future_to_id), start=1):
+                if idx % 100 == 0 or idx == len(target_ids):
+                    print(f"    -> Syncing stream entries: {idx:,} / {len(target_ids):,}")
+                
+                result = future.result()
+                if result:
+                    updates_batch.append(result)
         
     if updates_batch:
         print(f"[*] Executing transactional upsert for {len(updates_batch):,} localized stream elements...")
-        # 💡 UPGRADED: Aligned incremental sync upsert query layout with the 10-column blueprint
         cursor.executemany("""
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
@@ -406,18 +425,26 @@ def sync_incremental_window(conn):
                 dwell_days, withdrawn_date, published_date
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
+        
+    # Log the successful execution window state back to the database tracking anchors
+    try:
+        now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        cursor.execute("""
+            INSERT OR REPLACE INTO snapshots (generated_at, interval_from, interval_to, target_layer)
+            VALUES (?, ?, ?, 'incremental_sync')
+        """, (now_str, start_date.isoformat(), now_str))
         conn.commit()
-        print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized.{RESET}")
+        print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized and anchored.{RESET}")
+    except Exception as e:
+        print(f"{RED}[- ] Failed to record execution snapshot context: {e}{RESET}")
 
 if __name__ == "__main__":
     print("=== OSV RELATIONAL DATA WAREHOUSE PROTOTYPE ===")
     connection = init_database()
     
-    # Phase 1: Seed base mapping logs
     with execution_timer("Bootstrap (Bulk Archive Load)"):
         bootstrap_warehouse_from_zip(connection)
     
-    # Phase 2: Pull localized dynamic deltas
     with execution_timer("Incremental Sync (API Stream)"):
         sync_incremental_window(connection)
     
