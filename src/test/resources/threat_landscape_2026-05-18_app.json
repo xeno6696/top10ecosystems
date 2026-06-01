@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-01T15:26:03.185439+00:00",
+        "generated_at": "2026-06-01T15:44:38.188462+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-18",
         "target_layer_filter": "app"
@@ -25,6 +25,12 @@
         "Vulnerability Fix (New Entry)": 0,
         "Vulnerability Fix (Update)": 2369,
         "Metadata Correction / Adjustments": 0
+    },
+    "layer_profile_matrix": {
+        "App Software Registry": {
+            "Malware (New Entry)": 1402,
+            "Vulnerability Fix (Update)": 2369
+        }
     },
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 79,

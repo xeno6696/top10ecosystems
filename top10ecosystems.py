@@ -420,6 +420,23 @@ def generate_enterprise_threat_leaderboard(
 
     if ghsa_lookup is None: ghsa_lookup = build_ghsa_ecosystem_map()
 
+    # =========================================================================
+    # 📥 INJECTED CRADLE: Build True Global Master Rank Map (Across All Rows)
+    # =========================================================================
+    sorted_global_heap = sorted(
+        ghsa_lookup.items(),
+        key=lambda x: (
+            -x[1].get("cvss_score", 0.0),
+            -int(x[1].get("blast_radius", 0)),
+            x[0]
+        )
+    )
+    global_absolute_ranks = {
+        advisory_id: rank 
+        for rank, (advisory_id, _) in enumerate(sorted_global_heap, start=1)
+    }
+    # =========================================================================
+
     # CRADLE: Build Ecosystem-Specific Absolute Rank Map
     ecosystem_archive_buckets = defaultdict(list)
     for advisory_id, advisory_data in ghsa_lookup.items():
@@ -455,6 +472,7 @@ def generate_enterprise_threat_leaderboard(
     project_intercept_alerts = []
 
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
+    layer_bucket_counts = defaultdict(Counter)
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
     spatial_dwell_malware = {k: [] for k in master_tracks}
@@ -543,6 +561,8 @@ def generate_enterprise_threat_leaderboard(
                                 project_intercept_alerts.append((current_id, ghsa_lookup[current_id]["package_name"], eco_clean, update_type))
 
                 bucket_counts[update_type] += 1
+                layer_bucket_counts[layer][update_type] += 1
+                
                 if "Malware" in update_type and current_vector: malware_vector_counts[current_vector] += 1
                 if current_id in ghsa_lookup:
                     meta_entry = ghsa_lookup[current_id]
@@ -581,9 +601,21 @@ def generate_enterprise_threat_leaderboard(
     print(f"Raw Entry Stream Items:    {total_raw_rows:,}")
     print(f"Ecosystem Attributions:    {sum(count for _, count, _ in filtered_results):,}")
 
-    print("\n" + "="*50 + f"\n  {BOLD}II. DATA ENRICHMENT: LAYER THREAT PROFILE{RESET}\n" + "="*50)
-    for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
-        print(f"-> {b_type:<32} | {bucket_counts[b_type]:<6,} ({bucket_counts[b_type]/sum(bucket_counts.values())*100 if sum(bucket_counts.values())>0 else 0:.1f}%)")
+    print("\n" + "="*65 + f"\n  {BOLD}II. DATA ENRICHMENT: ARCHITECTURAL LAYER THREAT MATRIX{RESET}\n" + "="*65)
+    
+    # 💡 UPGRADED: Dynamic layered slicing handles all active domains cleanly
+    for layer_name, counts in sorted(layer_bucket_counts.items()):
+        layer_total = sum(counts.values())
+        if layer_total == 0: continue
+        
+        print(f"\n[+] Layer Perspective: {BOLD}{layer_name}{RESET} ({layer_total:,} attributions)")
+        print("-" * 65)
+        for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
+            c_val = counts.get(b_type, 0)
+            pct = (c_val / layer_total * 100) if layer_total > 0 else 0.0
+            print(f"  -> {b_type:<35} | {c_val:<6,} ({pct:.1f}%)")
+            
+    print("=" * 65 + "\n")
 
     if sum(malware_vector_counts.values()) > 0:
         print("\n" + "="*50 + f"\n  {BOLD}III. DEEP DIVE: MALWARE ATTACK VECTOR ANALYSIS{RESET}\n" + "="*50)
@@ -648,8 +680,9 @@ def generate_enterprise_threat_leaderboard(
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
-            w_rank, w_id, w_name, w_cvss, w_radius = 6, 36, 30, 6, 22
-            print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
+            # 💡 WIDENED: w_id extended to 48 to cleanly scale multi-rank string boundaries
+            w_rank, w_id, w_name, w_cvss, w_radius = 6, 48, 30, 6, 22
+            print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-' * (w_rank + w_id + w_name + w_cvss + w_radius + 16)}")
             
             flat_pool = [{"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": item[3] if len(item) > 3 else 0.0} for r_id, item in pool.items()]
@@ -660,7 +693,12 @@ def generate_enterprise_threat_leaderboard(
                 local_eco_map = eco_absolute_ranks.get(eco, {})
                 abs_eco_rank = local_eco_map.get(item['id'], "N/A")
                 rank_val_str = f"{abs_eco_rank:,}" if isinstance(abs_eco_rank, int) else str(abs_eco_rank)
-                overall_token = f"(#{rank_val_str} overall)"
+                
+                # 💡 ENRICHED: Pull true macro placement from our new universal heap map
+                true_global_rank = global_absolute_ranks.get(item['id'], "N/A")
+                global_rank_str = f"{true_global_rank:,}" if isinstance(true_global_rank, int) else str(true_global_rank)
+                
+                overall_token = f"(#{rank_val_str} local / #{global_rank_str} global)"
                 
                 rank_str = f"#{rank}"
                 id_column_display = f"{item['id']} {overall_token}"
@@ -671,12 +709,12 @@ def generate_enterprise_threat_leaderboard(
         else: export_outlier_manifests[eco] = {}
 
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
-    print("="*95)
+    print("="*105) # 💡 Border extended to 105
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
-        print("-" * 95)
-        print(f"{'Static Risk (Top 10 Global)':<32} | {'Artifact Name':<30} | {'Last Active'}")
-        print("-" * 95)
+        print("-" * 105)
+        print(f"{'Static Risk Position Matrix':<42} | {'Artifact Name':<30} | {'Last Active'}")
+        print("-" * 105)
         
         valid_eco_records = []
         eco_lower_def = eco.lower()
@@ -699,8 +737,14 @@ def generate_enterprise_threat_leaderboard(
                 else: status_display = f"{RED}{last_mod_str} ({days_dormant}d ago){RESET}"
             except ValueError: status_display = f"{RED}Invalid Date{RESET}"
             
-            print(f"{f'#{rank:<2} {v_id}':<32} | {p_name[:27]:<30} | {status_display}")
-        print("-" * 95)
+            # 💡 ENRICHED: Display macro global position tokens cleanly inside the tabular matrix
+            abs_global_rank = global_absolute_ranks.get(v_id, "N/A")
+            rank_val_str = f"{abs_global_rank:,}" if isinstance(abs_global_rank, int) else str(abs_global_rank)
+            overall_token = f"(#{rank_val_str} global)"
+            
+            id_column_display = f"#{rank:<2} {v_id} {overall_token}"
+            print(f"{id_column_display:<42} | {p_name[:27]:<30} | {status_display}")
+        print("-" * 105)
 
     if custom_export_arg:
         output_dir = "./output"
@@ -717,6 +761,10 @@ def generate_enterprise_threat_leaderboard(
                     "metadata": {"generated_at": now.isoformat(), "interval_from": start_date.date().isoformat(), "interval_to": end_date.date().isoformat(), "target_layer_filter": target_layer if target_layer else "all"},
                     "leaderboard": {eco: count for eco, count, _ in filtered_results},
                     "threat_profile": dict(bucket_counts),
+                    
+                    # 💡 INJECTED: Preserves layered threat breakdowns natively for automated exports
+                    "layer_profile_matrix": {l: dict(c) for l, c in layer_bucket_counts.items()},
+                    
                     "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                     "profile_matrix": export_profile_matrix,
                     "outliers_leaderboards": export_outlier_manifests
@@ -870,6 +918,48 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
         print(f"-> {category:<35} | Base: {b_count:<7,} | Current: {c_count:<7,} | Delta: {diff_str}")
 
     if base.get("malware_vectors") or current.get("malware_vectors"):
+        print(f"\n{BOLD}III. CHRONOLOGICAL ATTACK VECTOR DOMINANCE VELOCITY SHIFTS:{RESET}")
+        print("-"*106)
+        print(f"{'Attack Vector Mechanical Profile':<40} | {'Base Snapshot':<18} | {'Current Snapshot':<18} | {'Raw Delta':<12} | {'Dominance Shift'}")
+        print("-"*106)
+        
+        b_mal_dict = base.get("malware_vectors", {})
+        c_mal_dict = current.get("malware_vectors", {})
+        
+        # Calculate pool baselines to compute percentage shares
+        b_total_mal = sum(b_mal_dict.values())
+        c_total_mal = sum(c_mal_dict.values())
+        
+        all_vectors = sorted(list(set(b_mal_dict.keys()).union(set(c_mal_dict.keys()))))
+        for vec in all_vectors:
+            b_v = b_mal_dict.get(vec, 0)
+            c_v = c_mal_dict.get(vec, 0)
+            v_diff = c_v - b_v
+            
+            # Compute percentage share slices out of the active threat pools
+            b_share = (b_v / b_total_mal * 100) if b_total_mal > 0 else 0.0
+            c_share = (c_v / c_total_mal * 100) if c_total_mal > 0 else 0.0
+            share_diff = c_share - b_share
+            
+            # Formulate raw delta metrics string alignment
+            raw_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
+            padded_diff_str = f"{raw_diff_str:>10}"
+            if v_diff > 0: v_diff_str = f"{GREEN}{padded_diff_str}{RESET}"
+            elif v_diff < 0: v_diff_str = f"{RED}{padded_diff_str}{RESET}"
+            else: v_diff_str = padded_diff_str
+            
+            # Formulate dominance share velocity string alignment
+            share_diff_str = f"{share_diff:+.1f}%" if share_diff != 0.0 else "0.0%"
+            padded_share_str = f"{share_diff_str:>14}"
+            if share_diff > 0.05: share_str = f"{GREEN}{padded_share_str}{RESET}"
+            elif share_diff < -0.05: share_str = f"{RED}{padded_share_str}{RESET}"
+            else: share_str = padded_share_str
+            
+            base_display = f"{b_v:,} ({b_share:.1f}%)"
+            curr_display = f"{c_v:,} ({c_share:.1f}%)"
+            
+            print(f"-> {vec:<37} | {base_display:<18} | {curr_display:<18} | {v_diff_str} | {share_str}")
+        print("-"*106)
         print(f"\n{BOLD}III. MALWARE VECTOR ATTACK MATRIX SHIFTS:{RESET}")
         print("-"*85)
         all_vectors = sorted(list(set(base.get("malware_vectors", {}).keys()).union(set(current.get("malware_vectors", {}).keys()))))
