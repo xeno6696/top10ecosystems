@@ -1,3 +1,4 @@
 plotext==5.3.2
 cvss==3.6
 matplotlib==3.10.7
+requests==2.34.2
