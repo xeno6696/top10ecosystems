@@ -694,11 +694,11 @@ def generate_enterprise_threat_leaderboard(
                 abs_eco_rank = local_eco_map.get(item['id'], "N/A")
                 rank_val_str = f"{abs_eco_rank:,}" if isinstance(abs_eco_rank, int) else str(abs_eco_rank)
                 
-                # 💡 ENRICHED: Pull true macro placement from our new universal heap map
                 true_global_rank = global_absolute_ranks.get(item['id'], "N/A")
                 global_rank_str = f"{true_global_rank:,}" if isinstance(true_global_rank, int) else str(true_global_rank)
                 
-                overall_token = f"(#{rank_val_str} local / #{global_rank_str} global)"
+                # 🎯 STANDARDIZED: Swapped "global" to "overall"
+                overall_token = f"(#{rank_val_str} local / #{global_rank_str} overall)"
                 
                 rank_str = f"#{rank}"
                 id_column_display = f"{item['id']} {overall_token}"
@@ -709,12 +709,12 @@ def generate_enterprise_threat_leaderboard(
         else: export_outlier_manifests[eco] = {}
 
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
-    print("="*105) # 💡 Border extended to 105
+    print("="*95) # Trimmed back down to standard width bounds
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
-        print("-" * 105)
-        print(f"{'Static Risk Position Matrix':<42} | {'Artifact Name':<30} | {'Last Active'}")
-        print("-" * 105)
+        print("-" * 95)
+        print(f"{'Static Risk Position Matrix':<36} | {'Artifact Name':<30} | {'Last Active'}")
+        print("-" * 95)
         
         valid_eco_records = []
         eco_lower_def = eco.lower()
@@ -737,15 +737,22 @@ def generate_enterprise_threat_leaderboard(
                 else: status_display = f"{RED}{last_mod_str} ({days_dormant}d ago){RESET}"
             except ValueError: status_display = f"{RED}Invalid Date{RESET}"
             
-            # 💡 ENRICHED: Display macro global position tokens cleanly inside the tabular matrix
+            # Extract universal macro global rank positioning
             abs_global_rank = global_absolute_ranks.get(v_id, "N/A")
-            rank_val_str = f"{abs_global_rank:,}" if isinstance(abs_global_rank, int) else str(abs_global_rank)
-            overall_token = f"(#{rank_val_str} global)"
+            global_rank_str = f"{abs_global_rank:,}" if isinstance(abs_global_rank, int) else str(abs_global_rank)
+            
+            # Fused clean token mapping only macro global context
+            overall_token = f"({global_rank_str} global)"
             
             id_column_display = f"#{rank:<2} {v_id} {overall_token}"
-            print(f"{id_column_display:<42} | {p_name[:27]:<30} | {status_display}")
-        print("-" * 105)
+            print(f"{id_column_display:<36} | {p_name[:27]:<30} | {status_display}")
+        print("-" * 95)
+    
+    print("-" * 95)
 
+    # =========================================================================
+    # 📥 RESTORED: Snapshot Serialization Engine for Golden Master Parity
+    # =========================================================================
     if custom_export_arg:
         output_dir = "./output"
         os.makedirs(output_dir, exist_ok=True)
@@ -758,13 +765,15 @@ def generate_enterprise_threat_leaderboard(
         try:
             with open(export_path, 'w', encoding='utf-8') as ef:
                 json.dump({
-                    "metadata": {"generated_at": now.isoformat(), "interval_from": start_date.date().isoformat(), "interval_to": end_date.date().isoformat(), "target_layer_filter": target_layer if target_layer else "all"},
+                    "metadata": {
+                        "generated_at": now.isoformat(), 
+                        "interval_from": start_date.date().isoformat(), 
+                        "interval_to": end_date.date().isoformat(), 
+                        "target_layer_filter": target_layer if target_layer else "all"
+                    },
                     "leaderboard": {eco: count for eco, count, _ in filtered_results},
                     "threat_profile": dict(bucket_counts),
-                    
-                    # 💡 INJECTED: Preserves layered threat breakdowns natively for automated exports
                     "layer_profile_matrix": {l: dict(c) for l, c in layer_bucket_counts.items()},
-                    
                     "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                     "profile_matrix": export_profile_matrix,
                     "outliers_leaderboards": export_outlier_manifests
