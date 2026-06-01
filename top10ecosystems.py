@@ -473,6 +473,11 @@ def generate_enterprise_threat_leaderboard(
 
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
     layer_bucket_counts = defaultdict(Counter)
+    # =========================================================================
+    # 📥 INJECTED: Hardware tracking structures for Section VIII Cross-Compilation
+    # =========================================================================
+    intel_feed_matrix = defaultdict(lambda: {"total": 0, "malware": 0, "cve": 0, "max_radius": 0})
+    intel_sig_regex = re.compile(r'(x86|amd64|x64|intel|elf64|pe32|win-64|linux-64)', re.IGNORECASE)
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
     spatial_dwell_malware = {k: [] for k in master_tracks}
@@ -562,6 +567,33 @@ def generate_enterprise_threat_leaderboard(
 
                 bucket_counts[update_type] += 1
                 layer_bucket_counts[layer][update_type] += 1
+                
+                # =========================================================================
+                # 🔬 INJECTED: Intercept hardware architecture targeting flags
+                # =========================================================================
+                is_intel_target = False
+                p_name_check = ""
+                blast_radius_val = 0
+                
+                if current_id in ghsa_lookup:
+                    meta_ref = ghsa_lookup[current_id]
+                    p_name_check = meta_ref.get("package_name", "")
+                    blast_radius_val = meta_ref.get("blast_radius", 0)
+                    if intel_sig_regex.search(p_name_check) or intel_sig_regex.search(meta_ref.get("vector", "")):
+                        is_intel_target = True
+                
+                # Resilient fallback fallback loop: evaluate path text streams for unindexed items
+                if not is_intel_target and intel_sig_regex.search(path):
+                    is_intel_target = True
+                    
+                if is_intel_target:
+                    metrics = intel_feed_matrix[eco_clean]
+                    metrics["total"] += 1
+                    metrics["max_radius"] = max(metrics["max_radius"], blast_radius_val)
+                    if "Malware" in update_type:
+                        metrics["malware"] += 1
+                    else:
+                        metrics["cve"] += 1
                 
                 if "Malware" in update_type and current_vector: malware_vector_counts[current_vector] += 1
                 if current_id in ghsa_lookup:
@@ -749,7 +781,22 @@ def generate_enterprise_threat_leaderboard(
         print("-" * 95)
     
     print("-" * 95)
-
+    
+    # =========================================================================
+    # 📊 INJECTED: VIII. HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX
+    # =========================================================================
+    print("\n" + "="*95)
+    print(f"  {BOLD}VIII. HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX (INTEL x86_64){RESET}")
+    print("="*95)
+    if not intel_feed_matrix:
+        print("  [+] Zero explicit Intel/x86_64 architecture compile-target hooks detected in this execution frame.")
+    else:
+        print(f"{'Ecosystem / Registry Source':<30} | {'Total Intel Pulls':<18} | {'Malware Payloads':<18} | {'CVE Vulnerabilities':<20} | {'Max Blast Radius'}")
+        print("-" * 95)
+        for eco_source, counts in sorted(intel_feed_matrix.items(), key=lambda x: x[1]["total"], reverse=True):
+            print(f"{eco_source:<30} | {counts['total']:<18,} | {counts['malware']:<18,} | {counts['cve']:<20,} | {counts['max_radius']:,} Versions")
+    print("="*95 + "\n")
+    
     # =========================================================================
     # 📥 RESTORED: Snapshot Serialization Engine for Golden Master Parity
     # =========================================================================
@@ -774,6 +821,10 @@ def generate_enterprise_threat_leaderboard(
                     "leaderboard": {eco: count for eco, count, _ in filtered_results},
                     "threat_profile": dict(bucket_counts),
                     "layer_profile_matrix": {l: dict(c) for l, c in layer_bucket_counts.items()},
+                    
+                    # 💡 INJECTED: Saves cross-compiled hardware attributions to disk schema schema
+                    "intel_architecture_matrix": {e: dict(c) for e, c in intel_feed_matrix.items()},
+                    
                     "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                     "profile_matrix": export_profile_matrix,
                     "outliers_leaderboards": export_outlier_manifests
@@ -926,49 +977,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             
         print(f"-> {category:<35} | Base: {b_count:<7,} | Current: {c_count:<7,} | Delta: {diff_str}")
 
-    if base.get("malware_vectors") or current.get("malware_vectors"):
-        print(f"\n{BOLD}III. CHRONOLOGICAL ATTACK VECTOR DOMINANCE VELOCITY SHIFTS:{RESET}")
-        print("-"*106)
-        print(f"{'Attack Vector Mechanical Profile':<40} | {'Base Snapshot':<18} | {'Current Snapshot':<18} | {'Raw Delta':<12} | {'Dominance Shift'}")
-        print("-"*106)
-        
-        b_mal_dict = base.get("malware_vectors", {})
-        c_mal_dict = current.get("malware_vectors", {})
-        
-        # Calculate pool baselines to compute percentage shares
-        b_total_mal = sum(b_mal_dict.values())
-        c_total_mal = sum(c_mal_dict.values())
-        
-        all_vectors = sorted(list(set(b_mal_dict.keys()).union(set(c_mal_dict.keys()))))
-        for vec in all_vectors:
-            b_v = b_mal_dict.get(vec, 0)
-            c_v = c_mal_dict.get(vec, 0)
-            v_diff = c_v - b_v
-            
-            # Compute percentage share slices out of the active threat pools
-            b_share = (b_v / b_total_mal * 100) if b_total_mal > 0 else 0.0
-            c_share = (c_v / c_total_mal * 100) if c_total_mal > 0 else 0.0
-            share_diff = c_share - b_share
-            
-            # Formulate raw delta metrics string alignment
-            raw_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
-            padded_diff_str = f"{raw_diff_str:>10}"
-            if v_diff > 0: v_diff_str = f"{GREEN}{padded_diff_str}{RESET}"
-            elif v_diff < 0: v_diff_str = f"{RED}{padded_diff_str}{RESET}"
-            else: v_diff_str = padded_diff_str
-            
-            # Formulate dominance share velocity string alignment
-            share_diff_str = f"{share_diff:+.1f}%" if share_diff != 0.0 else "0.0%"
-            padded_share_str = f"{share_diff_str:>14}"
-            if share_diff > 0.05: share_str = f"{GREEN}{padded_share_str}{RESET}"
-            elif share_diff < -0.05: share_str = f"{RED}{padded_share_str}{RESET}"
-            else: share_str = padded_share_str
-            
-            base_display = f"{b_v:,} ({b_share:.1f}%)"
-            curr_display = f"{c_v:,} ({c_share:.1f}%)"
-            
-            print(f"-> {vec:<37} | {base_display:<18} | {curr_display:<18} | {v_diff_str} | {share_str}")
-        print("-"*106)
         print(f"\n{BOLD}III. MALWARE VECTOR ATTACK MATRIX SHIFTS:{RESET}")
         print("-"*85)
         all_vectors = sorted(list(set(base.get("malware_vectors", {}).keys()).union(set(current.get("malware_vectors", {}).keys()))))

@@ -56,6 +56,96 @@ class TestThreatStreamScanner(unittest.TestCase):
 
         print(f"[+] Harness Setup Complete. Indexed {len(cls.ghsa_lookup):,} global advisories.\n")
 
+    def test_console_and_export_telemetry_parity(self):
+        """
+        [PARITY GATE] Asserts character-by-character metric alignment between 
+        the human-readable stdout display tables and the serialized JSON schema.
+        """
+        import json
+        import re
+
+        # 1. Initialize destination path constraints
+        temp_dir = "./output"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_export_path = os.path.join(temp_dir, "parity_gate_verification.json")
+        
+        if os.path.exists(temp_export_path):
+            os.remove(temp_export_path)
+
+        # Ensure isolated file system cleanup at test teardown
+        self.addCleanup(lambda: os.remove(temp_export_path) if os.path.exists(temp_export_path) else None)
+
+        # 2. Trigger an authentic telemetry generation profile over a frozen 1-day window
+        mock_flags = [
+            '--from', '2026-05-18',
+            '--to', '2026-05-19',
+            '--export', temp_export_path
+        ]
+        if USE_DATABASE_WAREHOUSE:
+            mock_flags.append('--database')
+
+        exit_code, stdout_capture = self.run_scanner_with_args(mock_flags)
+        self.assertEqual(exit_code, 0, f"Execution failed under parity compilation: {stdout_capture}")
+        
+        # 3. Extract the exported JSON tracking payload
+        with open(temp_export_path, 'r', encoding='utf-8') as f:
+            export_payload = json.load(f)
+
+        # 4. PARITY GATE A: Validate Ecosystem Leaderboard Counts
+        # Scrapes pattern like: "npm                             | 3,258"
+        for eco_name, json_count in export_payload.get("leaderboard", {}).items():
+            # Escape parenthesis noise if parsing items like 'Go (Golang)' or 'Maven (Java)'
+            escaped_name = re.escape(eco_name)
+            leaderboard_regex = re.compile(rf"{escaped_name}\s*\|\s*([0-9,]+)")
+            match = leaderboard_regex.search(stdout_capture)
+            
+            if match:
+                console_count = int(match.group(1).replace(",", ""))
+                self.assertEqual(
+                    console_count, json_count,
+                    f"[!] TELEMETRY PARITY DRIFT: Leaderboard count mismatch for '{eco_name}'. "
+                    f"Console reported '{console_count:,}' while Export contains '{json_count:,}'."
+                )
+
+        # 5. PARITY GATE B: Validate Malware Attack Vector Breakdowns
+        # Scrapes pattern like: "-> Data Exfiltration / Credential Stealer | 1,215"
+        for vector_name, json_vcount in export_payload.get("malware_vectors", {}).items():
+            escaped_vector = re.escape(vector_name)
+            vector_regex = re.compile(rf"->\s*{escaped_vector}\s*\|\s*([0-9,]+)")
+            match = vector_regex.search(stdout_capture)
+            
+            if match:
+                console_vcount = int(match.group(1).replace(",", ""))
+                self.assertEqual(
+                    console_vcount, json_vcount,
+                    f"[!] TELEMETRY PARITY DRIFT: Malware attack vector mismatch for '{vector_name}'. "
+                    f"Console reported '{console_vcount:,}' while Export contains '{json_vcount:,}'."
+                )
+
+        # 6. PARITY GATE C: Validate Section VIII Cross-Compiled Hardware Matrix counts
+        # 🎯 FIXED: Slice the console stream buffer to eliminate cross-talk with the main leaderboard
+        section_viii_header = "VIII. HARDWARE ARCHITECTURE COMPILATION"
+        if section_viii_header in stdout_capture:
+            section_viii_zone = stdout_capture.split(section_viii_header)[1]
+        else:
+            section_viii_zone = stdout_capture
+
+        for eco_source, json_metrics in export_payload.get("intel_architecture_matrix", {}).items():
+            escaped_source = re.escape(eco_source)
+            intel_regex = re.compile(rf"{escaped_source}\s*\|\s*([0-9,]+)\s*\|")
+            
+            # Scan only within the sliced Section VIII stream zone
+            match = intel_regex.search(section_viii_zone)
+            
+            if match:
+                console_intel_total = int(match.group(1).replace(",", ""))
+                json_intel_total = json_metrics.get("total", 0)
+                self.assertEqual(
+                    console_intel_total, json_intel_total,
+                    f"[!] TELEMETRY PARITY DRIFT: Section VIII Intel total mismatch for '{eco_source}'. "
+                    f"Console reported '{console_intel_total:,}' while Export contains '{json_intel_total:,}'."
+                )
+
     def run_scanner_with_args(self, mock_args):
         """Helper utility to simulate an authentic CLI execution and capture output."""
         base_args = ['top10ecosystems.py', '--layer', 'app', '--from', '2020-01-01']
