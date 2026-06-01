@@ -120,6 +120,64 @@ class TestThreatStreamScanner(unittest.TestCase):
         except Exception as e:
             self.fail(f"[!] Regression Detected: Open window retraction hunt crashed: {e}")
 
+    def test_export_snapshot_generation_persistence(self):
+        """
+        [REGRESSION GATE] Verifies the snapshot export compilation pipeline 
+        successfully writes fully structured analytical JSON payloads to disk.
+        """
+        import json
+        
+        # 1. Setup a pristine, isolated destination path
+        temp_dir = "./output"
+        os.makedirs(temp_dir, exist_ok=True)
+        target_export_path = os.path.join(temp_dir, "regression_gate_export_verify.json")
+        
+        if os.path.exists(target_export_path):
+            os.remove(target_export_path)
+            
+        # 2. Stage a fast chronological execution window to maximize speed
+        mock_flags = [
+            '--from', '2026-05-18',
+            '--to', '2026-05-19',
+            '--export', target_export_path
+        ]
+        if USE_DATABASE_WAREHOUSE:
+            mock_flags.append('--database')
+            
+        # Register automatic cleanup to keep the repository pristine after execution
+        self.addCleanup(lambda: os.remove(target_export_path) if os.path.exists(target_export_path) else None)
+        
+        # 3. Trigger the core application orchestration pipeline
+        exit_code, output = self.run_scanner_with_args(mock_flags)
+        
+        # 4. Assert direct operational compliance and filesystem survival
+        self.assertEqual(exit_code, 0, f"Export execution failed under test harness with stdout:\n{output}")
+        self.assertTrue(
+            os.path.exists(target_export_path), 
+            "[!] CRITICAL REGRESSION: The script completed successfully but failed to write the JSON snapshot to disk. Export logic has been dropped!"
+        )
+        
+        # 5. Schema verification autopsy: Ensure no root nodes were skipped
+        with open(target_export_path, 'r', encoding='utf-8') as f:
+            payload = json.load(f)
+            
+        required_schema_nodes = [
+            "metadata", 
+            "leaderboard", 
+            "threat_profile", 
+            "layer_profile_matrix", 
+            "malware_vectors", 
+            "profile_matrix", 
+            "outliers_leaderboards"
+        ]
+        
+        for node in required_schema_nodes:
+            self.assertIn(
+                node, payload, 
+                f"[!] SCHEMA CORRUPTION: Saved snapshot file is missing the critical '{node}' root data node. Export structure has been clobbered."
+            )
+
+
     # -------------------------------------------------------------------------
     # PYPI / REQUIREMENTS.TXT STRATEGY MATRIX
     # -------------------------------------------------------------------------
