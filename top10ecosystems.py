@@ -783,19 +783,19 @@ def generate_enterprise_threat_leaderboard(
     print("-" * 95)
     
     # =========================================================================
-    # 📊 INJECTED: VIII. HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX
+    # 📊 FIXED LYNCHPIN: VIII. HARDWARE ARCHITECTURE MATRIX (Scaled to 115)
     # =========================================================================
-    print("\n" + "="*95)
+    print("\n" + "="*115)
     print(f"  {BOLD}VIII. HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX (INTEL x86_64){RESET}")
-    print("="*95)
+    print("="*115)
     if not intel_feed_matrix:
         print("  [+] Zero explicit Intel/x86_64 architecture compile-target hooks detected in this execution frame.")
     else:
         print(f"{'Ecosystem / Registry Source':<30} | {'Total Intel Pulls':<18} | {'Malware Payloads':<18} | {'CVE Vulnerabilities':<20} | {'Max Blast Radius'}")
-        print("-" * 95)
+        print("-" * 115)
         for eco_source, counts in sorted(intel_feed_matrix.items(), key=lambda x: x[1]["total"], reverse=True):
             print(f"{eco_source:<30} | {counts['total']:<18,} | {counts['malware']:<18,} | {counts['cve']:<20,} | {counts['max_radius']:,} Versions")
-    print("="*95 + "\n")
+    print("="*115 + "\n")
     
     # =========================================================================
     # 📥 RESTORED: Snapshot Serialization Engine for Golden Master Parity
@@ -977,22 +977,48 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             
         print(f"-> {category:<35} | Base: {b_count:<7,} | Current: {c_count:<7,} | Delta: {diff_str}")
 
-        print(f"\n{BOLD}III. MALWARE VECTOR ATTACK MATRIX SHIFTS:{RESET}")
-        print("-"*85)
-        all_vectors = sorted(list(set(base.get("malware_vectors", {}).keys()).union(set(current.get("malware_vectors", {}).keys()))))
+    # =========================================================================
+    # 🎯 III. CHRONOLOGICAL ATTACK VECTOR DOMINANCE VELOCITY SHIFTS
+    # =========================================================================
+    if base.get("malware_vectors") or current.get("malware_vectors"):
+        print(f"\n{BOLD}III. CHRONOLOGICAL ATTACK VECTOR DOMINANCE VELOCITY SHIFTS:{RESET}")
+        print("-"*106)
+        print(f"{'Attack Vector Mechanical Profile':<40} | {'Base Snapshot':<18} | {'Current Snapshot':<18} | {'Raw Delta':<12} | {'Dominance Shift'}")
+        print("-"*106)
+        
+        b_mal_dict = base.get("malware_vectors", {})
+        c_mal_dict = current.get("malware_vectors", {})
+        
+        b_total_mal = sum(b_mal_dict.values())
+        c_total_mal = sum(c_mal_dict.values())
+        
+        all_vectors = sorted(list(set(b_mal_dict.keys()).union(set(c_mal_dict.keys()))))
         for vec in all_vectors:
-            b_v = base.get("malware_vectors", {}).get(vec, 0)
-            c_v = current.get("malware_vectors", {}).get(vec, 0)
+            b_v = b_mal_dict.get(vec, 0)
+            c_v = c_mal_dict.get(vec, 0)
             v_diff = c_v - b_v
             
-            raw_v_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
-            padded_v_diff_str = f"{raw_v_diff_str:>10}"
+            b_share = (b_v / b_total_mal * 100) if b_total_mal > 0 else 0.0
+            c_share = (c_v / c_total_mal * 100) if c_total_mal > 0 else 0.0
+            share_diff = c_share - b_share
             
-            if v_diff > 0: v_diff_str = f"{GREEN}{padded_v_diff_str}{RESET}"
-            elif v_diff < 0: v_diff_str = f"{RED}{padded_v_diff_str}{RESET}"
-            else: v_diff_str = padded_v_diff_str
-                
-            print(f"-> {vec:<38} | Base: {b_v:<6,} | Current: {c_v:<6,} | Delta: {v_diff_str}")
+            raw_diff_str = f"{v_diff:+,}" if v_diff != 0 else "0"
+            padded_diff_str = f"{raw_diff_str:>10}"
+            if v_diff > 0: v_diff_str = f"{GREEN}{padded_diff_str}{RESET}"
+            elif v_diff < 0: v_diff_str = f"{RED}{padded_diff_str}{RESET}"
+            else: v_diff_str = padded_diff_str
+            
+            share_diff_str = f"{share_diff:+.1f}%" if share_diff != 0.0 else "0.0%"
+            padded_share_str = f"{share_diff_str:>14}"
+            if share_diff > 0.05: share_str = f"{GREEN}{padded_share_str}{RESET}"
+            elif share_diff < -0.05: share_str = f"{RED}{padded_share_str}{RESET}"
+            else: share_str = padded_share_str
+            
+            base_display = f"{b_v:,} ({b_share:.1f}%)"
+            curr_display = f"{c_v:,} ({c_share:.1f}%)"
+            
+            print(f"-> {vec:<37} | {base_display:<18} | {curr_display:<18} | {v_diff_str} | {share_str}")
+        print("-"*106)
 
     if "profile_matrix" in base and "profile_matrix" in current:
         print(f"\n{BOLD}IV. SPATIAL DWELL & BLAST RADIUS BASELINE SHIFTS:{RESET}")
@@ -1013,7 +1039,6 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             br_diff = c_mat["avg_blast_radius"] - br_base
             
             def color_metric_string(diff, base_val, suffix, width_size):
-                if ...: pass
                 if abs(diff) < 0.05: diff = 0.0
                 diff_str = f"{diff:+.1f}{suffix}" if diff != 0 else f"0.0{suffix}"
                 raw_str = f"{diff_str:<12} (from {base_val:.1f})"
@@ -1123,7 +1148,7 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
                     print(f"      - {r_id:<20} | {p_name_display:<28} | Base Rank: #{b_rank:<3} -> Current Rank: {c_rank}")
                 
             if not has_shifts and not dropped_out:
-                print(f"    -> All tracked critical outlier thresholds remained static between snapshots.")
+                print(f"    --> All tracked critical outlier thresholds remained static between snapshots.")
         print("="*156 + "\n")
 
     print(f"\n{BOLD}VI. RELATIVE CHURN VELOCITY (TERMINAL GRAPH){RESET}")
@@ -1148,6 +1173,90 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             
         delta_str = f"{sign}{v_diff:,}"
         print(f"{eco:<26} | {delta_str:<10} | {color}{bar_char}{RESET}")
+    print("="*85)
+
+    # =========================================================================
+    # 📊 VII. ARCHITECTURAL LAYER MUTATION VARIANCE BREAKOUT
+    # =========================================================================
+    if base.get("layer_profile_matrix") or current.get("layer_profile_matrix"):
+        print(f"\n{BOLD}VII. ARCHITECTURAL LAYER MUTATION VARIANCE BREAKOUT:{RESET}")
+        print("-" * 105)
+        
+        b_layers = base.get("layer_profile_matrix", {})
+        c_layers = current.get("layer_profile_matrix", {})
+        all_layers = sorted(list(set(b_layers.keys()).union(set(c_layers.keys()))))
+        
+        for layer_name in all_layers:
+            b_counts = b_layers.get(layer_name, {})
+            c_counts = c_layers.get(layer_name, {})
+            
+            if not b_counts and not c_counts: continue
+            
+            print(f"\n[+] Layer Mutation Group: {BOLD}{layer_name}{RESET}")
+            print("-" * 105)
+            print(f"  {'Threat Profile Classification Category':<37} | {'Base Vol':<10} | {'Current Vol':<12} | {'Volume Delta'}")
+            print("  " + "-" * 103)
+            
+            for b_type in ["Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]:
+                b_c = b_counts.get(b_type, 0)
+                c_c = c_counts.get(b_type, 0)
+                diff = c_c - b_c
+                if b_c == 0 and c_c == 0: continue
+                
+                raw_diff_str = f"{diff:+,}" if diff != 0 else "0"
+                padded_diff_str = f"{raw_diff_str:>12}"
+                
+                if diff > 0: diff_str = f"{GREEN}{padded_diff_str}{RESET}"
+                elif diff < 0: diff_str = f"{RED}{padded_diff_str}{RESET}"
+                else: diff_str = padded_diff_str
+                
+                print(f"  -> {b_type:<35} | {b_c:<10,} | {c_c:<12,} | {diff_str}")
+        print("-" * 105 + "\n")
+
+    # =========================================================================
+    # 📊 VIII. HARDWARE ARCHITECTURE COMPILATION MATRIX VARIANCE ANALYSIS
+    # =========================================================================
+    if base.get("intel_architecture_matrix") or current.get("intel_architecture_matrix"):
+        print(f"\n{BOLD}VIII. HARDWARE ARCHITECTURE COMPILATION MATRIX VARIANCE ANALYSIS:{RESET}")
+        print("-" * 125)
+        print(f"{'Ecosystem / Registry Source':<26} | {'Intel Pulls (Base->Curr)':<28} | {'Malware (Base->Curr)':<24} | {'CVEs (Base->Curr)':<24} | {'Max Blast Radius Shift'}")
+        print("-" * 125)
+        
+        b_intel = base.get("intel_architecture_matrix", {})
+        c_intel = current.get("intel_architecture_matrix", {})
+        all_intel_ecos = sorted(list(set(b_intel.keys()).union(set(c_intel.keys()))))
+        
+        for eco in all_intel_ecos:
+            b_m = b_intel.get(eco, {"total": 0, "malware": 0, "cve": 0, "max_radius": 0})
+            c_m = c_intel.get(eco, {"total": 0, "malware": 0, "cve": 0, "max_radius": 0})
+            
+            t_diff = c_m.get("total", 0) - b_m.get("total", 0)
+            m_diff = c_m.get("malware", 0) - b_m.get("malware", 0)
+            v_diff = c_m.get("cve", 0) - b_m.get("cve", 0)
+            r_diff = c_m.get("max_radius", 0) - b_m.get("max_radius", 0)
+            
+            t_delta = f"{t_diff:+,}" if t_diff != 0 else "0"
+            t_padded = f"{b_m.get('total',0):,} -> {c_m.get('total',0):,} ({t_delta})".ljust(28)
+            if t_diff > 0: t_padded = t_padded.replace(t_delta, f"{GREEN}{t_delta}{RESET}")
+            elif t_diff < 0: t_padded = t_padded.replace(t_delta, f"{RED}{t_delta}{RESET}")
+            
+            m_delta = f"{m_diff:+,}" if m_diff != 0 else "0"
+            m_padded = f"{b_m.get('malware',0):,} -> {c_m.get('malware',0):,} ({m_delta})".ljust(24)
+            if m_diff > 0: m_padded = m_padded.replace(m_delta, f"{GREEN}{m_delta}{RESET}")
+            elif m_diff < 0: m_padded = m_padded.replace(m_delta, f"{RED}{m_delta}{RESET}")
+            
+            v_delta = f"{v_diff:+,}" if v_diff != 0 else "0"
+            v_padded = f"{b_m.get('cve',0):,} -> {c_m.get('cve',0):,} ({v_delta})".ljust(24)
+            if v_diff > 0: v_padded = v_padded.replace(v_delta, f"{GREEN}{v_delta}{RESET}")
+            elif v_diff < 0: v_padded = v_padded.replace(v_delta, f"{RED}{v_delta}{RESET}")
+            
+            r_raw = f"{r_diff:+,} Vers" if r_diff != 0 else "No Change"
+            if r_diff > 0: r_str = f"{GREEN}{r_raw}{RESET} (from {b_m.get('max_radius', 0)})"
+            elif r_diff < 0: r_str = f"{RED}{r_raw}{RESET} (from {b_m.get('max_radius', 0)})"
+            else: r_str = f"{r_raw} (from {b_m.get('max_radius', 0)})"
+            
+            print(f"{eco:<26} | {t_padded} | {m_padded} | {v_padded} | {r_str}")
+        print("-" * 125 + "\n")
 
     if html_output:
         print(f"\n[*] Generating base64-embedded HTML comparison visualization...")

@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-01T15:44:38.188462+00:00",
+        "generated_at": "2026-06-01T22:49:37.411063+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-18",
         "target_layer_filter": "app"
@@ -32,6 +32,38 @@
             "Vulnerability Fix (Update)": 2369
         }
     },
+    "intel_architecture_matrix": {
+        "NuGet": {
+            "total": 30,
+            "malware": 0,
+            "cve": 30,
+            "max_radius": 231
+        },
+        "Go (Golang)": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 0
+        },
+        "Packagist (PHP)": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 130
+        },
+        "PyPI": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 121
+        },
+        "Crates.io": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 0
+        }
+    },
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 11,
@@ -48,13 +80,13 @@
         },
         "PyPI": {
             "avg_dwell_mal": 32.1941391941392,
-            "avg_dwell_cve": 83.57040572792363,
+            "avg_dwell_cve": 83.66825775656325,
             "avg_blast_radius": 59.4349710982659,
             "avg_backlog_age": 233.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 59.959276018099544,
+            "avg_dwell_cve": 60.05203619909502,
             "avg_blast_radius": 0.2850678733031674,
             "avg_backlog_age": 28.8
         },
@@ -72,7 +104,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 90.49214659685863,
+            "avg_dwell_cve": 90.77486910994764,
             "avg_blast_radius": 0.3298429319371728,
             "avg_backlog_age": 129.5
         },

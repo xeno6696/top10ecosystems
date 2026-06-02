@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-01T15:45:13.691849+00:00",
+        "generated_at": "2026-06-01T22:50:10.868871+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app"
@@ -32,6 +32,44 @@
             "Vulnerability Fix (Update)": 3538
         }
     },
+    "intel_architecture_matrix": {
+        "NuGet": {
+            "total": 34,
+            "malware": 0,
+            "cve": 34,
+            "max_radius": 231
+        },
+        "npm": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 1
+        },
+        "Go (Golang)": {
+            "total": 2,
+            "malware": 0,
+            "cve": 2,
+            "max_radius": 0
+        },
+        "Packagist (PHP)": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 130
+        },
+        "PyPI": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 121
+        },
+        "Crates.io": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 0
+        }
+    },
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 80,
         "Dependency Confusion Campaign": 11,
@@ -48,13 +86,13 @@
         },
         "PyPI": {
             "avg_dwell_mal": 32.24913494809689,
-            "avg_dwell_cve": 368.93054393305437,
+            "avg_dwell_cve": 368.96485355648537,
             "avg_blast_radius": 74.00269541778975,
             "avg_backlog_age": 236.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.97666666666667,
+            "avg_dwell_cve": 86.045,
             "avg_blast_radius": 0.5266666666666666,
             "avg_backlog_age": 30.9
         },
@@ -72,7 +110,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 97.97435897435898,
+            "avg_dwell_cve": 98.2051282051282,
             "avg_blast_radius": 0.46153846153846156,
             "avg_backlog_age": 132.2
         },

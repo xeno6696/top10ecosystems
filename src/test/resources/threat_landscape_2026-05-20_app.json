@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-01T15:45:01.737789+00:00",
+        "generated_at": "2026-06-01T22:50:00.928064+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
         "target_layer_filter": "app"
@@ -32,6 +32,38 @@
             "Vulnerability Fix (Update)": 3197
         }
     },
+    "intel_architecture_matrix": {
+        "NuGet": {
+            "total": 31,
+            "malware": 0,
+            "cve": 31,
+            "max_radius": 231
+        },
+        "Go (Golang)": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 0
+        },
+        "Packagist (PHP)": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 130
+        },
+        "PyPI": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 121
+        },
+        "Crates.io": {
+            "total": 1,
+            "malware": 0,
+            "cve": 1,
+            "max_radius": 0
+        }
+    },
     "malware_vectors": {
         "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 11,
@@ -48,13 +80,13 @@
         },
         "PyPI": {
             "avg_dwell_mal": 32.54195804195804,
-            "avg_dwell_cve": 292.7448347107438,
+            "avg_dwell_cve": 292.78719008264466,
             "avg_blast_radius": 79.96969696969697,
             "avg_backlog_age": 235.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 85.7469244288225,
+            "avg_dwell_cve": 85.81898066783832,
             "avg_blast_radius": 0.4727592267135325,
             "avg_backlog_age": 30.0
         },
@@ -72,7 +104,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 102.68161434977578,
+            "avg_dwell_cve": 102.9237668161435,
             "avg_blast_radius": 0.3183856502242152,
             "avg_backlog_age": 131.3
         },
