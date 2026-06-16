@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-15T14:30:53.457539+00:00",
+        "generated_at": "2026-06-16T23:19:00.111280+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-18",
         "target_layer_filter": "app"
@@ -68,14 +68,14 @@
         "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 577,
-        "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 726
+        "Persistent Backdoor / Execution Shell": 10,
+        "Unclassified Malicious Payload": 725
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 34.56953055801594,
+            "avg_dwell_mal": 34.67050487156776,
             "avg_dwell_cve": 58.953592814371255,
-            "avg_blast_radius": 1.8569838619922092,
+            "avg_blast_radius": 1.85920979410128,
             "avg_backlog_age": 383.2
         },
         "PyPI": {
@@ -88,7 +88,7 @@
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 64.76923076923077,
             "avg_blast_radius": 0.2850678733031674,
-            "avg_backlog_age": 78.4
+            "avg_backlog_age": 73.8
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
@@ -116,7 +116,7 @@
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 109.0923076923077,
+            "avg_dwell_cve": 109.29230769230769,
             "avg_blast_radius": 105.01538461538462,
             "avg_backlog_age": 366.7
         },
@@ -124,7 +124,7 @@
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 11.0,
             "avg_blast_radius": 48.714285714285715,
-            "avg_backlog_age": 96.2
+            "avg_backlog_age": 80.3
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
@@ -297,6 +297,12 @@
                 "66o",
                 10.0
             ],
+            "MAL-2026-3747": [
+                6,
+                "Malware (New Entry)",
+                "@aiscene/aiserver",
+                10.0
+            ],
             "MAL-2026-2238": [
                 5,
                 "Malware (New Entry)",
@@ -427,12 +433,6 @@
                 5,
                 "Malware (New Entry)",
                 "@squawk/notams",
-                10.0
-            ],
-            "MAL-2026-3452": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/procedure-data",
                 10.0
             ]
         },

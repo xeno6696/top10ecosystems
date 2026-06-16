@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-15T14:31:27.434408+00:00",
+        "generated_at": "2026-06-16T23:19:34.602555+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app"
@@ -74,27 +74,27 @@
         "Typosquatting / Brand Hijacking": 80,
         "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 936,
-        "Persistent Backdoor / Execution Shell": 9,
-        "Unclassified Malicious Payload": 803
+        "Persistent Backdoor / Execution Shell": 10,
+        "Unclassified Malicious Payload": 802
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 26.010322580645163,
+            "avg_dwell_mal": 26.083870967741934,
             "avg_dwell_cve": 55.018229166666664,
-            "avg_blast_radius": 1.767471958584987,
+            "avg_blast_radius": 1.769197584124245,
             "avg_backlog_age": 386.2
         },
         "PyPI": {
             "avg_dwell_mal": 32.951557093425606,
-            "avg_dwell_cve": 375.7171548117155,
+            "avg_dwell_cve": 375.72384937238496,
             "avg_blast_radius": 73.62398921832884,
             "avg_backlog_age": 231.9
         },
         "Go (Golang)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 91.11,
+            "avg_dwell_cve": 91.13166666666666,
             "avg_blast_radius": 0.5266666666666666,
-            "avg_backlog_age": 80.9
+            "avg_backlog_age": 76.0
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
@@ -122,7 +122,7 @@
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 106.6268656716418,
+            "avg_dwell_cve": 106.82089552238806,
             "avg_blast_radius": 103.67164179104478,
             "avg_backlog_age": 369.4
         },
@@ -130,7 +130,7 @@
             "avg_dwell_mal": 0.0,
             "avg_dwell_cve": 10.642857142857142,
             "avg_blast_radius": 46.166666666666664,
-            "avg_backlog_age": 98.3
+            "avg_backlog_age": 82.1
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
@@ -315,6 +315,12 @@
                 "66o",
                 10.0
             ],
+            "MAL-2026-3747": [
+                6,
+                "Malware (New Entry)",
+                "@aiscene/aiserver",
+                10.0
+            ],
             "MAL-2026-2238": [
                 5,
                 "Malware (New Entry)",
@@ -433,12 +439,6 @@
                 5,
                 "Malware (New Entry)",
                 "@squawk/navaid-data",
-                10.0
-            ],
-            "MAL-2026-3450": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/navaids",
                 10.0
             ]
         },

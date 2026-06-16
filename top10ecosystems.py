@@ -473,9 +473,8 @@ def generate_enterprise_threat_leaderboard(
 
     bucket_counts = Counter({"Malware (New Entry)": 0, "Malware (Incremental Update)": 0, "Vulnerability Fix (New Entry)": 0, "Vulnerability Fix (Update)": 0, "Metadata Correction / Adjustments": 0})
     layer_bucket_counts = defaultdict(Counter)
-    # =========================================================================
-    # 📥 INJECTED: Hardware tracking structures for Section VIII Cross-Compilation
-    # =========================================================================
+    
+    # Hardware tracking structures for Section VIII Cross-Compilation
     intel_feed_matrix = defaultdict(lambda: {"total": 0, "malware": 0, "cve": 0, "max_radius": 0})
     intel_sig_regex = re.compile(r'(x86|amd64|x64|intel|elf64|pe32|win-64|linux-64)', re.IGNORECASE)
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
@@ -568,9 +567,6 @@ def generate_enterprise_threat_leaderboard(
                 bucket_counts[update_type] += 1
                 layer_bucket_counts[layer][update_type] += 1
                 
-                # =========================================================================
-                # 🔬 INJECTED: Intercept hardware architecture targeting flags
-                # =========================================================================
                 is_intel_target = False
                 p_name_check = ""
                 blast_radius_val = 0
@@ -582,7 +578,6 @@ def generate_enterprise_threat_leaderboard(
                     if intel_sig_regex.search(p_name_check) or intel_sig_regex.search(meta_ref.get("vector", "")):
                         is_intel_target = True
                 
-                # Resilient fallback fallback loop: evaluate path text streams for unindexed items
                 if not is_intel_target and intel_sig_regex.search(path):
                     is_intel_target = True
                     
@@ -635,7 +630,6 @@ def generate_enterprise_threat_leaderboard(
 
     print("\n" + "="*65 + f"\n  {BOLD}II. DATA ENRICHMENT: ARCHITECTURAL LAYER THREAT MATRIX{RESET}\n" + "="*65)
     
-    # 💡 UPGRADED: Dynamic layered slicing handles all active domains cleanly
     for layer_name, counts in sorted(layer_bucket_counts.items()):
         layer_total = sum(counts.values())
         if layer_total == 0: continue
@@ -712,7 +706,6 @@ def generate_enterprise_threat_leaderboard(
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
-            # 💡 WIDENED: w_id extended to 48 to cleanly scale multi-rank string boundaries
             w_rank, w_id, w_name, w_cvss, w_radius = 6, 48, 30, 6, 22
             print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-' * (w_rank + w_id + w_name + w_cvss + w_radius + 16)}")
@@ -729,7 +722,6 @@ def generate_enterprise_threat_leaderboard(
                 true_global_rank = global_absolute_ranks.get(item['id'], "N/A")
                 global_rank_str = f"{true_global_rank:,}" if isinstance(true_global_rank, int) else str(true_global_rank)
                 
-                # 🎯 STANDARDIZED: Swapped "global" to "overall"
                 overall_token = f"(#{rank_val_str} local / #{global_rank_str} overall)"
                 
                 rank_str = f"#{rank}"
@@ -740,13 +732,16 @@ def generate_enterprise_threat_leaderboard(
                 print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
 
+    # =========================================================================
+    # VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT)
+    # =========================================================================
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
-    print("="*95) # Trimmed back down to standard width bounds
+    print("=" * 115)
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
-        print("-" * 95)
-        print(f"{'Static Risk Position Matrix':<36} | {'Artifact Name':<30} | {'Last Active'}")
-        print("-" * 95)
+        print("-" * 115)
+        print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active'}")
+        print("-" * 115)
         
         valid_eco_records = []
         eco_lower_def = eco.lower()
@@ -756,7 +751,12 @@ def generate_enterprise_threat_leaderboard(
                 meta_with_id['injected_id'] = vuln_id
                 valid_eco_records.append(meta_with_id)
 
-        static_top_10 = sorted(valid_eco_records, key=lambda x: (-x['cvss_score'], -x['blast_radius']))[:10]
+        # Extracted historically across the complete relational catalog population
+        static_top_10 = sorted(
+            valid_eco_records, 
+            key=lambda x: (-x['cvss_score'], -x['blast_radius'], x['injected_id'])
+        )[:10]
+        
         for rank, vuln in enumerate(static_top_10, start=1):
             v_id = vuln['injected_id']
             p_name = vuln.get('package_name', 'Unknown')
@@ -769,21 +769,18 @@ def generate_enterprise_threat_leaderboard(
                 else: status_display = f"{RED}{last_mod_str} ({days_dormant}d ago){RESET}"
             except ValueError: status_display = f"{RED}Invalid Date{RESET}"
             
-            # Extract universal macro global rank positioning
+            # REVERTED RESTORATION WIN: Pull universal global catalog standing map
             abs_global_rank = global_absolute_ranks.get(v_id, "N/A")
             global_rank_str = f"{abs_global_rank:,}" if isinstance(abs_global_rank, int) else str(abs_global_rank)
             
-            # Fused clean token mapping only macro global context
-            overall_token = f"({global_rank_str} global)"
-            
+            # Standardized layout token label
+            overall_token = f"({global_rank_str} overall)"
             id_column_display = f"#{rank:<2} {v_id} {overall_token}"
-            print(f"{id_column_display:<36} | {p_name[:27]:<30} | {status_display}")
-        print("-" * 95)
-    
-    print("-" * 95)
+            print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display}")
+        print("-" * 115)
     
     # =========================================================================
-    # 📊 FIXED LYNCHPIN: VIII. HARDWARE ARCHITECTURE MATRIX (Scaled to 115)
+    # VIII. HARDWARE ARCHITECTURE MATRIX (Scaled to 115)
     # =========================================================================
     print("\n" + "="*115)
     print(f"  {BOLD}VIII. HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX (INTEL x86_64){RESET}")
@@ -798,7 +795,7 @@ def generate_enterprise_threat_leaderboard(
     print("="*115 + "\n")
     
     # =========================================================================
-    # 📥 RESTORED: Snapshot Serialization Engine for Golden Master Parity
+    # 📥 Snapshot Serialization Engine for Golden Master Parity
     # =========================================================================
     if custom_export_arg:
         output_dir = "./output"
@@ -821,10 +818,7 @@ def generate_enterprise_threat_leaderboard(
                     "leaderboard": {eco: count for eco, count, _ in filtered_results},
                     "threat_profile": dict(bucket_counts),
                     "layer_profile_matrix": {l: dict(c) for l, c in layer_bucket_counts.items()},
-                    
-                    # 💡 INJECTED: Saves cross-compiled hardware attributions to disk schema schema
                     "intel_architecture_matrix": {e: dict(c) for e, c in intel_feed_matrix.items()},
-                    
                     "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                     "profile_matrix": export_profile_matrix,
                     "outliers_leaderboards": export_outlier_manifests
