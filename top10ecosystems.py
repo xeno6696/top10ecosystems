@@ -1350,102 +1350,10 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
 
     print("="*85 + "\n")
 
-
 # =====================================================================
 # ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
 # =====================================================================
 
-def display_all_time_retraction_stats(db_path="database/threat_stream.db"):
-    """
-    Computes global macro-distribution metrics and age brackets for all 
-    withdrawn advisories relative to today's date.
-    """
-    if not os.path.exists(db_path):
-        print(f"\n[!] Analytics Skipped: Target database missing at {db_path}")
-        return
-
-    # Establish explicit chronological boundary reference for today
-    today = datetime.date(2026, 5, 28)
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    # Extract raw structural metrics for all populated retractions
-    cursor.execute("""
-        SELECT advisory_id, withdrawn_date, dwell_days 
-        FROM vulnerabilities 
-        WHERE withdrawn_date IS NOT NULL
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    total_retracted = len(rows)
-    if total_retracted == 0:
-        print("\n[!] Zero retracted entries found in the relational schema index.")
-        return
-
-    # Define standard analytical age spreads (in days)
-    brackets = [
-        {"label": "< 1 Year",      "min_d": 0,          "max_d": 365},
-        {"label": "1 - 3 Years",   "min_d": 365,        "max_d": 365 * 3},
-        {"label": "3 - 5 Years",   "min_d": 365 * 3,    "max_d": 365 * 5},
-        {"label": "5 - 10 Years",  "min_d": 365 * 5,    "max_d": 365 * 10},
-        {"label": "10 - 15 Years", "min_d": 365 * 10,   "max_d": 365 * 15},
-        {"label": "15+ Years",     "min_d": 365 * 15,   "max_d": 999999}
-    ]
-    
-    # Initialize allocation grids
-    retraction_counts = {b["label"]: 0 for b in brackets}
-    vintage_counts = {b["label"]: 0 for b in brackets}
-    
-    # Compute chronological metrics across the raw rows
-    for r_id, w_date_str, dwell_days in rows:
-        try:
-            w_date = datetime.datetime.strptime(w_date_str, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-            
-        # Metric 1: Retraction Age (Time elapsed since withdrawal)
-        days_since_retraction = (today - w_date).days
-        
-        # Metric 2: Historical Vintage (Time elapsed since original publication)
-        pub_date = w_date - datetime.timedelta(days=int(dwell_days))
-        total_advisory_age = (today - pub_date).days
-        
-        # Assign to matching retraction interval bracket
-        for b in brackets:
-            if b["min_d"] <= days_since_retraction < b["max_d"]:
-                retraction_counts[b["label"]] += 1
-                break
-                
-        # Assign to matching vintage interval bracket
-        for b in brackets:
-            if b["min_d"] <= total_advisory_age < b["max_d"]:
-                vintage_counts[b["label"]] += 1
-                break
-
-    # Render Macro Consolidated Dashboard Report
-    print(f"\n📊 GLOBAL ARCHIVE SUMMARY: ALL-TIME WITHDRAWN ADVISORY SPREAD")
-    print(f"Total Relational Retraction Base: {total_retracted:,} Advisories")
-    print("=" * 110)
-    print(f"{'Age Bracket (From Today)':<25} | {'Retraction Volume':<20} | {'Retraction %':<14} | {'Vintage Volume':<16} | {'Vintage %'}")
-    print("-" * 110)
-    
-    for b in brackets:
-        label = b["label"]
-        r_count = retraction_counts[label]
-        v_count = vintage_counts[label]
-        
-        r_pct = (r_count / total_retracted) * 100
-        v_pct = (v_count / total_retracted) * 100
-        
-        print(f"{label:<25} | {r_count:<20,} | {r_pct:<14.2f}% | {v_count:<16,} | {v_pct:.2f}%")
-        
-    print("=" * 110)
-
-# =====================================================================
-# ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
-# =====================================================================
 def extract_suspicious_retractions(db_path="database/threat_stream.db", from_date=None, to_date=None, layer="all"):
     """
     Advanced context-aware research hunt engine for tracking contested 
@@ -1458,32 +1366,9 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # 🔬 INTERNALS AUTOPSY: Look past string labels straight to the column data
-    print(f"\n[🔬 DEEP DIAGNOSTIC] Relational Warehouse Core Autopsy:")
-    print("-" * 90)
-    cursor.execute("SELECT COUNT(*) FROM vulnerabilities")
-    print(f"    -> Total Ingested Dataset Rows:          {cursor.fetchone()[0]:,}")
-    
-    cursor.execute("SELECT COUNT(*) FROM vulnerabilities WHERE withdrawn_date IS NOT NULL")
-    withdrawn_col_count = cursor.fetchone()[0]
-    print(f"    -> Rows with 'withdrawn_date' Populated: {withdrawn_col_count:,}")
-    
-    print(f"    -> Active Threat Profile String Distribution:")
-    cursor.execute("SELECT threat_profile, COUNT(*) FROM vulnerabilities GROUP BY threat_profile")
-    for profile, count in cursor.fetchall():
-        print(f"       * '{profile}': {count:,} rows")
-        
-    if withdrawn_col_count > 0:
-        cursor.execute("SELECT advisory_id, threat_profile, withdrawn_date FROM vulnerabilities WHERE withdrawn_date IS NOT NULL LIMIT 2")
-        print(f"    -> Raw Column Sample Mapping:")
-        for aid, prof, wdate in cursor.fetchall():
-            print(f"       * ID: {aid} | Current Profile Field: '{prof}' | Withdrawn Date: {wdate}")
-    print("-" * 90)
-    
     KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
     KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
     
-    # Added 'published_date' directly into the core SELECT template string
     query = """
         SELECT advisory_id, package_name, ecosystems, cvss_score, blast_radius, dwell_days, last_modified, published_date
         FROM vulnerabilities
@@ -1498,9 +1383,8 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
         query += " AND last_modified >= ?"
         params.append(from_date)
         
-    print(f"\n🕵️‍♂️  OSV RETRACTION HUNT ACTIVE | Scope: Layer={layer.upper()}")
+    print(f"\n️‍♂️  OSV RETRACTION HUNT ACTIVE | Scope: Layer={layer.upper()}")
     print("=" * 145)
-    # Re-aligned the console header line to accommodate 'First Seen' column bounds
     print(f"{'Advisory ID':<20} | {'Package Name':<25} | {'Ecosystems':<18} | {'CVSS':<5} | {'First Seen':<12} | {'Dwell (Days)':<12} | {'Last Mod'}")
     print("-"*145)
     
@@ -1508,7 +1392,6 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     
     hit_count = 0
     for row in cursor.fetchall():
-        # Unpack the 8th 'pub_date' element out of the database fetch execution array
         v_id, p_name, ecos_json, cvss, radius, dwell, last_mod, pub_date = row
         ecos_list = json.loads(ecos_json) if ecos_json else []
         
@@ -1517,14 +1400,12 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
         elif layer == "os" and not any(e in KNOWN_CONTAINERS for e in ecos_list) and len(ecos_list) > 0:
             continue
             
-        ecos = ", ".join(ecos_list) if ecos_list else "⚠️ SCRUBBED BY UPSTREAM"
-        p_name_display = p_name if p_name else "⚠️ Redacted Artifact"
+        ecos = ", ".join(ecos_list) if ecos_list else " SCRUBBED BY UPSTREAM"
+        p_name_display = p_name if p_name else " Redacted Artifact"
         
-        # Flag historical items with greater than 5 years (1,825 days) of shelf life
-        flag = "🔥 DEEP HISTORICAL IMPORT" if dwell > 1825 else "ℹ️ Standard Dispute"
+        flag = " DEEP HISTORICAL IMPORT" if dwell > 1825 else "ℹ️ Standard Dispute"
         cvss_display = f"{cvss:.1f}" if cvss and cvss > 0 else "N/A"
         
-        # Updated print wrapper incorporating spatial formatting matching the layout headers
         print(f"{v_id:<20} | {p_name_display[:25]:<25} | {ecos[:18]:<18} | {cvss_display:<5} | {pub_date:<12} | {dwell:<12.1f} | {last_mod} [{flag}]")
         hit_count += 1
         if hit_count >= 10:
@@ -1536,10 +1417,11 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     conn.close()
     print("=" * 145)
 
+
 def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, registry_target: str, manifest_rows: list):
     """
-    Computes true lookback trend metrics, mutation velocity spikes from live streams,
-    and dormancy decay models using a relaxed database query schema.
+    Computes lookback trend metrics, mutation velocity spikes from live streams,
+    and dormancy decay models using a standardized 115-character wide grid.
     """
     if not os.path.exists(db_path):
         print(f"{RED}[-] Trend Engine Aborted: Relational warehouse missing at {db_path}{RESET}")
@@ -1549,7 +1431,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         print(f"{RED}[-] Trend Engine Aborted: Live stream modification rows missing.{RESET}")
         return
 
-    # Phase 1: Aggregate true stream mutation velocity out of the live log rows
+    # Phase 1: Aggregate stream mutation velocity out of the live log rows
     stream_mutation_counter = Counter()
     for row in manifest_rows:
         if not row: continue
@@ -1557,7 +1439,6 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         try:
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             if start_date <= mod_time <= end_date:
-                # Surgical separation: isolate the Advisory ID from the log path footprint
                 if ":" in path:
                     advisory_id = path.split(":")[0].strip()
                 else:
@@ -1571,24 +1452,21 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     cursor = conn.cursor()
     
     start_str = start_date.strftime("%Y-%m-%d")
-    
-    # 🎯 FIXED: Dropped quotes from layout mapping to allow resilient matching against "Maven (Java)"
     relaxed_like_pattern = f"%{registry_target}%"
     
-    print("\n" + "="*95)
+    print("\n" + "="*115)
     print(f"  IX. CHRONOLOGICAL LOOKBACK TREND ANALYTICS: {registry_target.upper()} REGISTRY")
-    print("="*95)
+    print("="*115)
     
     # -------------------------------------------------------------------------
     # 1. HIGH CHATTER ADVISORIES (TRUE STREAM VELOCITY)
     # -------------------------------------------------------------------------
     print(f"\n[+] High-Chatter Advisories (Top Mutation Velocity Spikes inside {registry_target}):")
-    print("-" * 95)
-    print(f"{'Advisory ID':<18} | {'Artifact Name':<28} | {'CVSS':<6} | {'Modifications inside Window'}")
-    print("-" * 95)
+    print("-" * 115)
+    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Modifications inside Window'}")
+    print("-" * 115)
     
     resolved_chatter_hits = 0
-    # Evaluate your stream's most active entities down against database metadata
     for adv_id, true_updates_count in stream_mutation_counter.most_common():
         if resolved_chatter_hits >= 10:
             break
@@ -1602,19 +1480,19 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         db_match = cursor.fetchone()
         if db_match:
             p_name, cvss = db_match
-            print(f"{adv_id:<18} | {p_name[:28]:<28} | {cvss:<6.1f} | {true_updates_count} updates")
+            print(f"{adv_id:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {true_updates_count} updates")
             resolved_chatter_hits += 1
             
     if resolved_chatter_hits == 0:
-        print("    [+] Zero active advisory mutations tracked within this lookback window boundary.")
+        print("    [-] Zero active advisory mutations tracked within this lookback window boundary.")
         
     # -------------------------------------------------------------------------
     # 2. HIGH RISK TECHNICAL DEBT CALCIFICATION (DORMANCY TRACKING)
     # -------------------------------------------------------------------------
     print(f"\n[+] High-Severity Technical Debt Calcification (Dormant inside {registry_target} > {start_date.date()}):")
-    print("-" * 95)
-    print(f"{'Advisory ID':<18} | {'Artifact Name':<28} | {'CVSS':<6} | {'Days Since Last Active'}")
-    print("-" * 95)
+    print("-" * 115)
+    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Days Since Last Active'}")
+    print("-" * 115)
     
     cursor.execute("""
         SELECT advisory_id, package_name, cvss_score, last_modified
@@ -1631,18 +1509,16 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             aid, p_name, cvss, last_mod_str = row
             mod_date = datetime.datetime.strptime(last_mod_str, "%Y-%m-%d").date()
             days_dormant = (end_date.date() - mod_date).days
-            print(f"{aid:<18} | {p_name[:28]:<28} | {cvss:<6.1f} | {days_dormant}d stagnant")
+            print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {days_dormant}d stagnant")
     else:
-        print("    [+] Zero high-risk technical debt structures remain stagnant outside the window boundary.")
-        
-    print("="*95 + "\n")
-    
+        print("    [-] Zero high-risk technical debt structures remain stagnant outside the window boundary.")
+
     # -------------------------------------------------------------------------
-    # 3. WHAT ARE THE NEW WORST THINGS? (Threat Arrivals Since 2026-04-18)
+    # 3. WHAT ARE THE NEW WORST THINGS? (Threat Arrivals Since Campaign Baseline)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 5 Critical Threat Arrivals & Campaigns (Published Since {start_str}):")
     print("-" * 115)
-    print(f"{'Advisory ID':<18} | {'Artifact Name':<28} | {'CVSS':<6} | {'Blast Radius':<16} | {'Threat Profile'}")
+    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Threat Profile'}")
     print("-" * 115)
     
     cursor.execute("""
@@ -1659,20 +1535,21 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     if rows_worst:
         for row in rows_worst:
             aid, p_name, cvss, radius, t_profile = row
-            print(f"{aid:<18} | {p_name[:28]:<28} | {cvss:<6.1f} | {radius:<14,} Vers | {t_profile}")
+            radius_str = f"{radius:,} Vers"
+            print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {radius_str:<14} | {t_profile}")
     else:
-        print("    [+] No severe new threat arrivals or malware campaigns recorded in this window.")
+        print("    [-] No severe new threat arrivals or malware campaigns recorded in this window.")
         
     # -------------------------------------------------------------------------
-    # 4. WHICH THINGS ACTUALLY GOT FIXED? (True Remediations Since 2026-04-18)
+    # 4. WHICH THINGS ACTUALLY GOT FIXED? (True Remediations Since Campaign Baseline)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 5 Critical Vulnerabilities Code-Fixed (Remediated Since {start_str}):")
     print("-" * 115)
-    print(f"{'Advisory ID':<18} | {'Artifact Name':<28} | {'CVSS':<6} | {'Remediated On':<16} | {'Resolution State'}")
+    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Fixed':<6} | {'Days Alive':<10} | {'Resolution State'}")
     print("-" * 115)
     
     cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile
+        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days
         FROM vulnerabilities
         WHERE last_modified >= ? AND ecosystems LIKE ? 
           AND threat_profile LIKE '%Fix%'
@@ -1684,21 +1561,23 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     rows_fixed = cursor.fetchall()
     if rows_fixed:
         for row in rows_fixed:
-            aid, p_name, cvss, last_mod_str, t_profile = row
-            print(f"{aid:<18} | {p_name[:28]:<28} | {cvss:<6.1f} | {last_mod_str:<16} | {t_profile}")
+            aid, p_name, cvss, last_mod_str, t_profile, dwell = row
+            date_short = last_mod_str[5:] if len(last_mod_str) >= 10 else last_mod_str
+            dwell_str = f"{int(dwell)}d" if dwell is not None else "N/A"
+            print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {date_short:<6} | {dwell_str:<10} | {t_profile}")
     else:
-        print("    [+] No vulnerability mitigations or upstream fixes published in this window.")
+        print("    [-] No vulnerability mitigations or upstream fixes published in this window.")
 
     # -------------------------------------------------------------------------
     # 5. WHICH THINGS WERE WITHDRAWN / RETRACTED? (Intel Noise Filter)
     # -------------------------------------------------------------------------
     print(f"\n[+] Upstream Advisory Retractions & Disputed Noise (Withdrawn Since {start_str}):")
     print("-" * 115)
-    print(f"{'Advisory ID':<18} | {'Artifact Name':<28} | {'CVSS':<6} | {'Withdrawn On':<16} | {'Reason / State'}")
+    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Withdrn':<7} | {'Days Alive':<10} | {'Reason / State'}")
     print("-" * 115)
     
     cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile
+        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days
         FROM vulnerabilities
         WHERE last_modified >= ? AND ecosystems LIKE ? 
           AND (threat_profile LIKE '%Withdrawn%' OR threat_profile = 'Withdrawn / Retracted Advisory')
@@ -1709,11 +1588,13 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     rows_withdrawn = cursor.fetchall()
     if rows_withdrawn:
         for row in rows_withdrawn:
-            aid, p_name, cvss, last_mod_str, t_profile = row
+            aid, p_name, cvss, last_mod_str, t_profile, dwell = row
+            date_short = last_mod_str[5:] if len(last_mod_str) >= 10 else last_mod_str
             cvss_str = f"{cvss:.1f}" if cvss > 0 else "N/A"
-            print(f"{aid:<18} | {p_name[:28]:<28} | {cvss_str:<6} | {last_mod_str:<16} | {t_profile}")
+            dwell_str = f"{int(dwell)}d" if dwell is not None else "N/A"
+            print(f"{aid:<20} | {p_name[:25]:<25} | {cvss_str:<5} | {date_short:<7} | {dwell_str:<10} | {t_profile}")
     else:
-        print("    [+] Zero historical entries retracted or disputed by maintainers in this window.")
+        print("    [-] Zero historical entries retracted or disputed by maintainers in this window.")
 
     # -------------------------------------------------------------------------
     # 6. THREE-BUCKET EXECUTIVE BRIEFING VELOCITY GRAPH
@@ -1742,7 +1623,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     total_withdrawn = cursor.fetchone()[0]
 
     print(f"\n📊 EXECUTIVE BRIEFING VELOCITY GRAPH: {registry_target.upper()} THREE-WAY BALANCE")
-    print("="*105)
+    print("="*115)
     
     max_metric = max(total_new_hotness, total_resolved, total_withdrawn, 1)
     bar_max_width = 40
@@ -1751,20 +1632,17 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     resolved_bar_len = int((total_resolved / max_metric) * bar_max_width)
     withdrawn_bar_len = int((total_withdrawn / max_metric) * bar_max_width)
     
-    # Use blank spaces for zero-value rows to avoid trailing graph fragments
     hotness_spark = "█" * hotness_bar_len if total_new_hotness > 0 else " "
     resolved_spark = "█" * resolved_bar_len if total_resolved > 0 else " "
     withdrawn_spark = "█" * withdrawn_bar_len if total_withdrawn > 0 else " "
     
-    # Decoupled padding coordinates neutralize the hidden character layout shift
-    print(f"{'Metric Profile Classification Category':<44} | {'Volume':<8} | Visual Velocity Sparkline")
-    print("-" * 105)
-    print(f"{'🔥 New Threat Arrivals (Hotness)':<43} | {total_new_hotness:<8,} | {RED}{hotness_spark}{RESET}")
-    print(f"{'🛡️ Actual Code Patches (Resolved)':<44} | {total_resolved:<8,} | {GREEN}{resolved_spark}{RESET}")
-    print(f"{'🚫 Retracted Database Noise (Withdrawn)':<43} | {total_withdrawn:<8,} | {YELLOW}{withdrawn_spark}{RESET}")
-    print("-" * 105)
+    print(f"{'Metric Profile Classification Category':<40} | {'Volume':<8} | Visual Velocity Sparkline")
+    print("-" * 115)
+    print(f"{'🔥 New Threat Arrivals (Hotness)':<42} | {total_new_hotness:<8,} | {RED}{hotness_spark}{RESET}")
+    print(f"{'🛡️ Actual Code Patches (Resolved)':<43} | {total_resolved:<8,} | {GREEN}{resolved_spark}{RESET}")
+    print(f"{'🚫 Retracted Database Noise (Withdrawn)':<42} | {total_withdrawn:<8,} | {YELLOW}{withdrawn_spark}{RESET}")
+    print("-" * 115)
     
-    # Supply Chain Healing Index Ratio (Engineering Work vs Threat Volume)
     healing_ratio = (total_resolved / total_new_hotness) if total_new_hotness > 0 else (float('inf') if total_resolved > 0 else 1.0)
     if healing_ratio >= 1.0:
         healing_status = f"{GREEN}Net Healing State (Upstream fixes outpace threat delivery arrivals){RESET}"
@@ -1775,7 +1653,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         
     print(f"-> Supply Chain Healing Index Ratio:  {healing_ratio:.2f}")
     print(f"-> Strategic Briefing Guidance:       {healing_status}")
-    print("="*105 + "\n")
+    print("="*115 + "\n")
     
     conn.close()
 
@@ -1784,6 +1662,137 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 # =====================================================================
 
 def main(): 
+    parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
+    parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
+    parser.add_argument("--days", type=int, help="Lookback day window shortcut.")
+    parser.add_argument("--from", metavar="YYYY-MM-DD", dest="from_date", help="Explicit chronological interval starting boundary.")
+    parser.add_argument("--to", nargs='+', metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary.")
+    parser.add_argument("--debug", action="store_true", help="Surface raw noise.")
+    parser.add_argument("--export", nargs='?', const=True, default=False, help="Name or auto-generate JSON snapshot payload.")
+    parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots.")
+    parser.add_argument("--speedway", action="store_true", help="Analyze traffic velocity distributions.")
+    parser.add_argument("--project-file", metavar="PATH", help="Path to manifest or standard SBOM.")
+    parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force manual schema parser selection.")
+    parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Direct lockfile ingestion.")
+    parser.add_argument("--velocity", nargs="?", const="./output", metavar="DIR_PATH", help="Stitch snapshots into historical matrix.")
+    parser.add_argument("--html", metavar="OUTPUT_FILE", help="Override briefing report output path.")
+    parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
+    parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
+    parser.add_argument("--registry", type=str, help="Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry npm,PyPI,Maven (Java)).")
+    parser.add_argument("--hunt-retracted", action="store_true", help="Execute an advanced research hunt for suspicious retracted advisories.")
+    parser.add_argument("--trends", action="store_true", help="Activate chronological trend and mutation velocity analysis.")
+    parser.add_argument("--window-days", type=int, default=30, help="Telescoping trend evaluation window constraint (Defaults to 30 days).")
+    args = parser.parse_args()
+    
+    if args.hunt_retracted:
+        if not args.database:
+            parser.error("[!] The --hunt-retracted mechanism requires the --database relational engine active.")
+        
+        display_all_time_retraction_stats(db_path="database/threat_stream.db")
+        extract_suspicious_retractions(
+            db_path="database/threat_stream.db",
+            from_date=args.from_date if hasattr(args, 'from_date') else None,
+            to_date=args.to_date if hasattr(args, 'to_date') else None,
+            layer=args.layer
+        )
+        return
+
+    if args.velocity:
+        run_velocity_update(args)
+        return
+        
+    if args.compare:
+        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.html)
+        return
+        
+    if args.html and not args.velocity and not args.compare:
+        snapshots = load_snapshots_from_dir("./output")
+        generate_html_report(snapshots, args.html)
+        return
+
+    # Uniform environmental allocation
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
+    
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    print("[*] Staging upstream modification stream index into memory...")
+    try:
+        response = requests.get(manifest_url, timeout=30)
+        response.raise_for_status()
+        cached_manifest_rows = list(csv.reader(io.StringIO(response.text)))
+        print(f"[+] Cached {len(cached_manifest_rows):,} mutation rows cleanly. Commencing generation pipeline.")
+    except Exception as e:
+        print(f"{YELLOW}[!] Failed to pre-fetch stream index: {e}. Falling back to individual live connections.{RESET}")
+        cached_manifest_rows = None
+
+    # =========================================================================
+    # FEATURE ROUTING LAYER: TRENDS TIMELINE CALCULATOR
+    # =========================================================================
+    if args.trends:
+        if not args.database:
+            parser.error("[!] The trend velocity analysis engine requires the --database relational warehouse active.")
+        
+        if not args.registry:
+            print(f"\n{BOLD}{RED}[!] CONFIGURATION ERROR: Trend analysis requires an explicit repository filter.{RESET}")
+            print(f"    -> Usage: python top10ecosystems.py --trends --registry <repo_name>\n")
+            sys.exit(1)
+
+        if args.to:
+            date_str = args.to[0]
+            parsed_date = None
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                try:
+                    parsed_date = datetime.datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError: continue
+            if not parsed_date:
+                print(f"{RED}[-] Invalid --to date format string provided.{RESET}")
+                sys.exit(1)
+            end_window_dt = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+        else:
+            end_window_dt = now_utc
+
+        if args.from_date:
+            start_window_dt = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
+        elif args.window_days or args.days:
+            lookback_days = args.window_days if args.window_days else args.days
+            start_window_dt = end_window_dt - datetime.timedelta(days=lookback_days)
+        else:
+            start_window_dt = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        
+        print(f"\n[*] Launching Telescoping AppSec Trend Analysis Module")
+        print(f"    -> Lookback Evaluation Window: {start_window_dt.date()} to {end_window_dt.date()}")
+        
+        for registry in target_registries:
+            generate_ecosystem_trend_briefing(
+                db_path="database/threat_stream.db",
+                start_date=start_window_dt,
+                end_date=end_window_dt,
+                registry_target=registry,
+                manifest_rows=cached_manifest_rows
+            )
+        return
+    
+    if args.database:
+        global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries)
+    else:
+        global_ghsa_lookup = build_ghsa_ecosystem_map()
+
+    for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
+        print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
+        generate_enterprise_threat_leaderboard(
+            start_date=calculated_start, 
+            end_date=calculated_end,
+            target_layer=args.layer, 
+            debug_mode=args.debug,
+            custom_export_arg=args.export, 
+            run_speedway=args.speedway,
+            project_file_path=args.project_file, 
+            forced_format=args.project_format,
+            audit_mode=args.audit,
+            ghsa_lookup=global_ghsa_lookup,
+            manifest_rows=cached_manifest_rows  
+        )
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
     parser.add_argument("--days", type=int, help="Lookback day window shortcut.")
