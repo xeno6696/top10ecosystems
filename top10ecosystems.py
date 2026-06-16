@@ -1661,6 +1661,11 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 # CORE ENGINE COMMAND ORCHESTRATION LAYER
 # =====================================================================
 
+
+# =====================================================================
+# CORE ENGINE COMMAND ORCHESTRATION LAYER
+# =====================================================================
+
 def main(): 
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
@@ -1758,143 +1763,6 @@ def main():
             lookback_days = args.window_days if args.window_days else args.days
             start_window_dt = end_window_dt - datetime.timedelta(days=lookback_days)
         else:
-            start_window_dt = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
-        
-        print(f"\n[*] Launching Telescoping AppSec Trend Analysis Module")
-        print(f"    -> Lookback Evaluation Window: {start_window_dt.date()} to {end_window_dt.date()}")
-        
-        for registry in target_registries:
-            generate_ecosystem_trend_briefing(
-                db_path="database/threat_stream.db",
-                start_date=start_window_dt,
-                end_date=end_window_dt,
-                registry_target=registry,
-                manifest_rows=cached_manifest_rows
-            )
-        return
-    
-    if args.database:
-        global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries)
-    else:
-        global_ghsa_lookup = build_ghsa_ecosystem_map()
-
-    for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
-        print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
-        generate_enterprise_threat_leaderboard(
-            start_date=calculated_start, 
-            end_date=calculated_end,
-            target_layer=args.layer, 
-            debug_mode=args.debug,
-            custom_export_arg=args.export, 
-            run_speedway=args.speedway,
-            project_file_path=args.project_file, 
-            forced_format=args.project_format,
-            audit_mode=args.audit,
-            ghsa_lookup=global_ghsa_lookup,
-            manifest_rows=cached_manifest_rows  
-        )
-    parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
-    parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
-    parser.add_argument("--days", type=int, help="Lookback day window shortcut.")
-    parser.add_argument("--from", metavar="YYYY-MM-DD", dest="from_date", help="Explicit chronological interval starting boundary.")
-    parser.add_argument("--to", nargs='+', metavar="YYYY-MM-DD", help="Explicit chronological interval ending boundary.")
-    parser.add_argument("--debug", action="store_true", help="Surface raw noise.")
-    parser.add_argument("--export", nargs='?', const=True, default=False, help="Name or auto-generate JSON snapshot payload.")
-    parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots.")
-    parser.add_argument("--speedway", action="store_true", help="Analyze traffic velocity distributions.")
-    parser.add_argument("--project-file", metavar="PATH", help="Path to manifest or standard SBOM.")
-    parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force manual schema parser selection.")
-    parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Direct lockfile ingestion.")
-    parser.add_argument("--velocity", nargs="?", const="./output", metavar="DIR_PATH", help="Stitch snapshots into historical matrix.")
-    parser.add_argument("--html", metavar="OUTPUT_FILE", help="Override briefing report output path.")
-    parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
-    parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
-    parser.add_argument("--registry", type=str, help="Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry npm,PyPI,Maven (Java)).")
-    parser.add_argument("--hunt-retracted", action="store_true", help="Execute an advanced research hunt for suspicious retracted advisories.")
-    parser.add_argument("--trends", action="store_true", help="Activate chronological trend and mutation velocity analysis.")
-    parser.add_argument("--window-days", type=int, default=30, help="Telescoping trend evaluation window constraint (Defaults to 30 days).")
-    args = parser.parse_args()
-    
-    
-    if args.hunt_retracted:
-        if not args.database:
-            parser.error("[!] The --hunt-retracted mechanism requires the --database relational engine active.")
-        
-        display_all_time_retraction_stats(db_path="database/threat_stream.db")
-        extract_suspicious_retractions(
-            db_path="database/threat_stream.db",
-            from_date=args.from_date if hasattr(args, 'from_date') else None,
-            to_date=args.to_date if hasattr(args, 'to_date') else None,
-            layer=args.layer
-        )
-        return
-
-    if args.velocity:
-        run_velocity_update(args)
-        return
-        
-    if args.compare:
-        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.html)
-        return
-        
-    if args.html and not args.velocity and not args.compare:
-        snapshots = load_snapshots_from_dir("./output")
-        generate_html_report(snapshots, args.html)
-        return
-
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
-    
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
-    print("[*] Staging upstream modification stream index into memory...")
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
-
-    try:
-        response = requests.get(manifest_url, timeout=30)
-        response.raise_for_status()
-        cached_manifest_rows = list(csv.reader(io.StringIO(response.text)))
-        print(f"[+] Cached {len(cached_manifest_rows):,} mutation rows cleanly. Commencing generation pipeline.")
-    except Exception as e:
-        print(f"{YELLOW}[!] Failed to pre-fetch stream index: {e}. Falling back to individual live connections.{RESET}")
-        cached_manifest_rows = None
-
-    # =========================================================================
-    # FEATURE ROUTING LAYER: TRENDS TIMELINE CALCULATOR
-    # =========================================================================
-    if args.trends:
-        if not args.database:
-            parser.error("[!] The trend velocity analysis engine requires the --database relational warehouse active.")
-        
-        if not args.registry:
-            print(f"\n{BOLD}{RED}[!] CONFIGURATION ERROR: Trend analysis requires an explicit repository filter.{RESET}")
-            print(f"    -> Usage: python top10ecosystems.py --trends --registry <repo_name>\n")
-            sys.exit(1)
-
-        # Chronological Endpoint Evaluation (--to flag or current execution horizon)
-        if args.to:
-            date_str = args.to[0]
-            parsed_date = None
-            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
-                try:
-                    parsed_date = datetime.datetime.strptime(date_str, fmt).date()
-                    break
-                except ValueError: continue
-            if not parsed_date:
-                print(f"{RED}[-] Invalid --to date format string provided.{RESET}")
-                sys.exit(1)
-            end_window_dt = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
-        else:
-            end_window_dt = now_utc
-
-        # Chronological Starting Endpoint Evaluation (--from flag -> --window-days -> April 18 Default)
-        if args.from_date:
-            start_window_dt = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
-        elif args.window_days or args.days:
-            lookback_days = args.window_days if args.window_days else args.days
-            start_window_dt = end_window_dt - datetime.timedelta(days=lookback_days)
-        else:
-            # Rigid default base campaign kickoff boundary 
             start_window_dt = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
         
         print(f"\n[*] Launching Telescoping AppSec Trend Analysis Module")
