@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-22T14:55:36.404694+00:00",
+        "generated_at": "2026-06-23T23:13:40.032322+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-19",
         "target_layer_filter": "app"
@@ -20,20 +20,21 @@
         "ConanCenter": 0
     },
     "threat_profile": {
-        "Malware (New Entry)": 1791,
-        "Malware (Incremental Update)": 26,
-        "Vulnerability Fix (New Entry)": 0,
-        "Vulnerability Fix (Update)": 2164,
+        "Malware (New Entry)": 1811,
+        "Malware (Incremental Update)": 6,
+        "Vulnerability Fix (New Entry)": 309,
+        "Vulnerability Fix (Update)": 1855,
         "Metadata Correction / Adjustments": 321,
         "Withdrawn / Retracted Advisory": 79
     },
     "layer_profile_matrix": {
         "App Software Registry": {
-            "Vulnerability Fix (Update)": 2164,
+            "Vulnerability Fix (New Entry)": 309,
             "Metadata Correction / Adjustments": 321,
-            "Malware (New Entry)": 1791,
+            "Vulnerability Fix (Update)": 1855,
+            "Malware (New Entry)": 1811,
             "Withdrawn / Retracted Advisory": 79,
-            "Malware (Incremental Update)": 26
+            "Malware (Incremental Update)": 6
         }
     },
     "intel_architecture_matrix": {
@@ -78,7 +79,7 @@
     "profile_matrix": {
         "npm": {
             "avg_dwell_mal": 26.669749009247028,
-            "avg_dwell_cve": 56.2296918767507,
+            "avg_dwell_cve": 56.27731092436975,
             "avg_blast_radius": 1.8011669658886893,
             "avg_backlog_age": 384.2
         },
@@ -92,7 +93,7 @@
             "avg_dwell_mal": 1.8181818181818181,
             "avg_dwell_cve": 72.29540481400437,
             "avg_blast_radius": 0.32264957264957267,
-            "avg_backlog_age": 74.5
+            "avg_backlog_age": 24.7
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
@@ -455,7 +456,7 @@
             ],
             "GHSA-c2jg-5cp7-6wc7": [
                 53,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "pipecat-ai",
                 10.0
             ],
@@ -825,7 +826,7 @@
             ],
             "GHSA-2m69-jmvh-6chr": [
                 57,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "ci4-cms-erp/ci4ms",
                 10.0
             ],
@@ -843,7 +844,7 @@
             ],
             "MAL-2026-3637": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "intercom-php",
                 10.0
             ],
@@ -867,7 +868,7 @@
             ],
             "GHSA-xg82-2hrv-hf64": [
                 274,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "snipe/snipe-it",
                 9.8
             ],
@@ -1325,7 +1326,7 @@
             ],
             "GHSA-qqcj-rghw-829x": [
                 6,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "io.unitycatalog:unitycatalog-server",
                 9.1
             ],
@@ -1423,7 +1424,7 @@
             ],
             "MAL-2026-3126": [
                 2,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "lsh",
                 10.0
             ],
@@ -1447,7 +1448,7 @@
             ],
             "MAL-2026-3129": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "supertag",
                 10.0
             ],
@@ -1495,7 +1496,7 @@
             ],
             "GHSA-5qv7-j6w5-fr4m": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "imageproc",
                 6.9
             ],
@@ -1543,7 +1544,7 @@
             ],
             "GHSA-88q9-cmp2-c2vq": [
                 11,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "oxidize-pdf",
                 4.3
             ],
@@ -1605,7 +1606,7 @@
             ],
             "GHSA-24c8-4792-22hx": [
                 131,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "scriban",
                 8.7
             ],
@@ -1713,13 +1714,13 @@
             ],
             "GHSA-c55g-rp4x-fx84": [
                 66,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "directxtk_uwp",
                 6.9
             ],
             "GHSA-5r97-79vw-qvm4": [
                 63,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "directxtk12_uwp",
                 6.9
             ],
@@ -1773,7 +1774,7 @@
             ],
             "GHSA-5qwm-7pvp-w988": [
                 34,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "OpenMcdf",
                 6.2
             ],
@@ -1803,7 +1804,7 @@
             ],
             "GHSA-28xm-prxc-5866": [
                 4,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "OpenTelemetry.Resources.AWS",
                 5.9
             ],
@@ -1865,43 +1866,43 @@
         "RubyGems": {
             "MAL-2026-3630": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-activesupport-logger",
                 10.0
             ],
             "MAL-2026-3631": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-date-utils-rb",
                 10.0
             ],
             "MAL-2026-3632": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-devise-jwt-helper",
                 10.0
             ],
             "MAL-2026-3633": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-rack-session-store",
                 10.0
             ],
             "MAL-2026-3634": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-rails-assets-pipeline",
                 10.0
             ],
             "MAL-2026-3635": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-rspec-formatter-json",
                 10.0
             ],
             "MAL-2026-3636": [
                 1,
-                "Malware (Incremental Update)",
+                "Malware (New Entry)",
                 "knot-simple-formatter",
                 10.0
             ],
@@ -1913,7 +1914,7 @@
             ],
             "GHSA-2wvh-87g2-89hr": [
                 76,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "openc3",
                 9.6
             ],
@@ -2173,7 +2174,7 @@
             ],
             "GHSA-pf94-94m9-536p": [
                 91,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "bandit",
                 8.7
             ],
@@ -2185,7 +2186,7 @@
             ],
             "GHSA-9mhv-8h52-q7q2": [
                 88,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "absinthe",
                 8.7
             ],
@@ -2221,13 +2222,13 @@
             ],
             "GHSA-q8x4-x7mp-5vg2": [
                 26,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "plug_cowboy",
                 8.7
             ],
             "GHSA-628h-q48j-jr6q": [
                 22,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "phoenix",
                 8.7
             ],
@@ -2245,7 +2246,7 @@
             ],
             "GHSA-frh3-6pv6-rc8j": [
                 83,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "bandit",
                 8.2
             ],
@@ -2281,7 +2282,7 @@
             ],
             "GHSA-qf4g-9fqq-mmm7": [
                 34,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "absinthe",
                 8.2
             ],
@@ -2311,7 +2312,7 @@
             ],
             "GHSA-r73h-97w8-m54h": [
                 22,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "postgrex",
                 7.5
             ],
@@ -2329,7 +2330,7 @@
             ],
             "GHSA-q6v9-r226-v65f": [
                 107,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "bandit",
                 6.9
             ],
@@ -2347,7 +2348,7 @@
             ],
             "GHSA-rhv4-8758-jx7v": [
                 33,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "decimal",
                 6.9
             ],
@@ -2359,7 +2360,7 @@
             ],
             "GHSA-c67r-gc9j-2qf7": [
                 116,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "bandit",
                 6.3
             ],
@@ -2371,7 +2372,7 @@
             ],
             "GHSA-375f-4r2h-f99j": [
                 41,
-                "Vulnerability Fix (Update)",
+                "Vulnerability Fix (New Entry)",
                 "bandit",
                 6.3
             ],

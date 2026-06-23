@@ -926,6 +926,132 @@ def generate_enterprise_threat_leaderboard(
         malware_vector_counts, export_profile_matrix, export_outlier_manifests
     )
 
+def generate_html_report(snapshots: list, html_output: str):
+    """Generates a historical time-series AppSec trend dashboard from accumulated snapshot logs."""
+    if not snapshots:
+        print(f"{RED}[-] Report Generation Aborted: No valid snapshot data assets found in output directory.{RESET}")
+        return
+
+    print(f"[*] Compiling historical intelligence map from {len(snapshots)} chronological snapshot intervals...")
+
+    # Extract dates and metrics across the historical track
+    dates = []
+    ecosystem_trends = defaultdict(list)
+    threat_profile_trends = defaultdict(list)
+
+    # Track structural target coordinates over time
+    target_ecos = ["npm", "PyPI", "Go (Golang)", "Maven (Java)", "Packagist (PHP)", "Crates.io", "NuGet"]
+    threat_categories = ["Malware (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]
+
+    for snap in snapshots:
+        end_date = snap.get("metadata", {}).get("interval_to", "Unknown")
+        dates.append(end_date)
+        
+        # Map leaderboard stats
+        lboard = snap.get("leaderboard", {})
+        for eco in target_ecos:
+            ecosystem_trends[eco].append(lboard.get(eco, 0))
+            
+        # Map threat profile stats
+        tprof = snap.get("threat_profile", {})
+        for cat in threat_categories:
+            threat_profile_trends[cat].append(tprof.get(cat, 0))
+
+    try:
+        # Chart 1: Ecosystem Volume Trajectory Over Time
+        fig1, ax1 = mplplt.subplots(figsize=(12, 6))
+        fig1.patch.set_facecolor('#1e1e1e')
+        ax1.set_facecolor('#1e1e1e')
+        
+        for eco in target_ecos:
+            if sum(ecosystem_trends[eco]) > 0:  
+                ax1.plot(dates, ecosystem_trends[eco], marker='o', linewidth=2, label=eco)
+        
+        ax1.set_title("Ecosystem Cumulative Vulnerability Velocity Over Time", color='#ffffff', fontsize=14, pad=15)
+        ax1.set_ylabel("Accumulated Stream Volume", color='#bbbbbb')
+        ax1.set_xlabel("Snapshot Boundary Timeline", color='#bbbbbb')
+        ax1.tick_params(colors='#bbbbbb', labelsize=10)
+        ax1.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
+        ax1.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff') # Fixed line
+        mplplt.xticks(rotation=30, ha='right')
+        mplplt.tight_layout()
+
+        buf1 = io.BytesIO()
+        fig1.savefig(buf1, format='png', bbox_inches='tight', facecolor=fig1.get_facecolor())
+        buf1.seek(0)
+        img_str_ecos = base64.b64encode(buf1.read()).decode('utf-8')
+        mplplt.close(fig1)
+
+        # Chart 2: Threat Profile Evolutionary Breakdown
+        fig2, ax2 = mplplt.subplots(figsize=(12, 5))
+        fig2.patch.set_facecolor('#1e1e1e')
+        ax2.set_facecolor('#1e1e1e')
+        
+        for cat in threat_categories:
+            if sum(threat_profile_trends[cat]) > 0:
+                ax2.plot(dates, threat_profile_trends[cat], linestyle='--', marker='s', linewidth=2, label=cat)
+
+        ax2.set_title("Threat Behavior Profile Structural Evolution", color='#ffffff', fontsize=14, pad=15)
+        ax2.set_ylabel("Mutation Volume", color='#bbbbbb')
+        ax2.set_xlabel("Snapshot Boundary Timeline", color='#bbbbbb')
+        ax2.tick_params(colors='#bbbbbb', labelsize=10)
+        ax2.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
+        ax2.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff') # Fixed line
+        mplplt.xticks(rotation=30, ha='right')
+        mplplt.tight_layout()
+
+        buf2 = io.BytesIO()
+        fig2.savefig(buf2, format='png', bbox_inches='tight', facecolor=fig2.get_facecolor())
+        buf2.seek(0)
+        img_str_threats = base64.b64encode(buf2.read()).decode('utf-8')
+        mplplt.close(fig2)
+
+        # Construct Unified Dashboard Payload Doc
+        html_report = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Enterprise Supply Chain Threat Map Timeline</title>
+    <style>
+        body {{ background-color: #121212; color: #e0e0e0; font-family: sans-serif; padding: 40px; margin: 0; }}
+        .container {{ max-width: 1400px; margin: auto; background: #1e1e1e; padding: 40px; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); border: 1px solid #2d2d2d; }}
+        h1 {{ color: #ffffff; border-bottom: 2px solid #333; padding-bottom: 15px; font-size: 28px; margin-top: 0; }}
+        h2 {{ color: #007bff; margin-top: 40px; font-weight: 400; font-size: 20px; border-left: 4px solid #007bff; padding-left: 10px; }}
+        p {{ color: #aaaaaa; font-size: 14px; line-height: 1.6; }}
+        .meta-box {{ background: #151515; padding: 15px 20px; border-radius: 6px; border: 1px solid #252525; margin-bottom: 30px; }}
+        .chart {{ text-align: center; margin-top: 25px; background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
+        .chart img {{ max-width: 100%; height: auto; border-radius: 4px; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Enterprise Supply Chain Threat Map Timeline</h1>
+        <div class="meta-box">
+            <p><strong>Timeline Scale Depth:</strong> {len(snapshots)} serialized intervals compiled</p>
+            <p><strong>Historical Horizon Range:</strong> {dates[0]} &xrarr; {dates[-1]}</p>
+            <p><strong>Dashboard Engine:</strong> AppSec Center of Excellence (COE) Analytics Warehouse v1.7</p>
+        </div>
+        
+        <h2>I. Ecosystem Volume Trajectory over Time</h2>
+        <p>Tracks the cumulative volume trajectory and discovery velocity across major software registry targets.</p>
+        <div class="chart">
+            <img src="data:image/png;base64,{img_str_ecos}" alt="Ecosystem Time Series Chart" />
+        </div>
+        
+        <h2>II. Threat Behavior Profile Structural Evolution</h2>
+        <p>Monitors how the composition of inbound mutations fluctuates over time between active malware injections, standard software security patches, and database metadata adjustments.</p>
+        <div class="chart">
+            <img src="data:image/png;base64,{img_str_threats}" alt="Threat Mutation Breakdown Chart" />
+        </div>
+    </div>
+</body>
+</html>"""
+
+        with open(html_output, "w", encoding="utf-8") as f:
+            f.write(html_report)
+        print(f"{GREEN}[+] Historical Threat Map HTML Dashboard generated successfully: {html_output}{RESET}")
+
+    except Exception as e:
+        print(f"\n{RED}[!] Critical Failure generating timeline HTML asset: {e}{RESET}")
 
 def load_snapshots_from_dir(target_dir: str):
     snapshots = []

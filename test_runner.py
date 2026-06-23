@@ -1,9 +1,18 @@
+#!/usr/bin/env python3
+# Copyright (C) 2026 xeno6696
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
 import unittest
 from unittest.mock import patch
 import sys
 import io
 import os
 import datetime
+import inspect
 
 # Import your command line application module
 import top10ecosystems
@@ -56,6 +65,91 @@ class TestThreatStreamScanner(unittest.TestCase):
 
         print(f"[+] Harness Setup Complete. Indexed {len(cls.ghsa_lookup):,} global advisories.\n")
 
+    def verify_production_target_signature(self, func_name: str, expected_args_count: int):
+        """Reflective helper to verify function survival and signature bounds."""
+        self.assertTrue(
+            hasattr(top10ecosystems, func_name), 
+            f"❌ HALLUCINATION REGRESSION: Function '{func_name}' has vanished from top10ecosystems.py!"
+        )
+        func = getattr(top10ecosystems, func_name)
+        self.assertTrue(
+            callable(func), 
+            f"❌ STRUCTURAL FAILURE: '{func_name}' is no longer recognized as a callable function block."
+        )
+        signature = inspect.signature(func)
+        params = [p for p in signature.parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        self.assertEqual(
+            len(params), expected_args_count,
+            f"⚠️  SIGNATURE MUTATION: '{func_name}' argument count changed. Expected {expected_args_count}, found {len(params)}."
+        )
+
+    # -------------------------------------------------------------------------
+    # 0. ANTI-HALLUCINATION PRIORITY BLOCKS (EXECUTED FIRST VIA ASCII ORDER)
+    # -------------------------------------------------------------------------
+    def test_000_a_anti_hallucination_guard_for_trend_briefing_engine(self):
+        """[INTEGRITY] Guards against the deletion of the master CLI trend briefing block."""
+        self.verify_production_target_signature("generate_ecosystem_trend_briefing", expected_args_count=5)
+
+    def test_000_a_anti_hallucination_guard_for_html_timeline_report(self):
+        """[INTEGRITY] Guards against the deletion of the time-series HTML chart renderer."""
+        self.verify_production_target_signature("generate_html_report", expected_args_count=2)
+
+    def test_000_a_anti_hallucination_guard_for_snapshot_loader(self):
+        """[INTEGRITY] Guards against the deletion of the snapshot log folder parser."""
+        self.verify_production_target_signature("load_snapshots_from_dir", expected_args_count=1)
+
+    def test_000_a_anti_hallucination_guard_for_cli_main_entrypoint(self):
+        """[INTEGRITY] Guards against the deletion of the primary argument router entrypoint."""
+        self.verify_production_target_signature("main", expected_args_count=0)
+
+    def test_000_b_meta_guard_against_missing_test_methods_in_test_runner_itself(self):
+        """[INTEGRITY] Reviews test_runner.py to ensure no verification tests were deleted or dropped."""
+        expected_test_methods = {
+            "test_000_a_anti_hallucination_guard_for_trend_briefing_engine",
+            "test_000_a_anti_hallucination_guard_for_html_timeline_report",
+            "test_000_a_anti_hallucination_guard_for_snapshot_loader",
+            "test_000_a_anti_hallucination_guard_for_cli_main_entrypoint",
+            "test_000_b_meta_guard_against_missing_test_methods_in_test_runner_itself",
+            "test_console_and_export_telemetry_parity",
+            "test_03_retraction_hunt_parameter_matrix",
+            "test_04_retraction_hunt_scrubbed_metadata_resilience",
+            "test_export_snapshot_generation_persistence",
+            "test_pypi_clean_manifest",
+            "test_pypi_dynamic_range_block",
+            "test_maven_clean_tree",
+            "test_maven_breach_intercept",
+            "test_maven_dynamic_operator_block",
+            "test_cyclonedx_clean_sbom",
+            "test_cyclonedx_breach_intercept",
+            "test_cyclonedx_empty_version_block",
+            "test_maven_real_world_cli_noise",
+            "test_extract_cvss_score_malware_override",
+            "test_extract_cvss_score_v3_parsing",
+            "test_extract_cvss_score_empty_severity",
+            "test_get_artifact_layer_routing",
+            "test_generate_leaderboard_stream_aggregation",
+            "test_historical_golden_masters",
+            "test_global_advisory_index_volume_baseline",
+            "test_compare_snapshots_golden_master_deltas",
+            "test_compare_snapshots_strict_text_alignment_good_match",
+            "test_compare_snapshots_strict_text_alignment_bad_mismatch"
+        }
+        
+        actual_test_methods = {
+            item for item in dir(self) 
+            if item.startswith("test_") and callable(getattr(self, item))
+        }
+        
+        missing_tests = expected_test_methods - actual_test_methods
+        self.assertEqual(
+            len(missing_tests), 0,
+            f"❌ TEST RUNNER INTEGRITY VIOLATION: Verification tests have vanished from test_runner.py! "
+            f"Missing test blocks: {missing_tests}"
+        )
+
+    # -------------------------------------------------------------------------
+    # 3. CORE FUNCTIONAL REGRESSION CHECKS
+    # -------------------------------------------------------------------------
     def test_console_and_export_telemetry_parity(self):
         """
         [PARITY GATE] Asserts character-by-character metric alignment between 
@@ -92,9 +186,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             export_payload = json.load(f)
 
         # 4. PARITY GATE A: Validate Ecosystem Leaderboard Counts
-        # Scrapes pattern like: "npm                             | 3,258"
         for eco_name, json_count in export_payload.get("leaderboard", {}).items():
-            # Escape parenthesis noise if parsing items like 'Go (Golang)' or 'Maven (Java)'
             escaped_name = re.escape(eco_name)
             leaderboard_regex = re.compile(rf"{escaped_name}\s*\|\s*([0-9,]+)")
             match = leaderboard_regex.search(stdout_capture)
@@ -108,7 +200,6 @@ class TestThreatStreamScanner(unittest.TestCase):
                 )
 
         # 5. PARITY GATE B: Validate Malware Attack Vector Breakdowns
-        # Scrapes pattern like: "-> Data Exfiltration / Credential Stealer | 1,215"
         for vector_name, json_vcount in export_payload.get("malware_vectors", {}).items():
             escaped_vector = re.escape(vector_name)
             vector_regex = re.compile(rf"->\s*{escaped_vector}\s*\|\s*([0-9,]+)")
@@ -123,7 +214,6 @@ class TestThreatStreamScanner(unittest.TestCase):
                 )
 
         # 6. PARITY GATE C: Validate Section VIII Cross-Compiled Hardware Matrix counts
-        # 🎯 FIXED: Slice the console stream buffer to eliminate cross-talk with the main leaderboard
         section_viii_header = "VIII. HARDWARE ARCHITECTURE COMPILATION"
         if section_viii_header in stdout_capture:
             section_viii_zone = stdout_capture.split(section_viii_header)[1]
@@ -134,9 +224,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             escaped_source = re.escape(eco_source)
             intel_regex = re.compile(rf"{escaped_source}\s*\|\s*([0-9,]+)\s*\|")
             
-            # Scan only within the sliced Section VIII stream zone
             match = intel_regex.search(section_viii_zone)
-            
             if match:
                 console_intel_total = int(match.group(1).replace(",", ""))
                 json_intel_total = json_metrics.get("total", 0)
@@ -150,10 +238,8 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Helper utility to simulate an authentic CLI execution and capture output."""
         base_args = ['top10ecosystems.py', '--layer', 'app', '--from', '2020-01-01']
         full_args = base_args + mock_args
-        
         captured_output = io.StringIO()
         
-        #   TARGETS LOCKED: Patch BOTH potential dictionary load pipelines simultaneously
         with patch.object(sys, 'argv', full_args), \
              patch('sys.stdout', captured_output), \
              patch('top10ecosystems.build_ghsa_ecosystem_map', return_value=self.ghsa_lookup), \
@@ -166,17 +252,12 @@ class TestThreatStreamScanner(unittest.TestCase):
         return 0, captured_output.getvalue()
 
     def test_03_retraction_hunt_parameter_matrix(self):
-        """
-        Validates that extract_suspicious_retractions cleanly processes all 
-        permitted architectural layer selections without throwing exceptions.
-        """
+        """Validates that extract_suspicious_retractions cleanly processes all target layer inputs."""
         from top10ecosystems import extract_suspicious_retractions
-        
         test_db = "database/threat_stream.db"
         if not os.path.exists(test_db):
             self.skipTest("[!] Relational test warehouse missing. Skipping parameters matrix verification.")
 
-        # Exercise the query engine across all layer boundaries using mock intervals
         try:
             for target_layer in ["all", "app", "os"]:
                 extract_suspicious_retractions(
@@ -189,18 +270,13 @@ class TestThreatStreamScanner(unittest.TestCase):
             self.fail(f"[!] Regression Detected: Retraction hunt failed during layer matrix execution: {e}")
 
     def test_04_retraction_hunt_scrubbed_metadata_resilience(self):
-        """
-        Ensures the hunt engine safely processes completely uncapped, un-bounded
-        time windows and handles scrubbed upstream data models gracefully.
-        """
+        """Ensures the hunt engine safely processes completely uncapped, un-bounded time windows."""
         from top10ecosystems import extract_suspicious_retractions
-        
         test_db = "database/threat_stream.db"
         if not os.path.exists(test_db):
             self.skipTest("[!] Relational test warehouse missing. Skipping resilience verification.")
 
         try:
-            # Exercise open boundaries (None dates) which replicate standard global scans
             extract_suspicious_retractions(
                 db_path=test_db,
                 from_date=None,
@@ -211,13 +287,8 @@ class TestThreatStreamScanner(unittest.TestCase):
             self.fail(f"[!] Regression Detected: Open window retraction hunt crashed: {e}")
 
     def test_export_snapshot_generation_persistence(self):
-        """
-        [REGRESSION GATE] Verifies the snapshot export compilation pipeline 
-        successfully writes fully structured analytical JSON payloads to disk.
-        """
+        """[REGRESSION GATE] Verifies the snapshot export compilation pipeline outputs robust json arrays."""
         import json
-        
-        # 1. Setup a pristine, isolated destination path
         temp_dir = "./output"
         os.makedirs(temp_dir, exist_ok=True)
         target_export_path = os.path.join(temp_dir, "regression_gate_export_verify.json")
@@ -225,7 +296,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         if os.path.exists(target_export_path):
             os.remove(target_export_path)
             
-        # 2. Stage a fast chronological execution window to maximize speed
         mock_flags = [
             '--from', '2026-05-18',
             '--to', '2026-05-19',
@@ -234,39 +304,21 @@ class TestThreatStreamScanner(unittest.TestCase):
         if USE_DATABASE_WAREHOUSE:
             mock_flags.append('--database')
             
-        # Register automatic cleanup to keep the repository pristine after execution
         self.addCleanup(lambda: os.remove(target_export_path) if os.path.exists(target_export_path) else None)
-        
-        # 3. Trigger the core application orchestration pipeline
         exit_code, output = self.run_scanner_with_args(mock_flags)
         
-        # 4. Assert direct operational compliance and filesystem survival
         self.assertEqual(exit_code, 0, f"Export execution failed under test harness with stdout:\n{output}")
-        self.assertTrue(
-            os.path.exists(target_export_path), 
-            "[!] CRITICAL REGRESSION: The script completed successfully but failed to write the JSON snapshot to disk. Export logic has been dropped!"
-        )
+        self.assertTrue(os.path.exists(target_export_path), "[!] CRITICAL REGRESSION: JSON export payload was not persisted to disk.")
         
-        # 5. Schema verification autopsy: Ensure no root nodes were skipped
         with open(target_export_path, 'r', encoding='utf-8') as f:
             payload = json.load(f)
             
         required_schema_nodes = [
-            "metadata", 
-            "leaderboard", 
-            "threat_profile", 
-            "layer_profile_matrix", 
-            "malware_vectors", 
-            "profile_matrix", 
-            "outliers_leaderboards"
+            "metadata", "leaderboard", "threat_profile", "layer_profile_matrix", 
+            "malware_vectors", "profile_matrix", "outliers_leaderboards"
         ]
-        
         for node in required_schema_nodes:
-            self.assertIn(
-                node, payload, 
-                f"[!] SCHEMA CORRUPTION: Saved snapshot file is missing the critical '{node}' root data node. Export structure has been clobbered."
-            )
-
+            self.assertIn(node, payload, f"[!] SCHEMA CORRUPTION: Saved snapshot file is missing key '{node}' root data node.")
 
     # -------------------------------------------------------------------------
     # PYPI / REQUIREMENTS.TXT STRATEGY MATRIX
@@ -275,7 +327,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Ensures a standard pinned requirements file returns a clean bill of health."""
         mock_flags = ['--project-file', 'src/test/resources/cleanrequirements.txt']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 0)
         self.assertIn("Clean Bill of Health", output)
 
@@ -283,7 +334,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Verifies the regex guardrail flags loose mathematical ranges immediately."""
         mock_flags = ['--project-file', 'src/test/resources/dynamic_requirements.txt']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 1)
         self.assertIn("Configuration Error", output)
 
@@ -294,7 +344,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Verifies clean, formatted Java dependency trees pass silently."""
         mock_flags = ['--project-format', 'maven_tree', '--project-file', 'src/test/resources/clean_maven_tree.txt']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 0)
         self.assertIn("Clean Bill of Health", output)
 
@@ -302,7 +351,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Validates that a bad tree file hits the index and pops a breach alert table."""
         mock_flags = ['--project-format', 'maven_tree', '--project-file', 'src/test/resources/bad_maven_tree.txt']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 0)
         self.assertIn("BREACH ALERT", output)
 
@@ -310,7 +358,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Ensures dynamic ranges like [5.3.0,6.0.0) or LATEST keywords drop execution."""
         mock_flags = ['--project-format', 'maven_tree', '--project-file', 'src/test/resources/dynamic_maven_tree.txt']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 1)
         self.assertIn("MAVEN TREE LINTING FAILURE", output)
 
@@ -321,7 +368,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Verifies a fully frozen machine-generated SBOM outputs a clean status banner."""
         mock_flags = ['--project-file', 'src/test/resources/clean_cyclonedx.json']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 0)
         self.assertIn("Clean Bill of Health", output)
 
@@ -329,7 +375,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Ensures case-insensitive structural matching triggers the alert grid for SBOM assets."""
         mock_flags = ['--project-file', 'src/test/resources/bad_cyclonedx.json']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 0)
         self.assertIn("BREACH ALERT", output)
 
@@ -337,7 +382,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Confirms that uncompiled or placeholder components throw a linting exception."""
         mock_flags = ['--project-file', 'src/test/resources/dynamic_cyclonedx.json']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 1)
         self.assertIn("SBOM LINTING FAILURE", output)
         
@@ -345,7 +389,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Verifies the parser successfully strips Maven CLI noise, optional modifiers, and summary footers."""
         mock_flags = ['--project-format', 'maven_tree', '--project-file', 'src/test/resources/esapi_dependency_tree.txt']
         exit_code, output = self.run_scanner_with_args(mock_flags)
-        
         self.assertEqual(exit_code, 0)
         self.assertNotIn("LINTING FAILURE", output)
         self.assertNotIn("Configuration Error", output)
@@ -357,7 +400,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Verifies that explicitly malicious payloads automatically max out at 10.0."""
         vuln_data_mal_id = {"id": "MAL-2026-9999"}
         vuln_data_mal_keyword = {"id": "GHSA-xxxx", "summary": "This is a malware package"}
-        
         self.assertEqual(top10ecosystems.extract_cvss_score(vuln_data_mal_id), 10.0)
         self.assertEqual(top10ecosystems.extract_cvss_score(vuln_data_mal_keyword), 10.0)
 
@@ -391,10 +433,9 @@ class TestThreatStreamScanner(unittest.TestCase):
     # -------------------------------------------------------------------------
     @patch('requests.get')
     def test_generate_leaderboard_stream_aggregation(self, mock_requests_get):
-        """Mocks the live OSV CSV stream to verify the analytical engine aggregates ecosystem counts correctly."""
+        """Mocks the live OSV CSV stream to verify ecosystem counter parsing alignment."""
         mock_response = unittest.mock.MagicMock()
         mock_response.status_code = 200
-        
         mock_csv_lines = [
             b"2026-04-20T10:00:00Z,GHSA-mock-1111:npm",
             b"2026-04-20T11:00:00Z,CVE-mock-2222:Debian",
@@ -405,7 +446,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         mock_requests_get.return_value = mock_response
 
         captured_output = io.StringIO()
-        
         with patch('sys.stdout', captured_output):
             top10ecosystems.generate_enterprise_threat_leaderboard(
                 start_date=datetime.datetime(2026, 4, 18, tzinfo=datetime.timezone.utc),
@@ -414,7 +454,6 @@ class TestThreatStreamScanner(unittest.TestCase):
                 debug_mode=False, 
                 ghsa_lookup={} 
             )
-            
         output = captured_output.getvalue()
 
         self.assertIn("VERIFIED ENTERPRISE ECOSYSTEM LEADERBOARD", output)
@@ -424,17 +463,11 @@ class TestThreatStreamScanner(unittest.TestCase):
 
     @patch('requests.get')
     def test_historical_golden_masters(self, mock_requests_get):
-        """
-        Iterates over verified historical export files in src/test/resources/ 
-        and ensures current engine logic produces identical analytical payloads.
-        """
+        """Iterates over verified historical baseline snapshot payloads to prevent delta regressions."""
         import json
-        import os
-        
         if not self.cached_stream_lines:
             self.skipTest(f"Frozen CSV stream not found at {self.frozen_csv_path}.")
 
-        # Configure network mock to hand back pre-cached memory bytes instantly
         mock_response = unittest.mock.MagicMock()
         mock_response.status_code = 200
         mock_response.iter_lines.return_value = self.cached_stream_lines
@@ -452,19 +485,13 @@ class TestThreatStreamScanner(unittest.TestCase):
         for start_str, end_str, filename in golden_files:
             with self.subTest(file=filename):
                 golden_path = os.path.join("src", "test", "resources", filename)
-                
                 if not os.path.exists(golden_path):
                     self.skipTest(f"Golden master {filename} not found in {golden_path}")
 
                 temp_export_path = f"./output/temp_{filename}"
-                
                 mock_flags = [
-                    '--layer', 'app',
-                    '--from', start_str,
-                    '--to', end_str,
-                    '--export', temp_export_path
+                    '--layer', 'app', '--from', start_str, '--to', end_str, '--export', temp_export_path
                 ]
-                
                 if USE_DATABASE_WAREHOUSE:
                     mock_flags.append('--database')
                 
@@ -504,7 +531,6 @@ class TestThreatStreamScanner(unittest.TestCase):
         """Validates that the parsed global memory index does not suffer silent truncation regressions."""
         total_indexed_records = len(self.ghsa_lookup) if hasattr(self, 'ghsa_lookup') else 0
         minimum_safe_threshold = 560000
-        
         self.assertGreaterEqual(
             total_indexed_records, minimum_safe_threshold,
             msg=f"\n\n⚠️ INDEX TRUNCATION DETECTED: {total_indexed_records:,} vs Floor: {minimum_safe_threshold:,}\n"
@@ -519,12 +545,10 @@ class TestThreatStreamScanner(unittest.TestCase):
             self.skipTest(f"Snapshot delta verification skipped. Missing: {file_base}")
 
         captured_output = io.StringIO()
-
         with patch('sys.stdout', captured_output):
             top10ecosystems.compare_snapshots(file_base=file_base, file_current=file_current, html_output=None)
 
         output = captured_output.getvalue()
-
         self.assertNotIn("Snapshot comparison failed", output, "[!] CRITICAL: Engine crashed internally during run!")
         self.assertIn("SECURITY THREAT INTELLIGENCE STREAM MOVEMENT COMPARISON", output)
         self.assertIn("I. ECOSYSTEM ACTIVITY & RANK SHIFTS", output)
@@ -535,27 +559,20 @@ class TestThreatStreamScanner(unittest.TestCase):
     # MUTATION & FIELD PARITY BREAK GATES: STRICT TEXT ALIGNMENT TRACKS
     # -------------------------------------------------------------------------
     def test_compare_snapshots_strict_text_alignment_good_match(self):
-        """
-        [POSITIVE CONTROL] Validates character-by-character output parity against 
-        a pristine, frozen text baseline file. Fails if even a single character, 
-        space, or ANSI escape sequence mutates.
-        """
+        """[POSITIVE CONTROL] Validates absolute text template alignment against frozen console baselines."""
         import difflib
-        
         file_base = os.path.join("src", "test", "resources", "threat_landscape_2026-05-18_app.json")
         file_current = os.path.join("src", "test", "resources", "threat_landscape_2026-05-21_app.json")
         good_baseline_path = os.path.join("src", "test", "resources", "comparison_console_output.txt")
 
         if not os.path.exists(good_baseline_path):
-            self.skipTest(f"Skipping positive control. Missing pristine baseline file asset at: {good_baseline_path}")
+            self.skipTest(f"Skipping positive control. Missing baseline asset at: {good_baseline_path}")
 
-        # Capture live console stream
         captured_output = io.StringIO()
         with patch('sys.stdout', captured_output):
             top10ecosystems.compare_snapshots(file_base=file_base, file_current=file_current, html_output=None)
         live_output = captured_output.getvalue()
 
-        # Resilient encoding-aware file extraction loop
         try:
             with open(good_baseline_path, "r", encoding="utf-8") as f:
                 expected_output = f.read()
@@ -563,18 +580,10 @@ class TestThreatStreamScanner(unittest.TestCase):
             with open(good_baseline_path, "r", encoding="utf-16") as f:
                 expected_output = f.read()
 
-        #   DYNAMIC DIFF CALCULATOR: Runs only if an inequality is detected
         if live_output != expected_output:
             live_lines = live_output.splitlines(keepends=True)
             expected_lines = expected_output.splitlines(keepends=True)
-            
-            delta = difflib.unified_diff(
-                expected_lines, 
-                live_lines, 
-                fromfile="FROZEN_BASELINE_FILE", 
-                tofile="LIVE_ENGINE_OUTPUT",
-                n=3
-            )
+            delta = difflib.unified_diff(expected_lines, live_lines, fromfile="BASELINE_FILE", tofile="LIVE_OUTPUT", n=3)
             diff_text = "".join(delta)
             
             self.fail(
@@ -583,19 +592,12 @@ class TestThreatStreamScanner(unittest.TestCase):
                 f"{'='*80}\n"
                 f"Target Reference File: {good_baseline_path}\n\n"
                 f"SURGICAL LINE-BY-LINE DELTA:\n"
-                f"--- (Lines expected from baseline file)\n"
-                f"+++ (Lines actually generated by live engine code)\n"
-                f"{'-'*80}\n"
                 f"{diff_text}\n"
                 f"{'='*80}\n"
             )
 
     def test_compare_snapshots_strict_text_alignment_bad_mismatch(self):
-        """
-        [NEGATIVE CONTROL] Verifies the regression suite successfully flags 
-        and rejects altered templates. Passes ONLY if the engine captures a divergence 
-        against the contaminated master file.
-        """
+        """[NEGATIVE CONTROL] Verifies the suite successfully flags and rejects mutated templates."""
         file_base = os.path.join("src", "test", "resources", "threat_landscape_2026-05-18_app.json")
         file_current = os.path.join("src", "test", "resources", "threat_landscape_2026-05-21_app.json")
         bad_baseline_path = os.path.join("src", "test", "resources", "comparison_console_output_bad.txt")
@@ -603,13 +605,11 @@ class TestThreatStreamScanner(unittest.TestCase):
         if not os.path.exists(bad_baseline_path):
             self.skipTest(f"Skipping negative control break-gate verification. Missing asset: {bad_baseline_path}")
 
-        # Capture live console stream
         captured_output = io.StringIO()
         with patch('sys.stdout', captured_output):
             top10ecosystems.compare_snapshots(file_base=file_base, file_current=file_current, html_output=None)
         live_output = captured_output.getvalue()
 
-        # Resilient encoding-aware file extraction loop
         try:
             with open(bad_baseline_path, "r", encoding="utf-8") as f:
                 expected_output = f.read()
@@ -622,8 +622,7 @@ class TestThreatStreamScanner(unittest.TestCase):
                 f"\n\n{'='*80}\n"
                 f"⚠️  NEGATIVE CONTROL BREAK-GATE SECURITY FAULT\n"
                 f"{'='*80}\n"
-                f"The test engine failed to detect inequality against a known corrupt file!\n"
-                f"Corrupt File Target: {bad_baseline_path}\n"
+                f"The test engine failed to detect structural inequality against a contaminated file!\n"
                 f"{'='*80}\n"
             )
 
