@@ -183,10 +183,14 @@ def parse_osv_json(vuln_data):
     w_date = withdrawn_str[:10] if withdrawn_str else None
     
     dwell_days = 0.0
+    # Safe calendar-day string comparison baseline fallback
+    is_new_entry = (published_str[:10] == modified_str[:10])
     try:
         p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
         m_dt = datetime.datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
         dwell_days = max(0.0, (m_dt - p_dt).days)
+        # ARCHITECTURAL FIX: Evaluate strict date parity on object layer to bypass timestamp drift
+        is_new_entry = (p_dt.date() == m_dt.date())
     except ValueError: pass
 
     has_fixes = False
@@ -246,7 +250,7 @@ def parse_osv_json(vuln_data):
     if withdrawn_str:
         classification = "Withdrawn / Retracted Advisory"
     else:
-        is_new_entry = (published_str == modified_str)
+        # Check logic uses the synchronized object-level entry determination
         if is_malware: classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
         elif has_fixes: classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
         else: classification = "Metadata Correction / Adjustments"
@@ -256,6 +260,7 @@ def parse_osv_json(vuln_data):
     ecosystems_json = json.dumps(list(ecosystems_set))
     
     return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, p_date_clean)
+
 
 def bootstrap_warehouse_from_zip(conn):
     """Parses local master archive data and bulk-loads the database using transactional blocks."""

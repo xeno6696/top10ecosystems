@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-06-16T23:19:34.602555+00:00",
+        "generated_at": "2026-06-22T14:55:58.418171+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app"
@@ -21,15 +21,19 @@
     },
     "threat_profile": {
         "Malware (New Entry)": 1839,
-        "Malware (Incremental Update)": 0,
+        "Malware (Incremental Update)": 27,
         "Vulnerability Fix (New Entry)": 0,
-        "Vulnerability Fix (Update)": 3538,
-        "Metadata Correction / Adjustments": 0
+        "Vulnerability Fix (Update)": 2865,
+        "Metadata Correction / Adjustments": 551,
+        "Withdrawn / Retracted Advisory": 95
     },
     "layer_profile_matrix": {
         "App Software Registry": {
             "Malware (New Entry)": 1839,
-            "Vulnerability Fix (Update)": 3538
+            "Vulnerability Fix (Update)": 2865,
+            "Withdrawn / Retracted Advisory": 95,
+            "Metadata Correction / Adjustments": 551,
+            "Malware (Incremental Update)": 27
         }
     },
     "intel_architecture_matrix": {
@@ -79,50 +83,50 @@
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 26.083870967741934,
-            "avg_dwell_cve": 55.018229166666664,
+            "avg_dwell_mal": 26.103803997421018,
+            "avg_dwell_cve": 55.164276401564535,
             "avg_blast_radius": 1.769197584124245,
             "avg_backlog_age": 386.2
         },
         "PyPI": {
-            "avg_dwell_mal": 32.951557093425606,
-            "avg_dwell_cve": 375.72384937238496,
-            "avg_blast_radius": 73.62398921832884,
+            "avg_dwell_mal": 32.93448275862069,
+            "avg_dwell_cve": 376.05192629815747,
+            "avg_blast_radius": 73.62264150943396,
             "avg_backlog_age": 231.9
         },
         "Go (Golang)": {
-            "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 91.13166666666666,
+            "avg_dwell_mal": 1.8181818181818181,
+            "avg_dwell_cve": 93.57894736842105,
             "avg_blast_radius": 0.5266666666666666,
             "avg_backlog_age": 76.0
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 81.85901639344263,
-            "avg_blast_radius": 111.67540983606557,
+            "avg_dwell_cve": 82.24013157894737,
+            "avg_blast_radius": 111.68196721311476,
             "avg_backlog_age": 142.1
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 206.83050847457628,
-            "avg_blast_radius": 66.48305084745763,
+            "avg_dwell_cve": 207.34322033898306,
+            "avg_blast_radius": 66.46610169491525,
             "avg_backlog_age": 330.8
         },
         "Crates.io": {
-            "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 103.48717948717949,
+            "avg_dwell_mal": 33.166666666666664,
+            "avg_dwell_cve": 105.53070175438596,
             "avg_blast_radius": 0.4658119658119658,
             "avg_backlog_age": 122.0
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 47.12658227848101,
+            "avg_dwell_cve": 47.9873417721519,
             "avg_blast_radius": 122.55696202531645,
             "avg_backlog_age": 477.0
         },
         "RubyGems": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 106.82089552238806,
+            "avg_dwell_cve": 119.86666666666666,
             "avg_blast_radius": 103.67164179104478,
             "avg_backlog_age": 369.4
         },
@@ -493,13 +497,13 @@
             ],
             "GHSA-69v7-xpr6-6gjm": [
                 46,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "lupa",
                 10.0
             ],
             "GHSA-q9r5-6hrr-9ph7": [
                 38,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "smolagents",
                 10.0
             ],
@@ -753,7 +757,7 @@
             ],
             "GHSA-rqgh-gxv4-6657": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "github.com/gotenberg/gotenberg/v8",
                 9.8
             ],
@@ -771,7 +775,7 @@
             ],
             "GHSA-mxqh-q9h6-v8pq": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "github.com/0xJacky/nginx-ui",
                 8.1
             ],
@@ -857,7 +861,7 @@
             ],
             "GHSA-gph2-j4c9-vhhr": [
                 18,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "wwbn/avideo",
                 10.0
             ],
@@ -869,7 +873,7 @@
             ],
             "MAL-2026-3637": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "intercom-php",
                 10.0
             ],
@@ -923,7 +927,7 @@
             ],
             "GHSA-xr6f-h4x7-r6qp": [
                 18,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "wwbn/avideo",
                 9.8
             ],
@@ -977,13 +981,13 @@
             ],
             "GHSA-pq8p-wc4f-vg7j": [
                 18,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "wwbn/avideo",
                 9.3
             ],
             "GHSA-gr3r-crp5-qrrm": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "intercom/intercom-php",
                 9.3
             ],
@@ -1019,7 +1023,7 @@
             ],
             "GHSA-w5j3-8fcr-h87w": [
                 112,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "dolibarr/dolibarr",
                 9.1
             ],
@@ -1085,13 +1089,13 @@
             ],
             "GHSA-676v-wh57-p375": [
                 112,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "dolibarr/dolibarr",
                 8.8
             ],
             "GHSA-j2g9-rprv-hrhc": [
                 112,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "dolibarr/dolibarr",
                 8.8
             ],
@@ -1153,7 +1157,7 @@
             ],
             "GHSA-f5w4-7ccj-5m75": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "com.shopizer:shopizer",
                 10.0
             ],
@@ -1327,7 +1331,7 @@
             ],
             "GHSA-prf8-cf2x-rhx7": [
                 58,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "org.hyperledger.fabric-sdk-java:fabric-sdk-java",
                 9.3
             ],
@@ -1416,7 +1420,7 @@
                 9.0
             ],
             "GHSA-p93r-85wp-75v3": [
-                15,
+                11,
                 "Vulnerability Fix (Update)",
                 "org.bouncycastle:bcprov-jdk18on",
                 8.9
@@ -1449,37 +1453,37 @@
             ],
             "MAL-2026-2958": [
                 2,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "mysten-metrics",
                 10.0
             ],
             "MAL-2026-3126": [
                 2,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "lsh",
                 10.0
             ],
             "MAL-2026-3101": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "amzn-consolas-client",
                 10.0
             ],
             "MAL-2026-3102": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "semantic-search-client",
                 10.0
             ],
             "MAL-2026-3103": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "amzn-codewhisperer-streaming-client",
                 10.0
             ],
             "MAL-2026-3129": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "supertag",
                 10.0
             ],
@@ -1509,7 +1513,7 @@
             ],
             "GHSA-fmq6-4w57-2w3v": [
                 5,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "wasm3",
                 8.4
             ],
@@ -1865,13 +1869,13 @@
             ],
             "GHSA-6c8g-7p36-r338": [
                 102,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "SharpCompress",
                 5.9
             ],
             "GHSA-38h3-2333-qx47": [
                 27,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "OpenTelemetry.Exporter.Jaeger",
                 5.9
             ],
@@ -1927,43 +1931,43 @@
         "RubyGems": {
             "MAL-2026-3630": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-activesupport-logger",
                 10.0
             ],
             "MAL-2026-3631": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-date-utils-rb",
                 10.0
             ],
             "MAL-2026-3632": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-devise-jwt-helper",
                 10.0
             ],
             "MAL-2026-3633": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-rack-session-store",
                 10.0
             ],
             "MAL-2026-3634": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-rails-assets-pipeline",
                 10.0
             ],
             "MAL-2026-3635": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-rspec-formatter-json",
                 10.0
             ],
             "MAL-2026-3636": [
                 1,
-                "Vulnerability Fix (Update)",
+                "Malware (Incremental Update)",
                 "knot-simple-formatter",
                 10.0
             ],
@@ -2011,7 +2015,7 @@
             ],
             "GHSA-2x79-gwq3-vxxm": [
                 135,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "iodine",
                 8.7
             ],
@@ -2155,7 +2159,7 @@
             ],
             "GHSA-jw5g-f64p-6x78": [
                 47,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "camaleon_cms",
                 6.5
             ],
@@ -2451,7 +2455,7 @@
             ],
             "GHSA-c62g-j346-39v5": [
                 39,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "absinthe_plug",
                 6.1
             ],
@@ -2463,7 +2467,7 @@
             ],
             "GHSA-g2wm-735q-3f56": [
                 12,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "cowlib",
                 3.2
             ],
@@ -2475,7 +2479,7 @@
             ],
             "EEF-CVE-2026-43969": [
                 11,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "cowlib",
                 2.1
             ]
@@ -2513,7 +2517,7 @@
             ],
             "GHSA-fmq6-4w57-2w3v": [
                 5,
-                "Vulnerability Fix (Update)",
+                "Metadata Correction / Adjustments",
                 "wasm3",
                 8.4
             ],
