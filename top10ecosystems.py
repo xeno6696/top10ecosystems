@@ -1492,7 +1492,7 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
             ax1.set_title('Ecosystem Vulnerability Delta (Base vs. Current)')
             ax1.set_xticks(x)
             ax1.set_xticklabels(top_10_ecos, rotation=45, ha='right')
-            ax1.legend()
+            ax1.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff')
             mplplt.tight_layout()
             
             buf1 = io.BytesIO()
@@ -1636,7 +1636,6 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     conn.close()
     print("=" * 145)
 
-
 def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, registry_target: str, manifest_rows: list):
     """
     Computes lookback trend metrics, mutation velocity spikes from live streams,
@@ -1721,52 +1720,68 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     # -------------------------------------------------------------------------
     print(f"\n[+] Internal Registry Severity Rank Shifts (Leaderboard Velocity inside {registry_target}):")
     print("-" * 115)
-    print(f"{'Rank':<5} | {'Advisory ID':<22} | {'Artifact Name':<28} | {'CVSS':<6} | {'Historical Catalog Standing'}")
+    print(f"{'Catalog Rank':<14} | {'Advisory ID':<22} | {'Artifact Name':<28} | {'CVSS':<6} | {'Historical Movement'}")
     print("-" * 115)
 
     cursor.execute("""
         SELECT advisory_id, package_name, cvss_score, blast_radius, published_date
         FROM vulnerabilities
-        WHERE ecosystems LIKE ?
+        WHERE ecosystems LIKE ? AND threat_profile NOT LIKE '%Withdrawn%'
     """, (relaxed_like_pattern,))
     all_repo_records = cursor.fetchall()
 
-    # Determine current absolute standing inside the localized repository subset
-    current_sorted = sorted(all_repo_records, key=lambda x: (-x[2], -x[3], x[0]))
+    # 1. Canonical deduplication for twin advisories (collapse GHSA / PYSEC pairs)
+    vuln_clusters = {}
+    for row in all_repo_records:
+        adv_id, p_name, cvss, radius, pub_date = row
+        cluster_key = (p_name.lower().strip(), cvss, radius)
+        
+        if cluster_key not in vuln_clusters:
+            vuln_clusters[cluster_key] = row
+        else:
+            existing = vuln_clusters[cluster_key]
+            earlier_pub = min(filter(None, [existing[4], pub_date]), default=existing[4])
+            canonical_id = adv_id if adv_id.startswith("GHSA-") else existing[0]
+            vuln_clusters[cluster_key] = (canonical_id, p_name, cvss, radius, earlier_pub)
+
+    deduped_catalog = list(vuln_clusters.values())
+
+    # 2. Current catalog ranking (All known items in registry)
+    current_sorted = sorted(deduped_catalog, key=lambda x: (-x[2], -x[3], x[1].lower(), x[0]))
     current_rank_map = {row[0]: idx for idx, row in enumerate(current_sorted, start=1)}
 
-    # Reconstruct the baseline catalog state prior to this window
-    historical_snapshot = [r for r in all_repo_records if r[4] is None or r[4] < start_str]
-    historical_sorted = sorted(historical_snapshot, key=lambda x: (-x[2], -x[3], x[0]))
+    # 3. Historical catalog ranking (Items published strictly prior to start_date)
+    historical_snapshot = [
+        r for r in deduped_catalog 
+        if r[4] and r[4][:10] < start_str
+    ]
+    historical_sorted = sorted(historical_snapshot, key=lambda x: (-x[2], -x[3], x[1].lower(), x[0]))
     historical_rank_map = {row[0]: idx for idx, row in enumerate(historical_sorted, start=1)}
 
-    # FIX: Isolate entries seen in the live stream log, then sort them strictly by severity rank
-    active_tracked_records = [r for r in all_repo_records if r[0] in stream_mutation_counter]
-    active_sorted_by_severity = sorted(active_tracked_records, key=lambda x: current_rank_map.get(x[0], 999999))
+    # 4. Evaluate the true Top 5 leaderboard positions (#1 through #5)
+    top_5_leaderboard = current_sorted[:5]
 
-    printed_shifts = 0
-    for db_row in active_sorted_by_severity[:5]:
-        adv_id = db_row[0]
-        p_name, cvss = db_row[1], db_row[2]
+    for c_rank, db_row in enumerate(top_5_leaderboard, start=1):
+        adv_id, p_name, cvss, radius, pub_date = db_row
         
+        # Check if this disclosure was first published within the active window
+        is_new_arrival = (pub_date is not None and pub_date[:10] >= start_str)
         b_rank = historical_rank_map.get(adv_id, None)
-        c_rank = current_rank_map.get(adv_id, 1)
         
-        if b_rank:
-            if b_rank == c_rank:
-                shift_display = f"Static Standing (# {c_rank})"
-            elif b_rank > c_rank:
-                shift_display = f"{GREEN}Ascended +{b_rank - c_rank} spots (#{b_rank} -> #{c_rank}){RESET}"
-            else:
-                shift_display = f"{RED}Dropped -{c_rank - b_rank} spots (#{b_rank} -> #{c_rank}){RESET}"
+        if is_new_arrival or b_rank is None:
+            shift_display = f"{YELLOW}New Arrival (Entered at #{c_rank}){RESET}"
+        elif b_rank == c_rank:
+            shift_display = "No Movement (Static)"
+        elif b_rank > c_rank:
+            shift_display = f"{GREEN}Ascended +{b_rank - c_rank} spots (Was #{b_rank}){RESET}"
         else:
-            shift_display = f"{YELLOW}New Arrival to Leaderboard (#{c_rank}){RESET}"
+            shift_display = f"{RED}Dropped -{c_rank - b_rank} spots (Was #{b_rank}){RESET}"
             
-        print(f"#{printed_shifts+1:<4} | {adv_id:<22} | {p_name[:28]:<28} | {cvss:<6.1f} | {shift_display}")
-        printed_shifts += 1
+        rank_label = f"#{c_rank}"
+        print(f"{rank_label:<14} | {adv_id:<22} | {p_name[:28]:<28} | {cvss:<6.1f} | {shift_display}")
 
-    if printed_shifts == 0:
-        print("    [-] No leaderboard ranking shifts detected for active track vulnerabilities.")
+    if not top_5_leaderboard:
+        print("    [-] No catalog vulnerabilities found matching this registry.")
     print("-" * 115)
         
     # -------------------------------------------------------------------------
@@ -1774,7 +1789,6 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     # -------------------------------------------------------------------------
     print(f"\n[+] High-Severity Technical Debt Calcification (Dormant inside {registry_target} > {start_date.date()}):")
     
-    # Query the absolute backlog footprint before slicing the display table
     cursor.execute("""
         SELECT COUNT(DISTINCT advisory_id)
         FROM vulnerabilities
@@ -1787,7 +1801,6 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Days Since Last Active'}")
     print("-" * 115)
     
-    # Restrict row generation cleanly to the Top 5 severe stagnant threats
     cursor.execute("""
         SELECT advisory_id, package_name, cvss_score, last_modified
         FROM vulnerabilities
@@ -1809,14 +1822,13 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print("-" * 115)
 
     # -------------------------------------------------------------------------
-    # 4. TOP 10 CRITICAL THREAT ARRIVALS & CAMPAIGNS (VELOCITY TRACKING)
+    # 4. TOP 10 CRITICAL THREAT ARRIVALS & CAMPAIGNS (DEDUPLICATED)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 10 Critical Threat Arrivals & Campaigns (Published Since {start_str}):")
     print("-" * 115)
     print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Age':<6} | {'Threat Profile'}")
     print("-" * 115)
     
-    # CRITICAL FIX: Restrict the pool to items actually *published* within the window boundary
     cursor.execute("""
         SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, published_date
         FROM vulnerabilities
@@ -1825,12 +1837,23 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
           AND published_date >= ?
           AND threat_profile NOT LIKE '%Withdrawn%'
         ORDER BY cvss_score DESC, blast_radius DESC, advisory_id ASC
-        LIMIT 10
+        LIMIT 50
     """, (start_str, relaxed_like_pattern, start_str))
     
-    rows_worst = cursor.fetchall()
-    if rows_worst:
-        for row in rows_worst:
+    raw_worst = cursor.fetchall()
+    seen_worst_pkgs = set()
+    deduped_worst = []
+    for row in raw_worst:
+        pkg_key = row[1].lower().strip()
+        if pkg_key in seen_worst_pkgs:
+            continue
+        seen_worst_pkgs.add(pkg_key)
+        deduped_worst.append(row)
+        if len(deduped_worst) == 10:
+            break
+
+    if deduped_worst:
+        for row in deduped_worst:
             aid, p_name, cvss, radius, t_profile, pub_date_str = row
             radius_str = f"{radius:,} Vers"
             
@@ -1849,11 +1872,10 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print("-" * 115)
         
     # -------------------------------------------------------------------------
-    # 5. WHICH THINGS ACTUALLY GOT FIXED? (True Remediations Since Campaign Baseline)
+    # 5. WHICH THINGS ACTUALLY GOT FIXED? (DEDUPLICATED)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 5 Critical Vulnerabilities Code-Fixed (Remediated Since {start_str}):")
     print("-" * 115)
-    # Budget Adjusted: ID expanded to 28, Name adjusted to 22 to maintain the 115-wide viewport
     print(f"{'Advisory ID':<28} | {'Artifact Name':<22} | {'CVSS':<5} | {'Fixed':<6} | {'Days Alive':<10} | {'Resolution State'}")
     print("-" * 115)
     
@@ -1864,17 +1886,26 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
           AND threat_profile LIKE '%Fix%'
           AND threat_profile NOT LIKE '%Withdrawn%'
         ORDER BY cvss_score DESC, last_modified DESC
-        LIMIT 5
+        LIMIT 25
     """, (start_str, relaxed_like_pattern))
     
-    rows_fixed = cursor.fetchall()
-    if rows_fixed:
-        for row in rows_fixed:
+    raw_fixed = cursor.fetchall()
+    seen_fixed_pkgs = set()
+    deduped_fixed = []
+    for row in raw_fixed:
+        pkg_key = row[1].lower().strip()
+        if pkg_key in seen_fixed_pkgs:
+            continue
+        seen_fixed_pkgs.add(pkg_key)
+        deduped_fixed.append(row)
+        if len(deduped_fixed) == 5:
+            break
+
+    if deduped_fixed:
+        for row in deduped_fixed:
             aid, p_name, cvss, last_mod_str, t_profile, dwell = row
             date_short = last_mod_str[5:] if len(last_mod_str) >= 10 else last_mod_str
             dwell_str = f"{int(dwell)}d" if dwell is not None else "N/A"
-            
-            # Formatting padding matching the updated layout profile budget
             print(f"{aid:<28} | {p_name[:22]:<22} | {cvss:<5.1f} | {date_short:<6} | {dwell_str:<10} | {t_profile}")
     else:
         print("    [-] No vulnerability mitigations or upstream fixes published in this window.")
@@ -1920,7 +1951,6 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     """, (start_str, relaxed_like_pattern))
     total_new_hotness = cursor.fetchone()[0]
 
-    # FIX: Add a exclusion wildcard to ensure day-zero arrivals aren't counted as update patches
     cursor.execute("""
         SELECT COUNT(*) FROM vulnerabilities 
         WHERE last_modified >= ? AND ecosystems LIKE ? 
@@ -1971,7 +2001,6 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print("="*115 + "\n")
     
     conn.close()
-
 
 # =====================================================================
 # CORE ENGINE COMMAND ORCHESTRATION LAYER
