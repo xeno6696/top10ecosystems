@@ -26,7 +26,8 @@ python db_warehouse.py
 ### 3. Initial Baseline Calibration
 When running the verification suite for the first time, you will likely encounter unit test failures in the text alignment gates. This is **expected behavior** as the system compares live execution output against local "Golden Master" baseline files that may not perfectly match your local filesystem paths.
 
-1. **Run the suite:** ```bash
+1. **Run the suite:**
+   ```bash
    python test_runner.py --database
    ```
 2. **Investigate the failure:** The `AssertionError` output will display a surgical line-by-line delta. Review this output. If the differences represent expected system formatting (e.g., local path differences) rather than data regressions, proceed to re-mint the baseline.
