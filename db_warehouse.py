@@ -15,16 +15,17 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-OSV Relational Data Warehouse Coordinator - Version 1.7
+OSV Relational Data Warehouse Coordinator - Version 1.9
 =================================================================================
 Parallel warehousing backend engineered to bulk-seed from a master snapshot cache 
-(auto-downloading if missing) and execute chronological dynamic sync updates.
+(auto-downloading if missing), execute dynamic sync updates, and continuously 
+maintain daily EPSS exploit probability models with canonical CVE alias bridge mapping.
 """
 
 import argparse
 import concurrent.futures
-import csv
 from contextlib import contextmanager
+import csv
 import datetime
 import gzip
 import io
@@ -43,9 +44,11 @@ DB_DIR = "database"
 DB_PATH = os.path.join(DB_DIR, "threat_stream.db")
 CACHE_DIR = "./cache"
 LOCAL_ZIP_PATH = os.path.join(CACHE_DIR, "osv_master_all.zip")
+EPSS_GZ_PATH = os.path.join(CACHE_DIR, "epss_scores-current.csv.gz")
 
 MASTER_ZIP_URL = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
 MANIFEST_URL = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+EPSS_FEED_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
 OSV_API_URL = "https://api.osv.dev/v1/vulns/"
 
 # Terminal Visual Presentation Elements
@@ -58,120 +61,17 @@ KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux"
 KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 MASTER_TRACKS = KNOWN_CONTAINERS + KNOWN_REGISTRIES + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
 
-# =====================================================================
-# EPSS (EXPLOIT PREDICTION SCORING SYSTEM) ENRICHMENT ENGINE
-# =====================================================================
-
-EPSS_FEED_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
-EPSS_GZ_PATH = os.path.join(CACHE_DIR, "epss_scores-current.csv.gz")
-
-
-def init_epss_table(conn):
-    """Surgically provisions the EPSS storage schema and lookup indexes."""
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS epss_scores (
-            cve_id TEXT PRIMARY KEY,
-            epss_score REAL,
-            percentile REAL,
-            model_date TEXT
-        );
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_epss_score ON epss_scores(epss_score);")
-    conn.commit()
-
-
-def download_epss_feed(force: bool = False) -> bool:
-    """Streams the official daily EPSS CSV gzip archive to local cache."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    
-    # Check if a fresh cache file exists from today
-    if os.path.exists(EPSS_GZ_PATH) and not force:
-        file_age_hours = (time.time() - os.path.getmtime(EPSS_GZ_PATH)) / 3600
-        if file_age_hours < 20:
-            print(f"[+] Found fresh local EPSS feed (Age: {file_age_hours:.1f}h). Skipping download.")
-            return True
-
-    print(f"[*] Downloading latest EPSS score model from {EPSS_FEED_URL}...")
-    try:
-        response = requests.get(EPSS_FEED_URL, stream=True, timeout=60)
-        response.raise_for_status()
-        with open(EPSS_GZ_PATH, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-        print(f"{GREEN}[+] EPSS feed archive staged to: {EPSS_GZ_PATH}{RESET}")
-        return True
-    except Exception as e:
-        print(f"{RED}[-] Failed to stream EPSS payload: {e}{RESET}")
-        return False
-
-
-def run_epss_pipeline(conn, force_download: bool = False):
-    """Complete modular pipeline: verifies schema, downloads feed, and executes batch upsert."""
-    init_epss_table(conn)
-
-    if not download_epss_feed(force=force_download):
-        print(f"{RED}[-] EPSS pipeline aborted due to download error.{RESET}")
-        return
-
-    print("[*] Parsing gzip stream and indexing EPSS exploitation probabilities...")
-    cursor = conn.cursor()
-    epss_batch = []
-    total_ingested = 0
-    model_date = datetime.date.today().isoformat()
-
-    try:
-        with gzip.open(EPSS_GZ_PATH, 'rt', encoding='utf-8') as gz_file:
-            # First line of feed is header metadata: #model_date:YYYY-MM-DDTHH:MM:SSZ
-            first_line = gz_file.readline()
-            if first_line.startswith("#model_date:"):
-                model_date = first_line.strip().split(":")[1].split("T")[0]
-
-            reader = csv.DictReader(gz_file)
-            for row in reader:
-                cve = row.get("cve")
-                epss = row.get("epss")
-                pct = row.get("percentile")
-                if cve and epss:
-                    try:
-                        epss_batch.append((
-                            cve.strip().upper(),
-                            float(epss),
-                            float(pct) if pct else 0.0,
-                            model_date
-                        ))
-                    except ValueError:
-                        continue
-
-                # Commit in 50k transactional chunks to maintain low memory pressure
-                if len(epss_batch) >= 50000:
-                    cursor.executemany("""
-                        INSERT OR REPLACE INTO epss_scores (cve_id, epss_score, percentile, model_date)
-                        VALUES (?, ?, ?, ?)
-                    """, epss_batch)
-                    total_ingested += len(epss_batch)
-                    epss_batch.clear()
-
-            if epss_batch:
-                cursor.executemany("""
-                    INSERT OR REPLACE INTO epss_scores (cve_id, epss_score, percentile, model_date)
-                    VALUES (?, ?, ?, ?)
-                """, epss_batch)
-                total_ingested += len(epss_batch)
-
-        conn.commit()
-        print(f"{GREEN}[+] Ingested {total_ingested:,} EPSS records (Model Date: {model_date}).{RESET}")
-
-    except Exception as e:
-        print(f"{RED}[-] Failed parsing EPSS gzip stream: {e}{RESET}")
-
 @contextmanager
 def execution_timer(label):
     start = time.perf_counter()
     yield
     elapsed = time.perf_counter() - start
     print(f"{GREEN}[⏱️  PERF] {label} completed in {elapsed:.3f} seconds{RESET}")
+
+
+# ==============================================================================
+# DATABASE INITIALIZATION & SCHEMA PROVISIONING
+# ==============================================================================
 
 def init_database():
     """Deploys the complete production warehouse relational schema layout."""
@@ -185,53 +85,71 @@ def init_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    if not db_exists:
-        print(f"[*] Deploying fresh global relational catalog tables at: {DB_PATH}")
-        
-        # Core Global Index: Houses all individual advisory elements (12-column specification)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS vulnerabilities (
-                advisory_id TEXT PRIMARY KEY,
-                package_name TEXT,
-                ecosystems TEXT,
-                cvss_score REAL,
-                blast_radius INTEGER,
-                threat_profile TEXT,
-                last_modified TEXT,
-                malware_vector TEXT,
-                vulnerable_versions TEXT,
-                dwell_days REAL,
-                withdrawn_date TEXT,
-                published_date TEXT 
-            );
-        """)
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
-        
-        # Snapshot Anchors: Log chronological lookback window states
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS snapshots (
-                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                generated_at TEXT NOT NULL,
-                interval_from TEXT NOT NULL,
-                interval_to TEXT NOT NULL UNIQUE,
-                target_layer TEXT NOT NULL
-            );
-        """)
-        
-        # Volumetric Metrics Table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS ecosystem_metrics (
-                snapshot_id INTEGER,
-                text_ecosystem TEXT NOT NULL,
-                activity_count INTEGER NOT NULL,
-                PRIMARY KEY (snapshot_id, text_ecosystem),
-                FOREIGN KEY(snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
-            );
-        """)
-        conn.commit()
-        print("[+] Storage grid tables and b-tree performance indexes deployed cleanly.")
+    # 1. Core Vulnerabilities Table (Includes canonical cve_alias & aliases array)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vulnerabilities (
+            advisory_id TEXT PRIMARY KEY,
+            package_name TEXT,
+            ecosystems TEXT,
+            cvss_score REAL,
+            blast_radius INTEGER,
+            threat_profile TEXT,
+            last_modified TEXT,
+            malware_vector TEXT,
+            vulnerable_versions TEXT,
+            dwell_days REAL,
+            withdrawn_date TEXT,
+            published_date TEXT,
+            cve_alias TEXT,
+            aliases TEXT
+        );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_cve ON vulnerabilities(cve_alias);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_published ON vulnerabilities(published_date);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_modified ON vulnerabilities(last_modified);")
     
+    # 2. Snapshot Anchors: Log chronological lookback window states
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS snapshots (
+            snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            generated_at TEXT NOT NULL,
+            interval_from TEXT NOT NULL,
+            interval_to TEXT NOT NULL UNIQUE,
+            target_layer TEXT NOT NULL
+        );
+    """)
+    
+    # 3. Volumetric Metrics Table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ecosystem_metrics (
+            snapshot_id INTEGER,
+            text_ecosystem TEXT NOT NULL,
+            activity_count INTEGER NOT NULL,
+            PRIMARY KEY (snapshot_id, text_ecosystem),
+            FOREIGN KEY(snapshot_id) REFERENCES snapshots(snapshot_id) ON DELETE CASCADE
+        );
+    """)
+
+    # 4. EPSS Predictive Exploitation Probability Scores
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS epss_scores (
+            cve_id TEXT PRIMARY KEY,
+            epss_score REAL,
+            percentile REAL,
+            model_date TEXT
+        );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_epss_score ON epss_scores(epss_score);")
+    
+    conn.commit()
+    print("[+] Storage grid tables and b-tree performance indexes deployed cleanly.")
     return conn
+
+
+# ==============================================================================
+# OSV INGESTION & EXTRACTION PARSERS
+# ==============================================================================
 
 def download_master_archive():
     """Streams down the full 1GB bulk advisory archive bundle natively if missing."""
@@ -244,7 +162,7 @@ def download_master_archive():
         
         with open(LOCAL_ZIP_PATH, 'wb') as local_file:
             chunk_count = 0
-            for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB blocks
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     local_file.write(chunk)
                     chunk_count += 1
@@ -256,6 +174,7 @@ def download_master_archive():
         print(f"{RED}[- ] Critical master archive stream failure: {e}{RESET}")
         if os.path.exists(LOCAL_ZIP_PATH):
             os.remove(LOCAL_ZIP_PATH)
+
 
 def extract_production_cvss(vuln_data):
     """Parses OSV severity vectors using the official FIRST cvss library for complete parity."""
@@ -282,10 +201,12 @@ def extract_production_cvss(vuln_data):
             
     return 0.0
 
+
 def parse_osv_json(vuln_data):
     """Translates raw nested OSV JSON structures into normalized flat relational database rows."""
     v_id = vuln_data.get("id", "")
-    if not v_id: return (None, None, None, 0.0, 0, None, None, None, None, None, None, None)
+    if not v_id: 
+        return (None,) * 14
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
     p_date_clean = published_str[:10]
@@ -294,13 +215,11 @@ def parse_osv_json(vuln_data):
     w_date = withdrawn_str[:10] if withdrawn_str else None
     
     dwell_days = 0.0
-    # Safe calendar-day string comparison baseline fallback
     is_new_entry = (published_str[:10] == modified_str[:10])
     try:
         p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
         m_dt = datetime.datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
         dwell_days = max(0.0, (m_dt - p_dt).days)
-        # ARCHITECTURAL FIX: Evaluate strict date parity on object layer to bypass timestamp drift
         is_new_entry = (p_dt.date() == m_dt.date())
     except ValueError: pass
 
@@ -309,7 +228,8 @@ def parse_osv_json(vuln_data):
     
     summary = vuln_data.get("summary", "").lower()
     details = vuln_data.get("details", "").lower()
-    if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: is_malware = True
+    if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: 
+        is_malware = True
 
     m_vector = "Unclassified Malicious Payload"
     if is_malware:
@@ -357,11 +277,9 @@ def parse_osv_json(vuln_data):
     if not ecosystems_set:
         ecosystems_set.add("Android")
 
-    # Unified logic branch ensures withdrawn states are never unconditionally overwritten
     if withdrawn_str:
         classification = "Withdrawn / Retracted Advisory"
     else:
-        # Check logic uses the synchronized object-level entry determination
         if is_malware: classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
         elif has_fixes: classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
         else: classification = "Metadata Correction / Adjustments"
@@ -369,8 +287,20 @@ def parse_osv_json(vuln_data):
     cvss_score = extract_production_cvss(vuln_data)
     v_versions_json = json.dumps(list(all_versions))
     ecosystems_json = json.dumps(list(ecosystems_set))
+
+    # Canonical CVE alias extraction bridge
+    raw_aliases = vuln_data.get("aliases", [])
+    cve_alias = v_id if v_id.startswith("CVE-") else next(
+        (a.strip().upper() for a in raw_aliases if a.strip().upper().startswith("CVE-")), 
+        None
+    )
+    aliases_json = json.dumps(raw_aliases)
     
-    return (v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, p_date_clean)
+    return (
+        v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, 
+        modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, 
+        p_date_clean, cve_alias, aliases_json
+    )
 
 
 def bootstrap_warehouse_from_zip(conn):
@@ -418,8 +348,8 @@ def bootstrap_warehouse_from_zip(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date, published_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date, cve_alias, aliases
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -441,6 +371,7 @@ def bootstrap_warehouse_from_zip(conn):
         
     except Exception as e:
         print(f"{RED}[- ] Critical failure loading structural database frames: {e}{RESET}")
+
 
 def sync_incremental_window(conn):
     """Dynamically calculates lookback windows based on relational snapshots and runs parallel syncs."""
@@ -516,7 +447,6 @@ def sync_incremental_window(conn):
         except Exception: pass
         return None
 
-    # High-performance parallel download loop execution block
     with requests.Session() as session:
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             future_to_id = {
@@ -538,11 +468,10 @@ def sync_incremental_window(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date, published_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date, cve_alias, aliases
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
         
-    # Log the successful execution window state back to the database tracking anchors
     try:
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cursor.execute("""
@@ -554,18 +483,144 @@ def sync_incremental_window(conn):
     except Exception as e:
         print(f"{RED}[- ] Failed to record execution snapshot context: {e}{RESET}")
 
+
+# ==============================================================================
+# EPSS (EXPLOIT PREDICTION SCORING SYSTEM) ENRICHMENT ENGINE
+# ==============================================================================
+
+def download_epss_feed(force: bool = False) -> bool:
+    """
+    Streams the official daily EPSS CSV gzip archive if:
+    1. Forced via parameter (force=True)
+    2. The archive is completely missing from local cache
+    3. The cached archive's last write time is >= 24.0 hours old
+    """
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    
+    file_exists = os.path.exists(EPSS_GZ_PATH)
+    file_age_hours = (time.time() - os.path.getmtime(EPSS_GZ_PATH)) / 3600 if file_exists else 999.0
+    is_too_old = file_age_hours >= 24.0
+
+    if file_exists and not is_too_old and not force:
+        print(f"[+] Found fresh local EPSS feed (Age: {file_age_hours:.1f}h < 24h). Skipping download.")
+        return True
+
+    reason = "Forced" if force else ("Missing archive" if not file_exists else f"Expired archive ({file_age_hours:.1f}h old)")
+    print(f"[*] Downloading latest EPSS score model from {EPSS_FEED_URL} [Reason: {reason}]...")
+    
+    try:
+        response = requests.get(EPSS_FEED_URL, stream=True, timeout=60)
+        response.raise_for_status()
+        with open(EPSS_GZ_PATH, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        print(f"{GREEN}[+] EPSS feed archive staged to: {EPSS_GZ_PATH}{RESET}")
+        return True
+    except Exception as e:
+        print(f"{RED}[-] Failed to stream EPSS payload: {e}{RESET}")
+        return False
+
+
+def run_epss_pipeline(conn, force: bool = False):
+    """
+    Rebuilds or refreshes EPSS scores if:
+    - force=True
+    - epss_scores table is empty
+    - epss_scores-current.csv.gz is missing
+    - epss_scores-current.csv.gz is >= 24 hours old
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM epss_scores")
+    existing_count = cursor.fetchone()[0]
+
+    file_missing = not os.path.exists(EPSS_GZ_PATH)
+    file_age_hours = (time.time() - os.path.getmtime(EPSS_GZ_PATH)) / 3600 if not file_missing else 999.0
+    is_too_old = file_age_hours >= 24.0
+    table_empty = (existing_count == 0)
+
+    needs_refresh = force or table_empty or file_missing or is_too_old
+
+    if not needs_refresh:
+        print(f"[+] EPSS database records verified current ({existing_count:,} records, Cache Age: {file_age_hours:.1f}h). Skipping reload.")
+        return
+
+    # Trigger fresh download if missing, expired, or forced
+    if not download_epss_feed(force=force or is_too_old):
+        print(f"{RED}[-] EPSS pipeline aborted: Unable to obtain valid feed archive.{RESET}")
+        return
+
+    print("[*] Dropping previous EPSS table state and rebuilding fresh dataset...")
+    cursor.execute("DELETE FROM epss_scores;")
+    conn.commit()
+
+    epss_batch = []
+    total_ingested = 0
+    model_date = datetime.date.today().isoformat()
+
+    try:
+        with gzip.open(EPSS_GZ_PATH, 'rt', encoding='utf-8') as gz_file:
+            first_line = gz_file.readline()
+            if first_line.startswith("#model_date:"):
+                model_date = first_line.strip().split(":")[1].split("T")[0]
+
+            reader = csv.DictReader(gz_file)
+            for row in reader:
+                cve = row.get("cve")
+                epss = row.get("epss")
+                pct = row.get("percentile")
+                if cve and epss:
+                    try:
+                        epss_batch.append((
+                            cve.strip().upper(),
+                            float(epss),
+                            float(pct) if pct else 0.0,
+                            model_date
+                        ))
+                    except ValueError:
+                        continue
+
+                if len(epss_batch) >= 50000:
+                    cursor.executemany("""
+                        INSERT OR REPLACE INTO epss_scores (cve_id, epss_score, percentile, model_date)
+                        VALUES (?, ?, ?, ?)
+                    """, epss_batch)
+                    total_ingested += len(epss_batch)
+                    epss_batch.clear()
+
+            if epss_batch:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO epss_scores (cve_id, epss_score, percentile, model_date)
+                    VALUES (?, ?, ?, ?)
+                """, epss_batch)
+                total_ingested += len(epss_batch)
+
+        conn.commit()
+        print(f"{GREEN}[+] Successfully ingested {total_ingested:,} EPSS records (Model Date: {model_date}).{RESET}")
+
+    except Exception as e:
+        print(f"{RED}[-] Failed parsing EPSS gzip stream: {e}{RESET}")
+
+
+# ==============================================================================
+# CLI DISPATCHER
+# ==============================================================================
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OSV Relational Data Warehouse Coordinator.")
-    parser.add_argument("--epss", action="store_true", help="Download and ingest EPSS exploit probability scores.")
     parser.add_argument("--bootstrap", action="store_true", help="Force bulk bootstrap seed from OSV ZIP.")
     parser.add_argument("--sync", action="store_true", help="Execute incremental API modification sync.")
+    parser.add_argument("--rebuild", action="store_true", help="Drop and completely rebuild warehouse database from scratch.")
     args = parser.parse_args()
+
+    if args.rebuild and os.path.exists(DB_PATH):
+        print(f"{YELLOW}[!] --rebuild flag passed. Removing existing database at: {DB_PATH}{RESET}")
+        os.remove(DB_PATH)
 
     print("=== OSV RELATIONAL DATA WAREHOUSE ===")
     connection = init_database()
 
-    # Default action: standard bootstrap & sync if no explicit flags are passed
-    run_default = not (args.epss or args.bootstrap or args.sync)
+    run_default = not (args.bootstrap or args.sync)
 
     if args.bootstrap or run_default:
         with execution_timer("Bootstrap (Bulk Archive Load)"):
@@ -575,8 +630,7 @@ if __name__ == "__main__":
         with execution_timer("Incremental Sync (API Stream)"):
             sync_incremental_window(connection)
 
-    if args.epss:
-        with execution_timer("EPSS Score Pipeline"):
-            run_epss_pipeline(connection)
+    with execution_timer("EPSS Score Pipeline"):
+        run_epss_pipeline(connection, force=args.rebuild)
 
     connection.close()
