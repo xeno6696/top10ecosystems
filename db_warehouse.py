@@ -21,19 +21,22 @@ Parallel warehousing backend engineered to bulk-seed from a master snapshot cach
 (auto-downloading if missing) and execute chronological dynamic sync updates.
 """
 
-import sqlite3
-import os
-import csv
-import json
-import zipfile
-import datetime
-import requests
-import io
-import time
+import argparse
 import concurrent.futures
-from collections import Counter
-from cvss import CVSS2, CVSS3, CVSS4 
+import csv
 from contextlib import contextmanager
+import datetime
+import gzip
+import io
+import json
+import os
+import sqlite3
+import sys
+import time
+import zipfile
+from collections import Counter
+from cvss import CVSS2, CVSS3, CVSS4
+import requests
 
 # Storage Routing Baselines
 DB_DIR = "database"
@@ -54,6 +57,114 @@ RESET = "\033[0m"
 KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
 KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 MASTER_TRACKS = KNOWN_CONTAINERS + KNOWN_REGISTRIES + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
+
+# =====================================================================
+# EPSS (EXPLOIT PREDICTION SCORING SYSTEM) ENRICHMENT ENGINE
+# =====================================================================
+
+EPSS_FEED_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
+EPSS_GZ_PATH = os.path.join(CACHE_DIR, "epss_scores-current.csv.gz")
+
+
+def init_epss_table(conn):
+    """Surgically provisions the EPSS storage schema and lookup indexes."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS epss_scores (
+            cve_id TEXT PRIMARY KEY,
+            epss_score REAL,
+            percentile REAL,
+            model_date TEXT
+        );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_epss_score ON epss_scores(epss_score);")
+    conn.commit()
+
+
+def download_epss_feed(force: bool = False) -> bool:
+    """Streams the official daily EPSS CSV gzip archive to local cache."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    
+    # Check if a fresh cache file exists from today
+    if os.path.exists(EPSS_GZ_PATH) and not force:
+        file_age_hours = (time.time() - os.path.getmtime(EPSS_GZ_PATH)) / 3600
+        if file_age_hours < 20:
+            print(f"[+] Found fresh local EPSS feed (Age: {file_age_hours:.1f}h). Skipping download.")
+            return True
+
+    print(f"[*] Downloading latest EPSS score model from {EPSS_FEED_URL}...")
+    try:
+        response = requests.get(EPSS_FEED_URL, stream=True, timeout=60)
+        response.raise_for_status()
+        with open(EPSS_GZ_PATH, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        print(f"{GREEN}[+] EPSS feed archive staged to: {EPSS_GZ_PATH}{RESET}")
+        return True
+    except Exception as e:
+        print(f"{RED}[-] Failed to stream EPSS payload: {e}{RESET}")
+        return False
+
+
+def run_epss_pipeline(conn, force_download: bool = False):
+    """Complete modular pipeline: verifies schema, downloads feed, and executes batch upsert."""
+    init_epss_table(conn)
+
+    if not download_epss_feed(force=force_download):
+        print(f"{RED}[-] EPSS pipeline aborted due to download error.{RESET}")
+        return
+
+    print("[*] Parsing gzip stream and indexing EPSS exploitation probabilities...")
+    cursor = conn.cursor()
+    epss_batch = []
+    total_ingested = 0
+    model_date = datetime.date.today().isoformat()
+
+    try:
+        with gzip.open(EPSS_GZ_PATH, 'rt', encoding='utf-8') as gz_file:
+            # First line of feed is header metadata: #model_date:YYYY-MM-DDTHH:MM:SSZ
+            first_line = gz_file.readline()
+            if first_line.startswith("#model_date:"):
+                model_date = first_line.strip().split(":")[1].split("T")[0]
+
+            reader = csv.DictReader(gz_file)
+            for row in reader:
+                cve = row.get("cve")
+                epss = row.get("epss")
+                pct = row.get("percentile")
+                if cve and epss:
+                    try:
+                        epss_batch.append((
+                            cve.strip().upper(),
+                            float(epss),
+                            float(pct) if pct else 0.0,
+                            model_date
+                        ))
+                    except ValueError:
+                        continue
+
+                # Commit in 50k transactional chunks to maintain low memory pressure
+                if len(epss_batch) >= 50000:
+                    cursor.executemany("""
+                        INSERT OR REPLACE INTO epss_scores (cve_id, epss_score, percentile, model_date)
+                        VALUES (?, ?, ?, ?)
+                    """, epss_batch)
+                    total_ingested += len(epss_batch)
+                    epss_batch.clear()
+
+            if epss_batch:
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO epss_scores (cve_id, epss_score, percentile, model_date)
+                    VALUES (?, ?, ?, ?)
+                """, epss_batch)
+                total_ingested += len(epss_batch)
+
+        conn.commit()
+        print(f"{GREEN}[+] Ingested {total_ingested:,} EPSS records (Model Date: {model_date}).{RESET}")
+
+    except Exception as e:
+        print(f"{RED}[-] Failed parsing EPSS gzip stream: {e}{RESET}")
 
 @contextmanager
 def execution_timer(label):
@@ -444,13 +555,28 @@ def sync_incremental_window(conn):
         print(f"{RED}[- ] Failed to record execution snapshot context: {e}{RESET}")
 
 if __name__ == "__main__":
-    print("=== OSV RELATIONAL DATA WAREHOUSE PROTOTYPE ===")
+    parser = argparse.ArgumentParser(description="OSV Relational Data Warehouse Coordinator.")
+    parser.add_argument("--epss", action="store_true", help="Download and ingest EPSS exploit probability scores.")
+    parser.add_argument("--bootstrap", action="store_true", help="Force bulk bootstrap seed from OSV ZIP.")
+    parser.add_argument("--sync", action="store_true", help="Execute incremental API modification sync.")
+    args = parser.parse_args()
+
+    print("=== OSV RELATIONAL DATA WAREHOUSE ===")
     connection = init_database()
-    
-    with execution_timer("Bootstrap (Bulk Archive Load)"):
-        bootstrap_warehouse_from_zip(connection)
-    
-    with execution_timer("Incremental Sync (API Stream)"):
-        sync_incremental_window(connection)
-    
+
+    # Default action: standard bootstrap & sync if no explicit flags are passed
+    run_default = not (args.epss or args.bootstrap or args.sync)
+
+    if args.bootstrap or run_default:
+        with execution_timer("Bootstrap (Bulk Archive Load)"):
+            bootstrap_warehouse_from_zip(connection)
+
+    if args.sync or run_default:
+        with execution_timer("Incremental Sync (API Stream)"):
+            sync_incremental_window(connection)
+
+    if args.epss:
+        with execution_timer("EPSS Score Pipeline"):
+            run_epss_pipeline(connection)
+
     connection.close()

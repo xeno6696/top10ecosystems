@@ -13,6 +13,7 @@ import io
 import os
 import datetime
 import inspect
+import sqlite3
 
 # Import your command line application module
 import top10ecosystems
@@ -29,6 +30,11 @@ USE_DATABASE_WAREHOUSE = False
 if "--database" in sys.argv:
     USE_DATABASE_WAREHOUSE = True
     sys.argv.remove("--database")  # Stripped to protect unittest setup execution
+    
+SKIP_EPSS = False
+if "--skip-epss" in sys.argv:
+    SKIP_EPSS = True
+    sys.argv.remove("--skip-epss")  # Stripped so unittest engine doesn't choke
 
 # -----------------------------------------------------------------------------
 # 2. TEST CASE SUITE INTEGRATION RUNNER
@@ -132,7 +138,9 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_global_advisory_index_volume_baseline",
             "test_compare_snapshots_golden_master_deltas",
             "test_compare_snapshots_strict_text_alignment_good_match",
-            "test_compare_snapshots_strict_text_alignment_bad_mismatch"
+            "test_compare_snapshots_strict_text_alignment_bad_mismatch",
+            "test_epss_table_schema_and_indexes",
+            "test_epss_known_cve_scores_ingestion"
         }
         
         actual_test_methods = {
@@ -146,6 +154,87 @@ class TestThreatStreamScanner(unittest.TestCase):
             f"❌ TEST RUNNER INTEGRITY VIOLATION: Verification tests have vanished from test_runner.py! "
             f"Missing test blocks: {missing_tests}"
         )
+
+    # -------------------------------------------------------------------------
+    # EPSS PREDICTIVE SCORING & WAREHOUSE ENRICHMENT MATRIX
+    # -------------------------------------------------------------------------
+    def test_epss_table_schema_and_indexes(self):
+        """Validates that epss_scores table and its lookup index exist in the warehouse."""
+        if SKIP_EPSS:
+            self.skipTest("[!] --skip-epss active: Skipping EPSS schema checks.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping EPSS schema check.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+
+        # 1. Assert table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='epss_scores';")
+        self.assertIsNotNone(cursor.fetchone(), "Table 'epss_scores' does not exist in database.")
+
+        # 2. Assert required schema columns exist
+        cursor.execute("PRAGMA table_info(epss_scores);")
+        columns = {row[1] for row in cursor.fetchall()}
+        expected_cols = {"cve_id", "epss_score", "percentile", "model_date"}
+        self.assertTrue(
+            expected_cols.issubset(columns),
+            f"Missing required columns in epss_scores. Expected {expected_cols}, found {columns}"
+        )
+
+        # 3. Assert index exists for score lookups
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_epss_score';")
+        self.assertIsNotNone(cursor.fetchone(), "Index 'idx_epss_score' does not exist on epss_scores.")
+        conn.close()
+
+    def test_epss_known_cve_scores_ingestion(self):
+        """Queries warehouse for high-profile benchmark CVEs to verify EPSS probabilities and percentiles."""
+        if SKIP_EPSS:
+            self.skipTest("[!] --skip-epss active: Skipping EPSS known CVE ingestion check.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping EPSS data check.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+
+        # Verify table contains data prior to record querying
+        cursor.execute("SELECT COUNT(*) FROM epss_scores;")
+        total_records = cursor.fetchone()[0]
+        if total_records == 0:
+            conn.close()
+            self.skipTest("[!] 'epss_scores' table is empty. Run 'python db_warehouse.py --epss' first.")
+
+        # High-profile benchmark CVE targets
+        famous_cves = [
+            "CVE-2021-44228",  # Log4Shell
+            "CVE-2014-0160",   # Heartbleed
+            "CVE-2017-0144",   # EternalBlue
+            "CVE-2019-0708",   # BlueKeep
+            "CVE-2020-1472"    # Zerologon
+        ]
+
+        placeholders = ",".join(["?"] * len(famous_cves))
+        cursor.execute(f"""
+            SELECT cve_id, epss_score, percentile, model_date
+            FROM epss_scores
+            WHERE cve_id IN ({placeholders})
+        """, famous_cves)
+
+        results = {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
+        conn.close()
+
+        # Validate presence and mathematical boundaries
+        for cve in famous_cves:
+            self.assertIn(cve, results, f"Benchmark CVE '{cve}' missing from epss_scores table.")
+            score, percentile, model_date = results[cve]
+
+            self.assertIsInstance(score, float, f"EPSS score for {cve} must be float.")
+            self.assertTrue(0.0 <= score <= 1.0, f"EPSS score out of probability bounds [0.0, 1.0] for {cve}: {score}")
+            self.assertTrue(0.0 <= percentile <= 1.0, f"EPSS percentile out of bounds [0.0, 1.0] for {cve}: {percentile}")
+            self.assertRegex(model_date, r"^\d{4}-\d{2}-\d{2}", f"Invalid model_date format for {cve}: '{model_date}'")
 
     # -------------------------------------------------------------------------
     # 3. CORE FUNCTIONAL REGRESSION CHECKS
