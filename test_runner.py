@@ -140,7 +140,10 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_compare_snapshots_strict_text_alignment_good_match",
             "test_compare_snapshots_strict_text_alignment_bad_mismatch",
             "test_epss_table_schema_and_indexes",
-            "test_epss_known_cve_scores_ingestion"
+            "test_epss_known_cve_scores_ingestion",
+            "test_epss_table_schema_and_indexes",
+            "test_epss_known_cve_scores_ingestion",
+            "test_epss_vulnerabilities_cve_alias_parity"
         }
         
         actual_test_methods = {
@@ -154,6 +157,73 @@ class TestThreatStreamScanner(unittest.TestCase):
             f"❌ TEST RUNNER INTEGRITY VIOLATION: Verification tests have vanished from test_runner.py! "
             f"Missing test blocks: {missing_tests}"
         )
+
+    def test_epss_vulnerabilities_cve_alias_parity(self):
+        """
+        [PARITY GATE] Verifies 1:1 join symmetry and baseline coverage between 
+        vulnerabilities.cve_alias and epss_scores.cve_id.
+        """
+        if SKIP_EPSS:
+            self.skipTest("[!] --skip-epss active: Skipping EPSS-to-OSV parity checks.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping parity verification.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+
+        # 1. Verify tables are populated before evaluating parity
+        cursor.execute("SELECT COUNT(*) FROM epss_scores;")
+        epss_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM vulnerabilities;")
+        vuln_count = cursor.fetchone()[0]
+
+        if epss_count == 0 or vuln_count == 0:
+            conn.close()
+            self.skipTest(
+                f"[!] Incomplete tables (epss_scores: {epss_count:,}, vulnerabilities: {vuln_count:,}). "
+                f"Run 'python db_warehouse.py' first."
+            )
+
+        # 2. Assert 1:1 distinct key symmetry on the JOIN intersection
+        cursor.execute("""
+            SELECT 
+                COUNT(DISTINCT v.cve_alias) AS unique_cves_in_vulns_matched,
+                COUNT(DISTINCT e.cve_id)    AS unique_cves_in_epss_matched,
+                COUNT(*)                    AS total_joined_records
+            FROM vulnerabilities v
+            JOIN epss_scores e ON v.cve_alias = e.cve_id
+            WHERE v.cve_alias IS NOT NULL AND v.cve_alias != '';
+        """)
+        vuln_matched, epss_matched, total_joined = cursor.fetchone()
+
+        self.assertGreater(
+            vuln_matched, 0, 
+            "[!] CRITICAL: Zero vulnerability records matched against EPSS scores."
+        )
+        self.assertEqual(
+            vuln_matched, epss_matched,
+            f"[!] PARITY DRIFT: Asymmetric unique CVE counts in join! "
+            f"vulnerabilities distinct: {vuln_matched:,} vs. epss_scores distinct: {epss_matched:,}"
+        )
+
+        # 3. Assert minimum baseline match rate against total distinct CVEs in OSV (>= 85%)
+        cursor.execute("""
+            SELECT COUNT(DISTINCT cve_alias) 
+            FROM vulnerabilities 
+            WHERE cve_alias IS NOT NULL AND cve_alias != '';
+        """)
+        total_distinct_osv_cves = cursor.fetchone()[0]
+
+        match_ratio = (vuln_matched / total_distinct_osv_cves) if total_distinct_osv_cves > 0 else 0.0
+        self.assertGreaterEqual(
+            match_ratio, 0.85,
+            f"[!] EPSS COVERAGE DRIFT: Only {match_ratio * 100:.1f}% ({vuln_matched:,}/{total_distinct_osv_cves:,}) "
+            f"of distinct OSV CVEs resolved to EPSS records (Expected >= 85.0%)."
+        )
+
+        conn.close()
 
     # -------------------------------------------------------------------------
     # EPSS PREDICTIVE SCORING & WAREHOUSE ENRICHMENT MATRIX

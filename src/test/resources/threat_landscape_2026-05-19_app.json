@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-08-12T22:07:28.318210+00:00",
+        "generated_at": "2026-08-26T00:04:26.700427+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-19",
         "target_layer_filter": "app"
@@ -20,21 +20,21 @@
         "ConanCenter": 0
     },
     "threat_profile": {
-        "Malware (New Entry)": 1802,
-        "Malware (Incremental Update)": 15,
-        "Vulnerability Fix (New Entry)": 243,
-        "Vulnerability Fix (Update)": 1908,
+        "Malware (New Entry)": 1801,
+        "Malware (Incremental Update)": 16,
+        "Vulnerability Fix (New Entry)": 246,
+        "Vulnerability Fix (Update)": 1905,
         "Metadata Correction / Adjustments": 300,
         "Withdrawn / Retracted Advisory": 113
     },
     "layer_profile_matrix": {
         "App Software Registry": {
-            "Vulnerability Fix (Update)": 1908,
+            "Vulnerability Fix (Update)": 1905,
             "Metadata Correction / Adjustments": 300,
-            "Vulnerability Fix (New Entry)": 243,
-            "Malware (New Entry)": 1802,
+            "Vulnerability Fix (New Entry)": 246,
+            "Malware (New Entry)": 1801,
             "Withdrawn / Retracted Advisory": 113,
-            "Malware (Incremental Update)": 15
+            "Malware (Incremental Update)": 16
         }
     },
     "intel_architecture_matrix": {
@@ -78,45 +78,45 @@
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 33.72060766182299,
-            "avg_dwell_cve": 59.990196078431374,
-            "avg_blast_radius": 1.930430879712747,
-            "avg_backlog_age": 348.0
+            "avg_dwell_mal": 34.45046235138705,
+            "avg_dwell_cve": 60.16946778711485,
+            "avg_blast_radius": 1.9443447037701975,
+            "avg_backlog_age": 331.2
         },
         "PyPI": {
             "avg_dwell_mal": 34.05755395683453,
-            "avg_dwell_cve": 362.5368620037807,
+            "avg_dwell_cve": 363.01701323251416,
             "avg_blast_radius": 57.644361833952914,
             "avg_backlog_age": 52.9
         },
         "Go (Golang)": {
             "avg_dwell_mal": 9.0,
-            "avg_dwell_cve": 111.72428884026259,
+            "avg_dwell_cve": 112.13129102844638,
             "avg_blast_radius": 0.32264957264957267,
             "avg_backlog_age": 17.1
         },
         "Packagist (PHP)": {
-            "avg_dwell_mal": 0.0,
+            "avg_dwell_mal": 98.0,
             "avg_dwell_cve": 90.01818181818182,
             "avg_blast_radius": 111.07608695652173,
-            "avg_backlog_age": 140.3
+            "avg_backlog_age": 118.6
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 187.1556603773585,
-            "avg_blast_radius": 62.7122641509434,
+            "avg_dwell_cve": 188.60849056603774,
+            "avg_blast_radius": 63.10377358490566,
             "avg_backlog_age": 318.4
         },
         "Crates.io": {
             "avg_dwell_mal": 87.0,
-            "avg_dwell_cve": 111.81538461538462,
+            "avg_dwell_cve": 112.9025641025641,
             "avg_blast_radius": 0.32338308457711445,
             "avg_backlog_age": 0.0
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 56.24657534246575,
-            "avg_blast_radius": 119.97260273972603,
+            "avg_dwell_cve": 57.43835616438356,
+            "avg_blast_radius": 119.94520547945206,
             "avg_backlog_age": 475.0
         },
         "RubyGems": {
@@ -127,7 +127,7 @@
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 47.53658536585366,
+            "avg_dwell_cve": 47.8780487804878,
             "avg_blast_radius": 46.26829268292683,
             "avg_backlog_age": 58.5
         },
@@ -206,6 +206,12 @@
                 "8oo",
                 10.0
             ],
+            "MAL-2026-3397": [
+                15,
+                "Malware (New Entry)",
+                "tecken",
+                10.0
+            ],
             "MAL-2026-3508": [
                 15,
                 "Malware (New Entry)",
@@ -276,6 +282,12 @@
                 8,
                 "Malware (New Entry)",
                 "@evoja-web/redaction",
+                10.0
+            ],
+            "MAL-2026-3353": [
+                8,
+                "Malware (New Entry)",
+                "money-badger-open-rpc",
                 10.0
             ],
             "MAL-2025-49286": [
@@ -426,18 +438,6 @@
                 5,
                 "Malware (New Entry)",
                 "@squawk/airport-data",
-                10.0
-            ],
-            "MAL-2026-3436": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/airports",
-                10.0
-            ],
-            "MAL-2026-3437": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/airspace",
                 10.0
             ]
         },
@@ -844,8 +844,8 @@
             ],
             "MAL-2026-3637": [
                 1,
-                "Malware (New Entry)",
-                "intercom-php",
+                "Malware (Incremental Update)",
+                "intercom/intercom-php",
                 10.0
             ],
             "GHSA-w59f-67xm-rxx7": [
@@ -1192,12 +1192,6 @@
                 "org.apache.tomcat.embed:tomcat-embed-core",
                 9.8
             ],
-            "GHSA-cx4m-2p55-rw7j": [
-                36,
-                "Vulnerability Fix (Update)",
-                "org.apache.opennlp:opennlp-tools",
-                9.8
-            ],
             "GHSA-8297-v2rf-2p32": [
                 28,
                 "Vulnerability Fix (Update)",
@@ -1214,6 +1208,12 @@
                 21,
                 "Vulnerability Fix (Update)",
                 "com.fasterxml.jackson.core:jackson-databind",
+                9.8
+            ],
+            "GHSA-cx4m-2p55-rw7j": [
+                19,
+                "Vulnerability Fix (Update)",
+                "org.apache.opennlp:opennlp-tools",
                 9.8
             ],
             "GHSA-4wrr-9h5r-m92w": [
@@ -1342,6 +1342,12 @@
                 "org.apache.kafka:kafka-clients",
                 9.1
             ],
+            "GHSA-w22p-4x9f-486v": [
+                105,
+                "Vulnerability Fix (Update)",
+                "com.coravy.hudson.plugins.github:github",
+                9.0
+            ],
             "GHSA-c9ph-gxww-7744": [
                 82,
                 "Vulnerability Fix (Update)",
@@ -1364,12 +1370,6 @@
                 52,
                 "Vulnerability Fix (Update)",
                 "com.arcadedb:arcadedb-server",
-                9.0
-            ],
-            "GHSA-w22p-4x9f-486v": [
-                5,
-                "Vulnerability Fix (Update)",
-                "org.jenkins-ci.plugins:git",
                 9.0
             ],
             "GHSA-p93r-85wp-75v3": [
