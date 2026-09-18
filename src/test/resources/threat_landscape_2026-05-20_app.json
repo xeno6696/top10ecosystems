@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-08-26T00:04:41.142099+00:00",
+        "generated_at": "2026-09-17T23:18:43.218507+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
         "target_layer_filter": "app"
@@ -20,21 +20,21 @@
         "ConanCenter": 0
     },
     "threat_profile": {
-        "Malware (New Entry)": 1831,
-        "Malware (Incremental Update)": 16,
-        "Vulnerability Fix (New Entry)": 274,
-        "Vulnerability Fix (Update)": 2425,
+        "Malware (New Entry)": 1830,
+        "Malware (Incremental Update)": 17,
+        "Vulnerability Fix (New Entry)": 264,
+        "Vulnerability Fix (Update)": 2433,
         "Metadata Correction / Adjustments": 356,
-        "Withdrawn / Retracted Advisory": 115
+        "Withdrawn / Retracted Advisory": 117
     },
     "layer_profile_matrix": {
         "App Software Registry": {
-            "Malware (New Entry)": 1831,
-            "Vulnerability Fix (Update)": 2425,
+            "Malware (New Entry)": 1830,
+            "Vulnerability Fix (Update)": 2433,
             "Metadata Correction / Adjustments": 356,
-            "Vulnerability Fix (New Entry)": 274,
-            "Withdrawn / Retracted Advisory": 115,
-            "Malware (Incremental Update)": 16
+            "Vulnerability Fix (New Entry)": 264,
+            "Malware (Incremental Update)": 17,
+            "Withdrawn / Retracted Advisory": 117
         }
     },
     "intel_architecture_matrix": {
@@ -60,7 +60,7 @@
             "total": 1,
             "malware": 0,
             "cve": 1,
-            "max_radius": 121
+            "max_radius": 124
         },
         "Crates.io": {
             "total": 1,
@@ -73,67 +73,67 @@
         "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 923,
-        "Persistent Backdoor / Execution Shell": 10,
-        "Unclassified Malicious Payload": 797
+        "Persistent Backdoor / Execution Shell": 11,
+        "Unclassified Malicious Payload": 796
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 34.095114006514656,
-            "avg_dwell_cve": 61.417462482946796,
-            "avg_blast_radius": 1.9268077601410936,
+            "avg_dwell_mal": 35.69902280130293,
+            "avg_dwell_cve": 81.12960436562074,
+            "avg_blast_radius": 1.9303350970017636,
             "avg_backlog_age": 332.0
         },
         "PyPI": {
             "avg_dwell_mal": 34.846689895470384,
-            "avg_dwell_cve": 323.9855222337125,
-            "avg_blast_radius": 79.5805422647528,
+            "avg_dwell_cve": 338.0392967942089,
+            "avg_blast_radius": 79.10765550239235,
             "avg_backlog_age": 53.0
         },
         "Go (Golang)": {
             "avg_dwell_mal": 9.0,
-            "avg_dwell_cve": 127.98028673835125,
+            "avg_dwell_cve": 150.13440860215053,
             "avg_blast_radius": 0.4727592267135325,
-            "avg_backlog_age": 17.3
+            "avg_backlog_age": 0.0
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 98.0,
-            "avg_dwell_cve": 88.60714285714286,
-            "avg_blast_radius": 111.72597864768683,
-            "avg_backlog_age": 119.4
+            "avg_dwell_cve": 122.52857142857142,
+            "avg_blast_radius": 111.98576512455516,
+            "avg_backlog_age": 21.0
         },
         "Maven (Java)": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 213.87280701754386,
-            "avg_blast_radius": 64.28070175438596,
-            "avg_backlog_age": 319.3
+            "avg_dwell_cve": 257.9035087719298,
+            "avg_blast_radius": 64.60526315789474,
+            "avg_backlog_age": 248.0
         },
         "Crates.io": {
             "avg_dwell_mal": 87.0,
-            "avg_dwell_cve": 121.42396313364056,
+            "avg_dwell_cve": 167.64976958525347,
             "avg_blast_radius": 0.32286995515695066,
             "avg_backlog_age": 0.0
         },
         "NuGet": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 56.95945945945946,
+            "avg_dwell_cve": 88.82432432432432,
             "avg_blast_radius": 118.67567567567568,
-            "avg_backlog_age": 476.0
+            "avg_backlog_age": 465.4
         },
         "RubyGems": {
             "avg_dwell_mal": 71.0,
-            "avg_dwell_cve": 128.05084745762713,
-            "avg_blast_radius": 104.60606060606061,
+            "avg_dwell_cve": 203.5593220338983,
+            "avg_blast_radius": 104.65151515151516,
             "avg_backlog_age": 92.8
         },
         "Hex": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 46.73809523809524,
-            "avg_blast_radius": 46.285714285714285,
-            "avg_backlog_age": 58.9
+            "avg_dwell_cve": 59.45238095238095,
+            "avg_blast_radius": 46.30952380952381,
+            "avg_backlog_age": 32.2
         },
         "SwiftURL": {
             "avg_dwell_mal": 0.0,
-            "avg_dwell_cve": 340.1666666666667,
+            "avg_dwell_cve": 367.8333333333333,
             "avg_blast_radius": 15.083333333333334,
             "avg_backlog_age": 149.0
         }
@@ -237,7 +237,7 @@
                 10.0
             ],
             "MAL-2026-2920": [
-                11,
+                12,
                 "Malware (New Entry)",
                 "buffer-util-extend",
                 10.0
@@ -344,6 +344,12 @@
                 "@amsterdam-local/forms-component-library",
                 10.0
             ],
+            "MAL-2026-3030": [
+                6,
+                "Malware (New Entry)",
+                "model-poc-suhail",
+                10.0
+            ],
             "MAL-2026-3052": [
                 6,
                 "Malware (New Entry)",
@@ -433,17 +439,11 @@
                 "Malware (New Entry)",
                 "eslint-plugin-skyscanner-dates",
                 10.0
-            ],
-            "MAL-2026-3435": [
-                5,
-                "Malware (New Entry)",
-                "@squawk/airport-data",
-                10.0
             ]
         },
         "PyPI": {
             "GHSA-r23q-823p-vmf7": [
-                166,
+                167,
                 "Vulnerability Fix (Update)",
                 "mlflow",
                 10.0
@@ -909,7 +909,7 @@
                 9.8
             ],
             "GHSA-pxm6-mhxr-q4mj": [
-                317,
+                321,
                 "Vulnerability Fix (Update)",
                 "getgrav/grav",
                 9.4
@@ -969,7 +969,7 @@
                 9.2
             ],
             "GHSA-w48r-jppp-rcfw": [
-                317,
+                321,
                 "Vulnerability Fix (Update)",
                 "getgrav/grav",
                 9.1
@@ -1023,19 +1023,19 @@
                 9.1
             ],
             "GHSA-vr2g-rhm5-q4jr": [
-                56,
+                65,
                 "Vulnerability Fix (Update)",
                 "ci4-cms-erp/ci4ms",
                 9.0
             ],
             "GHSA-w8cg-7jcj-4vv2": [
-                317,
+                321,
                 "Vulnerability Fix (Update)",
                 "getgrav/grav",
                 8.9
             ],
             "GHSA-hmcx-ch82-3fv2": [
-                317,
+                321,
                 "Vulnerability Fix (Update)",
                 "getgrav/grav",
                 8.8
@@ -1139,13 +1139,13 @@
                 10.0
             ],
             "GHSA-69rw-45wj-g4v6": [
-                362,
+                448,
                 "Vulnerability Fix (Update)",
                 "io.spinnaker.echo:echo-pipelinetriggers",
                 9.9
             ],
             "GHSA-x3j7-7pgj-h87r": [
-                103,
+                197,
                 "Vulnerability Fix (Update)",
                 "io.spinnaker.clouddriver:clouddriver-artifacts-gitrepo",
                 9.9
@@ -1187,9 +1187,9 @@
                 9.8
             ],
             "GHSA-r29c-68gh-xp6x": [
-                322,
+                201,
                 "Vulnerability Fix (Update)",
-                "org.apache.tomcat:tomcat-catalina",
+                "org.apache.tomcat:tomcat-coyote",
                 9.8
             ],
             "GHSA-c9hw-wf7x-jp9j": [
@@ -1313,7 +1313,7 @@
                 9.1
             ],
             "GHSA-j7j9-5253-f7vh": [
-                55,
+                56,
                 "Vulnerability Fix (Update)",
                 "com.ritense.valtimo:contract",
                 9.1
@@ -1325,7 +1325,7 @@
                 9.1
             ],
             "GHSA-4v8g-86x5-3vrc": [
-                36,
+                37,
                 "Vulnerability Fix (Update)",
                 "org.apache.opennlp:opennlp-tools",
                 9.1
@@ -1937,7 +1937,7 @@
                 9.8
             ],
             "GHSA-2wvh-87g2-89hr": [
-                76,
+                75,
                 "Vulnerability Fix (Update)",
                 "openc3",
                 9.6
@@ -2111,7 +2111,7 @@
                 6.5
             ],
             "GHSA-7f3r-gwc9-2995": [
-                54,
+                56,
                 "Vulnerability Fix (Update)",
                 "view_component",
                 6.5
@@ -2147,7 +2147,7 @@
                 5.9
             ],
             "GHSA-hg3h-g7xc-f7vp": [
-                54,
+                56,
                 "Vulnerability Fix (Update)",
                 "view_component",
                 5.9
@@ -2437,7 +2437,7 @@
                 2.3
             ],
             "EEF-CVE-2026-43969": [
-                16,
+                17,
                 "Metadata Correction / Adjustments",
                 "cowlib",
                 2.1

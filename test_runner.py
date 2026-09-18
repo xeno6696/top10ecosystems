@@ -36,6 +36,11 @@ if "--skip-epss" in sys.argv:
     SKIP_EPSS = True
     sys.argv.remove("--skip-epss")  # Stripped so unittest engine doesn't choke
 
+SKIP_KEV = False
+if "--skip-kev" in sys.argv:
+    SKIP_KEV = True
+    sys.argv.remove("--skip-kev")  # Stripped so unittest engine doesn't choke
+
 # -----------------------------------------------------------------------------
 # 2. TEST CASE SUITE INTEGRATION RUNNER
 # -----------------------------------------------------------------------------
@@ -108,6 +113,11 @@ class TestThreatStreamScanner(unittest.TestCase):
         """[INTEGRITY] Guards against the deletion of the primary argument router entrypoint."""
         self.verify_production_target_signature("main", expected_args_count=0)
 
+    def test_000_a_anti_hallucination_guard_for_retraction_stats_display(self):
+        """[INTEGRITY] Guards against the deletion of the all-time retraction stats display
+        (previously deleted silently in commit fd31fd2 with no test coverage to catch it)."""
+        self.verify_production_target_signature("display_all_time_retraction_stats", expected_args_count=1)
+
     def test_000_b_meta_guard_against_missing_test_methods_in_test_runner_itself(self):
         """[INTEGRITY] Reviews test_runner.py to ensure no verification tests were deleted or dropped."""
         expected_test_methods = {
@@ -141,9 +151,11 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_compare_snapshots_strict_text_alignment_bad_mismatch",
             "test_epss_table_schema_and_indexes",
             "test_epss_known_cve_scores_ingestion",
-            "test_epss_table_schema_and_indexes",
-            "test_epss_known_cve_scores_ingestion",
-            "test_epss_vulnerabilities_cve_alias_parity"
+            "test_epss_vulnerabilities_cve_alias_parity",
+            "test_000_a_anti_hallucination_guard_for_retraction_stats_display",
+            "test_kev_table_schema_and_indexes",
+            "test_kev_known_cve_ingestion",
+            "test_kev_vulnerabilities_cve_alias_parity"
         }
         
         actual_test_methods = {
@@ -305,6 +317,127 @@ class TestThreatStreamScanner(unittest.TestCase):
             self.assertTrue(0.0 <= score <= 1.0, f"EPSS score out of probability bounds [0.0, 1.0] for {cve}: {score}")
             self.assertTrue(0.0 <= percentile <= 1.0, f"EPSS percentile out of bounds [0.0, 1.0] for {cve}: {percentile}")
             self.assertRegex(model_date, r"^\d{4}-\d{2}-\d{2}", f"Invalid model_date format for {cve}: '{model_date}'")
+
+    # -------------------------------------------------------------------------
+    # KEV (CISA KNOWN EXPLOITED VULNERABILITIES) ENRICHMENT MATRIX
+    # -------------------------------------------------------------------------
+    def test_kev_table_schema_and_indexes(self):
+        """Validates that kev_catalog table and its lookup indexes exist in the warehouse."""
+        if SKIP_KEV:
+            self.skipTest("[!] --skip-kev active: Skipping KEV schema checks.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping KEV schema check.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='kev_catalog';")
+        self.assertIsNotNone(cursor.fetchone(), "Table 'kev_catalog' does not exist in database.")
+
+        cursor.execute("PRAGMA table_info(kev_catalog);")
+        columns = {row[1] for row in cursor.fetchall()}
+        expected_cols = {
+            "cve_id", "vendor_project", "product", "vulnerability_name", "date_added",
+            "short_description", "required_action", "due_date", "known_ransomware_use",
+            "notes", "cwes", "catalog_version"
+        }
+        self.assertTrue(
+            expected_cols.issubset(columns),
+            f"Missing required columns in kev_catalog. Expected {expected_cols}, found {columns}"
+        )
+
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_kev_date_added';")
+        self.assertIsNotNone(cursor.fetchone(), "Index 'idx_kev_date_added' does not exist on kev_catalog.")
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_kev_due_date';")
+        self.assertIsNotNone(cursor.fetchone(), "Index 'idx_kev_due_date' does not exist on kev_catalog.")
+
+        conn.close()
+
+    def test_kev_known_cve_ingestion(self):
+        """Queries warehouse for high-profile benchmark CVEs to verify KEV catalog fields."""
+        if SKIP_KEV:
+            self.skipTest("[!] --skip-kev active: Skipping KEV known CVE ingestion check.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping KEV data check.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) FROM kev_catalog;")
+        total_records = cursor.fetchone()[0]
+        if total_records == 0:
+            conn.close()
+            self.skipTest("[!] 'kev_catalog' table is empty. Run 'python db_warehouse.py' first.")
+
+        # High-profile benchmark CVEs long-established in the KEV catalog
+        famous_cves = [
+            "CVE-2021-44228",  # Log4Shell
+            "CVE-2017-0144",   # EternalBlue
+            "CVE-2020-1472",   # Zerologon
+        ]
+
+        placeholders = ",".join(["?"] * len(famous_cves))
+        cursor.execute(f"""
+            SELECT cve_id, vendor_project, product, date_added, due_date
+            FROM kev_catalog
+            WHERE cve_id IN ({placeholders})
+        """, famous_cves)
+        results = {row[0]: (row[1], row[2], row[3], row[4]) for row in cursor.fetchall()}
+        conn.close()
+
+        for cve in famous_cves:
+            self.assertIn(cve, results, f"Benchmark KEV CVE '{cve}' missing from kev_catalog table.")
+            vendor, product, date_added, due_date = results[cve]
+            self.assertTrue(vendor, f"KEV entry for {cve} missing vendor_project.")
+            self.assertRegex(date_added, r"^\d{4}-\d{2}-\d{2}", f"Invalid date_added format for {cve}: '{date_added}'")
+
+    def test_kev_vulnerabilities_cve_alias_parity(self):
+        """
+        [PARITY GATE] Verifies at least a subset of vulnerabilities.cve_alias values
+        resolve against kev_catalog.cve_id. Unlike EPSS (near-universal CVE coverage),
+        KEV is intentionally a small, curated subset (~1,500 of hundreds of thousands
+        of CVEs) so this asserts presence and join correctness, not a coverage floor.
+        """
+        if SKIP_KEV:
+            self.skipTest("[!] --skip-kev active: Skipping KEV-to-OSV parity checks.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping parity verification.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(*) FROM kev_catalog;")
+        kev_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM vulnerabilities;")
+        vuln_count = cursor.fetchone()[0]
+
+        if kev_count == 0 or vuln_count == 0:
+            conn.close()
+            self.skipTest(
+                f"[!] Incomplete tables (kev_catalog: {kev_count:,}, vulnerabilities: {vuln_count:,}). "
+                f"Run 'python db_warehouse.py' first."
+            )
+
+        cursor.execute("""
+            SELECT COUNT(DISTINCT v.cve_alias)
+            FROM vulnerabilities v
+            JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            WHERE v.cve_alias IS NOT NULL AND v.cve_alias != '';
+        """)
+        matched = cursor.fetchone()[0]
+        conn.close()
+
+        self.assertGreater(
+            matched, 0,
+            "[!] CRITICAL: Zero vulnerability records matched against the KEV catalog. "
+            "Check the cve_alias/cve_id join key or KEV ingestion."
+        )
 
     # -------------------------------------------------------------------------
     # 3. CORE FUNCTIONAL REGRESSION CHECKS

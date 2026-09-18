@@ -1573,6 +1573,96 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
 # ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
 # =====================================================================
 
+def display_all_time_retraction_stats(db_path="database/threat_stream.db"):
+    """
+    Computes global macro-distribution metrics and age brackets for all
+    withdrawn advisories relative to today's date.
+    """
+    if not os.path.exists(db_path):
+        print(f"\n[!] Analytics Skipped: Target database missing at {db_path}")
+        return
+
+    # RESTORED 2026: previously hardcoded to a fixed 2026-05-28 date, which
+    # froze every age bracket at that point in time. Now anchored to the
+    # real current date so vintage/retraction-age math stays accurate.
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Extract raw structural metrics for all populated retractions
+    cursor.execute("""
+        SELECT advisory_id, withdrawn_date, dwell_days 
+        FROM vulnerabilities 
+        WHERE withdrawn_date IS NOT NULL
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    total_retracted = len(rows)
+    if total_retracted == 0:
+        print("\n[!] Zero retracted entries found in the relational schema index.")
+        return
+
+    # Define standard analytical age spreads (in days)
+    brackets = [
+        {"label": "< 1 Year",      "min_d": 0,          "max_d": 365},
+        {"label": "1 - 3 Years",   "min_d": 365,        "max_d": 365 * 3},
+        {"label": "3 - 5 Years",   "min_d": 365 * 3,    "max_d": 365 * 5},
+        {"label": "5 - 10 Years",  "min_d": 365 * 5,    "max_d": 365 * 10},
+        {"label": "10 - 15 Years", "min_d": 365 * 10,   "max_d": 365 * 15},
+        {"label": "15+ Years",     "min_d": 365 * 15,   "max_d": 999999}
+    ]
+
+    # Initialize allocation grids
+    retraction_counts = {b["label"]: 0 for b in brackets}
+    vintage_counts = {b["label"]: 0 for b in brackets}
+
+    # Compute chronological metrics across the raw rows
+    for r_id, w_date_str, dwell_days in rows:
+        try:
+            w_date = datetime.datetime.strptime(w_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+
+        # Metric 1: Retraction Age (Time elapsed since withdrawal)
+        days_since_retraction = (today - w_date).days
+
+        # Metric 2: Historical Vintage (Time elapsed since original publication)
+        pub_date = w_date - datetime.timedelta(days=int(dwell_days))
+        total_advisory_age = (today - pub_date).days
+
+        # Assign to matching retraction interval bracket
+        for b in brackets:
+            if b["min_d"] <= days_since_retraction < b["max_d"]:
+                retraction_counts[b["label"]] += 1
+                break
+
+        # Assign to matching vintage interval bracket
+        for b in brackets:
+            if b["min_d"] <= total_advisory_age < b["max_d"]:
+                vintage_counts[b["label"]] += 1
+                break
+
+    # Render Macro Consolidated Dashboard Report
+    print(f"\n📊 GLOBAL ARCHIVE SUMMARY: ALL-TIME WITHDRAWN ADVISORY SPREAD")
+    print(f"Total Relational Retraction Base: {total_retracted:,} Advisories")
+    print("=" * 110)
+    print(f"{'Age Bracket (From Today)':<25} | {'Retraction Volume':<20} | {'Retraction %':<14} | {'Vintage Volume':<16} | {'Vintage %'}")
+    print("-" * 110)
+
+    for b in brackets:
+        label = b["label"]
+        r_count = retraction_counts[label]
+        v_count = vintage_counts[label]
+
+        r_pct = (r_count / total_retracted) * 100
+        v_pct = (v_count / total_retracted) * 100
+
+        print(f"{label:<25} | {r_count:<20,} | {r_pct:<14.2f}% | {v_count:<16,} | {v_pct:.2f}%")
+
+    print("=" * 110)
+
 def extract_suspicious_retractions(db_path="database/threat_stream.db", from_date=None, to_date=None, layer="all"):
     """
     Advanced context-aware research hunt engine for tracking contested 

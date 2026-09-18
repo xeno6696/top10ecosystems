@@ -15,11 +15,11 @@
 # along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 """
-OSV Relational Data Warehouse Coordinator - Version 1.9
+OSV Relational Data Warehouse Coordinator - Version 2.0
 =================================================================================
 Parallel warehousing backend engineered to bulk-seed from a master snapshot cache 
-(auto-downloading if missing), execute dynamic sync updates, and continuously 
-maintain daily EPSS exploit probability models with canonical CVE alias bridge mapping.
+(auto-downloading if missing), execute dynamic sync updates, maintain daily EPSS 
+models, and index formal CWE vulnerability classifications alongside CVE alias bridges.
 """
 
 import argparse
@@ -31,6 +31,7 @@ import gzip
 import io
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -45,10 +46,12 @@ DB_PATH = os.path.join(DB_DIR, "threat_stream.db")
 CACHE_DIR = "./cache"
 LOCAL_ZIP_PATH = os.path.join(CACHE_DIR, "osv_master_all.zip")
 EPSS_GZ_PATH = os.path.join(CACHE_DIR, "epss_scores-current.csv.gz")
+KEV_JSON_PATH = os.path.join(CACHE_DIR, "known_exploited_vulnerabilities.json")
 
 MASTER_ZIP_URL = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
 MANIFEST_URL = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
 EPSS_FEED_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
+KEV_FEED_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 OSV_API_URL = "https://api.osv.dev/v1/vulns/"
 
 # Terminal Visual Presentation Elements
@@ -85,7 +88,7 @@ def init_database():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 1. Core Vulnerabilities Table (Includes canonical cve_alias & aliases array)
+    # 1. Core Vulnerabilities Table (15 Columns)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS vulnerabilities (
             advisory_id TEXT PRIMARY KEY,
@@ -101,15 +104,17 @@ def init_database():
             withdrawn_date TEXT,
             published_date TEXT,
             cve_alias TEXT,
-            aliases TEXT
+            aliases TEXT,
+            cwe_ids TEXT
         );
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_cve ON vulnerabilities(cve_alias);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_cwe ON vulnerabilities(cwe_ids);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_published ON vulnerabilities(published_date);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_modified ON vulnerabilities(last_modified);")
     
-    # 2. Snapshot Anchors: Log chronological lookback window states
+    # 2. Snapshot Anchors
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS snapshots (
             snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,7 +146,27 @@ def init_database():
         );
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_epss_score ON epss_scores(epss_score);")
-    
+
+    # 5. CISA Known Exploited Vulnerabilities (KEV) Catalog
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS kev_catalog (
+            cve_id TEXT PRIMARY KEY,
+            vendor_project TEXT,
+            product TEXT,
+            vulnerability_name TEXT,
+            date_added TEXT,
+            short_description TEXT,
+            required_action TEXT,
+            due_date TEXT,
+            known_ransomware_use TEXT,
+            notes TEXT,
+            cwes TEXT,
+            catalog_version TEXT
+        );
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_kev_date_added ON kev_catalog(date_added);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_kev_due_date ON kev_catalog(due_date);")
+
     conn.commit()
     print("[+] Storage grid tables and b-tree performance indexes deployed cleanly.")
     return conn
@@ -176,6 +201,43 @@ def download_master_archive():
             os.remove(LOCAL_ZIP_PATH)
 
 
+def extract_cwe_classifications(vuln_data):
+    """Extracts and normalizes all CWE identifiers across disparate upstream OSV sources."""
+    cwes = set()
+    
+    # 1. Top-level database_specific metadata (GHSA, PyPA, RustSec)
+    db_spec = vuln_data.get("database_specific", {})
+    if isinstance(db_spec, dict):
+        for item in db_spec.get("cwe_ids", []):
+            if isinstance(item, str) and item.strip():
+                match = re.search(r"CWE-\d+", item, re.IGNORECASE)
+                if match:
+                    cwes.add(match.group(0).upper())
+                    
+        for item in db_spec.get("cwes", []):
+            if isinstance(item, str):
+                match = re.search(r"CWE-\d+", item, re.IGNORECASE)
+                if match:
+                    cwes.add(match.group(0).upper())
+            elif isinstance(item, dict):
+                cwe_raw = item.get("cwe_id") or item.get("id") or ""
+                match = re.search(r"CWE-\d+", str(cwe_raw), re.IGNORECASE)
+                if match:
+                    cwes.add(match.group(0).upper())
+
+    # 2. Package-level database_specific blocks
+    for affected in vuln_data.get("affected", []):
+        aff_spec = affected.get("database_specific", {})
+        if isinstance(aff_spec, dict):
+            for item in aff_spec.get("cwe_ids", []):
+                if isinstance(item, str) and item.strip():
+                    match = re.search(r"CWE-\d+", item, re.IGNORECASE)
+                    if match:
+                        cwes.add(match.group(0).upper())
+
+    return sorted(list(cwes))
+
+
 def extract_production_cvss(vuln_data):
     """Parses OSV severity vectors using the official FIRST cvss library for complete parity."""
     vuln_id = vuln_data.get("id", "")
@@ -206,7 +268,7 @@ def parse_osv_json(vuln_data):
     """Translates raw nested OSV JSON structures into normalized flat relational database rows."""
     v_id = vuln_data.get("id", "")
     if not v_id: 
-        return (None,) * 14
+        return (None,) * 15
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
     p_date_clean = published_str[:10]
@@ -288,7 +350,7 @@ def parse_osv_json(vuln_data):
     v_versions_json = json.dumps(list(all_versions))
     ecosystems_json = json.dumps(list(ecosystems_set))
 
-    # Canonical CVE alias extraction bridge
+    # Canonical CVE alias extraction
     raw_aliases = vuln_data.get("aliases", [])
     cve_alias = v_id if v_id.startswith("CVE-") else next(
         (a.strip().upper() for a in raw_aliases if a.strip().upper().startswith("CVE-")), 
@@ -296,10 +358,14 @@ def parse_osv_json(vuln_data):
     )
     aliases_json = json.dumps(raw_aliases)
     
+    # Formal CWE Classifications
+    cwe_list = extract_cwe_classifications(vuln_data)
+    cwe_json = json.dumps(cwe_list)
+    
     return (
         v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, 
         modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, 
-        p_date_clean, cve_alias, aliases_json
+        p_date_clean, cve_alias, aliases_json, cwe_json
     )
 
 
@@ -348,8 +414,8 @@ def bootstrap_warehouse_from_zip(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date, published_date, cve_alias, aliases
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -377,7 +443,7 @@ def sync_incremental_window(conn):
     """Dynamically calculates lookback windows based on relational snapshots and runs parallel syncs."""
     cursor = conn.cursor()
     
-    # 1. Establish the baseline interval from the local zip archive state
+    # 1. Establish the baseline interval from local zip archive state
     if os.path.exists(LOCAL_ZIP_PATH):
         cache_mtime = os.path.getmtime(LOCAL_ZIP_PATH)
         cache_dt = datetime.datetime.fromtimestamp(cache_mtime, datetime.timezone.utc)
@@ -388,7 +454,7 @@ def sync_incremental_window(conn):
         start_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
         print(f"\n{YELLOW}[!] Cache zip missing. Falling back to static 24-hour delta gate.{RESET}")
     
-    # 2. STATE INTEGRATION: Check relational warehouse snapshot anchors for a newer high-water mark
+    # 2. STATE INTEGRATION: Check relational snapshots for high-water mark
     try:
         cursor.execute("SELECT MAX(interval_to) FROM snapshots")
         max_snapshot_row = cursor.fetchone()
@@ -468,8 +534,8 @@ def sync_incremental_window(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date, published_date, cve_alias, aliases
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
         
     try:
@@ -489,12 +555,7 @@ def sync_incremental_window(conn):
 # ==============================================================================
 
 def download_epss_feed(force: bool = False) -> bool:
-    """
-    Streams the official daily EPSS CSV gzip archive if:
-    1. Forced via parameter (force=True)
-    2. The archive is completely missing from local cache
-    3. The cached archive's last write time is >= 24.0 hours old
-    """
+    """Streams the official daily EPSS CSV gzip archive if missing, forced, or older than 24h."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     
     file_exists = os.path.exists(EPSS_GZ_PATH)
@@ -523,13 +584,7 @@ def download_epss_feed(force: bool = False) -> bool:
 
 
 def run_epss_pipeline(conn, force: bool = False):
-    """
-    Rebuilds or refreshes EPSS scores if:
-    - force=True
-    - epss_scores table is empty
-    - epss_scores-current.csv.gz is missing
-    - epss_scores-current.csv.gz is >= 24 hours old
-    """
+    """Rebuilds or refreshes EPSS scores if cache >= 24h, table empty, or forced."""
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM epss_scores")
     existing_count = cursor.fetchone()[0]
@@ -545,7 +600,6 @@ def run_epss_pipeline(conn, force: bool = False):
         print(f"[+] EPSS database records verified current ({existing_count:,} records, Cache Age: {file_age_hours:.1f}h). Skipping reload.")
         return
 
-    # Trigger fresh download if missing, expired, or forced
     if not download_epss_feed(force=force or is_too_old):
         print(f"{RED}[-] EPSS pipeline aborted: Unable to obtain valid feed archive.{RESET}")
         return
@@ -603,6 +657,120 @@ def run_epss_pipeline(conn, force: bool = False):
 
 
 # ==============================================================================
+# KEV (CISA KNOWN EXPLOITED VULNERABILITIES) ENRICHMENT ENGINE
+# ==============================================================================
+
+def download_kev_feed(force: bool = False) -> bool:
+    """
+    Streams the official CISA KEV JSON catalog if:
+    1. Forced via parameter (force=True)
+    2. The catalog is completely missing from local cache
+    3. The cached catalog's last write time is >= 24.0 hours old
+    """
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    file_exists = os.path.exists(KEV_JSON_PATH)
+    file_age_hours = (time.time() - os.path.getmtime(KEV_JSON_PATH)) / 3600 if file_exists else 999.0
+    is_too_old = file_age_hours >= 24.0
+
+    if file_exists and not is_too_old and not force:
+        print(f"[+] Found fresh local KEV catalog (Age: {file_age_hours:.1f}h < 24h). Skipping download.")
+        return True
+
+    reason = "Forced" if force else ("Missing catalog" if not file_exists else f"Expired catalog ({file_age_hours:.1f}h old)")
+    print(f"[*] Downloading CISA KEV catalog from {KEV_FEED_URL} [Reason: {reason}]...")
+
+    try:
+        response = requests.get(KEV_FEED_URL, timeout=60)
+        response.raise_for_status()
+        with open(KEV_JSON_PATH, 'wb') as f:
+            f.write(response.content)
+        print(f"{GREEN}[+] KEV catalog staged to: {KEV_JSON_PATH}{RESET}")
+        return True
+    except Exception as e:
+        print(f"{RED}[-] Failed to stream KEV catalog payload: {e}{RESET}")
+        return False
+
+
+def run_kev_pipeline(conn, force: bool = False):
+    """
+    Rebuilds or refreshes the KEV catalog if:
+    - force=True
+    - kev_catalog table is empty
+    - known_exploited_vulnerabilities.json is missing
+    - known_exploited_vulnerabilities.json is >= 24 hours old
+    """
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM kev_catalog")
+    existing_count = cursor.fetchone()[0]
+
+    file_missing = not os.path.exists(KEV_JSON_PATH)
+    file_age_hours = (time.time() - os.path.getmtime(KEV_JSON_PATH)) / 3600 if not file_missing else 999.0
+    is_too_old = file_age_hours >= 24.0
+    table_empty = (existing_count == 0)
+
+    needs_refresh = force or table_empty or file_missing or is_too_old
+    if not needs_refresh:
+        print(f"[+] KEV catalog records verified current ({existing_count:,} records, Cache Age: {file_age_hours:.1f}h). Skipping reload.")
+        return
+
+    if not download_kev_feed(force=force or is_too_old):
+        print(f"{RED}[-] KEV pipeline aborted: Unable to obtain valid catalog file.{RESET}")
+        return
+
+    print("[*] Dropping previous KEV table state and rebuilding fresh dataset...")
+    cursor.execute("DELETE FROM kev_catalog;")
+    conn.commit()
+
+    kev_batch = []
+    total_ingested = 0
+    catalog_version = None
+
+    try:
+        with open(KEV_JSON_PATH, 'r', encoding='utf-8') as f:
+            catalog = json.load(f)
+
+        catalog_version = catalog.get("catalogVersion")
+        entries = catalog.get("vulnerabilities", [])
+
+        for entry in entries:
+            cve_id = entry.get("cveID", "").strip().upper()
+            if not cve_id:
+                continue
+
+            cwes_json = json.dumps(entry.get("cwes", []))
+
+            kev_batch.append((
+                cve_id,
+                entry.get("vendorProject"),
+                entry.get("product"),
+                entry.get("vulnerabilityName"),
+                entry.get("dateAdded"),
+                entry.get("shortDescription"),
+                entry.get("requiredAction"),
+                entry.get("dueDate"),
+                entry.get("knownRansomwareCampaignUse"),
+                entry.get("notes"),
+                cwes_json,
+                catalog_version
+            ))
+
+        if kev_batch:
+            cursor.executemany("""
+                INSERT OR REPLACE INTO kev_catalog (
+                    cve_id, vendor_project, product, vulnerability_name, date_added,
+                    short_description, required_action, due_date, known_ransomware_use,
+                    notes, cwes, catalog_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, kev_batch)
+            total_ingested = len(kev_batch)
+
+        conn.commit()
+        print(f"{GREEN}[+] Successfully ingested {total_ingested:,} KEV records (Catalog Version: {catalog_version}).{RESET}")
+    except Exception as e:
+        print(f"{RED}[-] Failed parsing KEV catalog JSON: {e}{RESET}")
+
+
+# ==============================================================================
 # CLI DISPATCHER
 # ==============================================================================
 
@@ -611,6 +779,7 @@ if __name__ == "__main__":
     parser.add_argument("--bootstrap", action="store_true", help="Force bulk bootstrap seed from OSV ZIP.")
     parser.add_argument("--sync", action="store_true", help="Execute incremental API modification sync.")
     parser.add_argument("--rebuild", action="store_true", help="Drop and completely rebuild warehouse database from scratch.")
+    parser.add_argument("--skip-kev", action="store_true", help="Skip the CISA KEV catalog refresh pipeline for this run.")
     args = parser.parse_args()
 
     if args.rebuild and os.path.exists(DB_PATH):
@@ -632,5 +801,11 @@ if __name__ == "__main__":
 
     with execution_timer("EPSS Score Pipeline"):
         run_epss_pipeline(connection, force=args.rebuild)
+
+    if not args.skip_kev:
+        with execution_timer("KEV Catalog Pipeline"):
+            run_kev_pipeline(connection, force=args.rebuild)
+    else:
+        print(f"{YELLOW}[!] --skip-kev active: KEV catalog refresh skipped for this run.{RESET}")
 
     connection.close()
