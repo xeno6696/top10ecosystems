@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # Copyright (C) 2026 xeno6696
 # 
 # This program is free software: you can redistribute it and/or modify
@@ -2092,6 +2092,245 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     
     conn.close()
 
+def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registries: list, export_path=None, *, console_limit: int = 100):
+    """
+    Cross-checks the CISA KEV catalog, EPSS exploitation probability, and raw
+    OSV/CVSS severity against the vulnerability catalog for the given window
+    and explicit registry set, producing the prioritized "act on this now"
+    dispatch list for operational developer teams.
+
+    Deliberate sort priority (highest to lowest):
+        1. KEV catalog hit          -> confirmed active exploitation in the wild
+        2. EPSS score, descending   -> probability of exploitation in next 30 days
+        3. CVSS / blast radius      -> raw theoretical severity, as tiebreaker only
+
+    CVE resolution fallback: some advisory rows (notably ROOT-APP-* synthetic
+    entries from direct-dependency lockfile audits) carry no cve_alias even
+    when a CVE is embedded directly in their advisory_id (e.g.
+    ROOT-APP-NPM-CVE-2026-40175). Those never match epss_scores/kev_catalog
+    on a pure SQL join. This extracts CVE-YYYY-NNNNN from advisory_id as a
+    fallback resolution target so EPSS/KEV enrichment still applies.
+
+    console_limit caps how many rows print to the terminal (default 100,
+    pass 0 or a negative number for no cap). The JSON export (export_path)
+    is always the complete, unfiltered dispatch list regardless of this cap.
+    """
+    if not os.path.exists(db_path):
+        print(f"{RED}[-] Cross-Check Aborted: Relational warehouse missing at {db_path}{RESET}")
+        return
+
+    if not registries:
+        print(f"{RED}[-] Cross-Check Aborted: --registry is required (no default registry scope).{RESET}")
+        return
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+
+    registry_clause = " OR ".join(["v.ecosystems LIKE ?"] * len(registries))
+    registry_params = [f"%{r.strip()}%" for r in registries]
+
+    # Base pull -- deliberately NOT joined to epss_scores/kev_catalog here,
+    # since the join key (cve_alias) is missing on some rows that still
+    # carry a resolvable CVE inside their advisory_id string.
+    base_query = f"""
+        SELECT
+            v.advisory_id,
+            v.cve_alias,
+            v.cwe_ids,
+            v.package_name,
+            v.ecosystems,
+            v.cvss_score,
+            v.blast_radius
+        FROM vulnerabilities v
+        WHERE v.withdrawn_date IS NULL
+          AND v.last_modified BETWEEN ? AND ?
+          AND ({registry_clause})
+    """
+    cursor.execute(base_query, [start_str, end_str] + registry_params)
+    base_rows = cursor.fetchall()
+
+    cve_pattern = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+
+    enriched = []
+    resolved_cves = set()
+    for advisory_id, cve_alias, cwe_json, pkg, ecos_json, cvss, radius in base_rows:
+        cve_id = cve_alias
+        cve_source = "db" if cve_alias else None
+
+        if not cve_id:
+            match = cve_pattern.search(advisory_id or "")
+            if match:
+                cve_id = match.group(0).upper()
+                cve_source = "id-pattern"
+
+        if cve_id:
+            resolved_cves.add(cve_id)
+
+        enriched.append({
+            "advisory_id": advisory_id,
+            "cve_id": cve_id,
+            "cve_source": cve_source,
+            "cwe_json": cwe_json,
+            "package_name": pkg,
+            "ecosystems_json": ecos_json,
+            "cvss_score": cvss,
+            "blast_radius": radius,
+        })
+
+    # Batch-fetch EPSS/KEV only for the CVEs actually present in this window
+    # (real cve_alias values plus id-pattern fallbacks), instead of a blind
+    # full-table join.
+    epss_map = {}
+    kev_map = {}
+    if resolved_cves:
+        cve_list = list(resolved_cves)
+        chunk_size = 500
+        for i in range(0, len(cve_list), chunk_size):
+            chunk = cve_list[i:i + chunk_size]
+            placeholders = ",".join(["?"] * len(chunk))
+
+            cursor.execute(f"SELECT cve_id, epss_score, percentile FROM epss_scores WHERE cve_id IN ({placeholders})", chunk)
+            for cve_id, score, pct in cursor.fetchall():
+                epss_map[cve_id] = (score, pct)
+
+            cursor.execute(f"SELECT cve_id, date_added, due_date, known_ransomware_use FROM kev_catalog WHERE cve_id IN ({placeholders})", chunk)
+            for cve_id, date_added, due_date, ransom in cursor.fetchall():
+                kev_map[cve_id] = (date_added, due_date, ransom)
+
+    conn.close()
+
+    for rec in enriched:
+        cve_id = rec["cve_id"]
+        epss_score, epss_pct = epss_map.get(cve_id, (None, None)) if cve_id else (None, None)
+        kev_added, kev_due, kev_ransom = kev_map.get(cve_id, (None, None, None)) if cve_id else (None, None, None)
+        rec["epss_score"] = epss_score
+        rec["epss_percentile"] = epss_pct
+        rec["kev_date_added"] = kev_added
+        rec["kev_due_date"] = kev_due
+        rec["kev_known_ransomware_use"] = kev_ransom
+
+    # Sort in Python (KEV hit desc, EPSS desc, CVSS desc, blast_radius desc,
+    # advisory_id asc) -- can no longer be a pure SQL ORDER BY now that CVE
+    # resolution includes the id-pattern fallback.
+    enriched.sort(key=lambda r: (
+        0 if r["kev_date_added"] else 1,
+        -(r["epss_score"] or 0.0),
+        -(r["cvss_score"] or 0.0),
+        -(r["blast_radius"] or 0.0),
+        r["advisory_id"] or "",
+    ))
+
+    total_rows = len(enriched)
+    kev_hits = sum(1 for r in enriched if r["kev_date_added"])
+    id_pattern_resolved = sum(1 for r in enriched if r["cve_source"] == "id-pattern")
+
+    print("\n" + "="*140)
+    print(f"   {BOLD}SUPPLY CHAIN THREAT INTEL CROSS-CHECK: KEV -> EPSS -> OSV/CVSS PRIORITY DISPATCH LIST{RESET}")
+    print(f"   Window: {start_str} to {end_str}  |  Registries: {', '.join(registries)}")
+    print("="*140)
+
+    if not enriched:
+        print("    [+] Zero advisories matched this window/registry scope. Nothing to dispatch.")
+        print("="*140 + "\n")
+        return
+
+    print(f"{'Advisory ID':<20} | {'CVE ID':<16} | {'CWE ID(s)':<20} | {'Package':<28} | {'Ecosystems':<14} | {'CVSS':<5} | {'EPSS':<7} | {'KEV Status'}")
+    print("-"*140)
+
+    display_rows = enriched if console_limit is None or console_limit <= 0 else enriched[:console_limit]
+
+    def _fit(value, width):
+        """Truncates a display value to fit its fixed-width table column,
+        adding an ellipsis marker when truncated, so a single overlong field
+        (namely ROOT-APP-* synthetic advisory IDs, which can run 24-38+
+        chars vs a normal 19-char GHSA-xxxx-xxxx-xxxx ID) can never push
+        every '|' after it out of alignment with the header row."""
+        s = str(value) if value is not None else ""
+        if len(s) <= width:
+            return s
+        if width <= 1:
+            return s[:width]
+        return s[:width - 1] + "\u2026"
+
+    for rec in display_rows:
+        cwe_list = json.loads(rec["cwe_json"]) if rec["cwe_json"] else []
+        cwe_display = _fit(", ".join(cwe_list) if cwe_list else "N/A", 20)
+        ecos_list = json.loads(rec["ecosystems_json"]) if rec["ecosystems_json"] else []
+        ecos_display = _fit(", ".join(ecos_list), 14)
+
+        cvss = rec["cvss_score"]
+        cvss_display = f"{cvss:.1f}" if cvss else "N/A"
+        epss_score = rec["epss_score"]
+        epss_display = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
+        pkg_display = _fit(rec["package_name"] if rec["package_name"] else "N/A", 28)
+        advisory_id_display = _fit(rec["advisory_id"], 20)
+
+        cve_display = rec["cve_id"] or "N/A"
+        if rec["cve_source"] == "id-pattern":
+            cve_display = f"{cve_display}*"
+        cve_display = _fit(cve_display, 16)
+
+        if rec["kev_date_added"]:
+            kev_hits_flag = " [RANSOMWARE]" if rec["kev_known_ransomware_use"] == "Known" else ""
+            kev_display = f"{RED}KEV Due: {rec['kev_due_date'] or 'N/A'}{kev_hits_flag}{RESET}"
+        else:
+            kev_display = "-"
+
+        print(f"{advisory_id_display:<20} | {cve_display:<16} | {cwe_display:<20} | {pkg_display:<28} | {ecos_display:<14} | {cvss_display:<5} | {epss_display:<7} | {kev_display}")
+
+    print("-"*140)
+    if len(display_rows) < total_rows:
+        print(f"[!] Console capped at {len(display_rows):,} of {total_rows:,} rows (--crosscheck-limit). Use --crosscheck-export for the full list.")
+    if id_pattern_resolved:
+        print(f"[*] {id_pattern_resolved:,} row(s) marked '*' resolved their CVE from advisory_id text (no cve_alias on record).")
+    print(f"-> Total Advisories: {total_rows:,}  |  KEV-Confirmed Exploited: {kev_hits:,}")
+    print("="*140 + "\n")
+
+    if export_path:
+        if not isinstance(export_path, str):
+            output_dir = "output"
+            os.makedirs(output_dir, exist_ok=True)
+            export_path = os.path.join(output_dir, f"supply_chain_crosscheck_{end_date.strftime('%Y-%m-%d')}.json")
+
+        export_records = []
+        for rec in enriched:
+            export_records.append({
+                "advisory_id": rec["advisory_id"],
+                "cve_id": rec["cve_id"] or "N/A",
+                "cve_id_source": rec["cve_source"],
+                "cwe_ids": json.loads(rec["cwe_json"]) if rec["cwe_json"] else [],
+                "package_name": rec["package_name"],
+                "ecosystems": json.loads(rec["ecosystems_json"]) if rec["ecosystems_json"] else [],
+                "cvss_score": rec["cvss_score"],
+                "blast_radius": rec["blast_radius"],
+                "epss_score": rec["epss_score"],
+                "epss_percentile": rec["epss_percentile"],
+                "kev_date_added": rec["kev_date_added"],
+                "kev_due_date": rec["kev_due_date"],
+                "kev_known_ransomware_use": rec["kev_known_ransomware_use"]
+            })
+
+        payload = {
+            "metadata": {
+                "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "interval_from": start_str,
+                "interval_to": end_str,
+                "registries": registries,
+                "total_advisories": total_rows,
+                "kev_confirmed_count": kev_hits,
+                "cve_resolved_from_id_pattern_count": id_pattern_resolved,
+                "console_limit_applied": console_limit if console_limit and console_limit > 0 else None
+            },
+            "dispatch_list": export_records
+        }
+
+        with open(export_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        print(f"{GREEN}[+] Cross-check dispatch list exported to: {export_path} ({total_rows:,} rows, uncapped){RESET}")
+
 # =====================================================================
 # CORE ENGINE COMMAND ORCHESTRATION LAYER
 # =====================================================================
@@ -2117,6 +2356,9 @@ def main():
     parser.add_argument("--hunt-retracted", action="store_true", help="Execute an advanced research hunt for suspicious retracted advisories.")
     parser.add_argument("--trends", action="store_true", help="Activate chronological trend and mutation velocity analysis.")
     parser.add_argument("--window-days", type=int, default=30, help="Telescoping trend evaluation window constraint (Defaults to 30 days).")
+    parser.add_argument("--crosscheck", action="store_true", help="Generate the KEV -> EPSS -> OSV/CVSS prioritized developer dispatch list.")
+    parser.add_argument("--crosscheck-export", nargs='?', const=True, default=False, metavar="PATH", help="Export the cross-check dispatch list as JSON (optionally provide a path). Always exports the FULL list, uncapped.")
+    parser.add_argument("--crosscheck-limit", type=int, default=100, metavar="N", help="Cap console output to the top N rows (default 100). Use 0 for no cap. Never affects --crosscheck-export.")
     args = parser.parse_args()
     
     if args.hunt_retracted:
@@ -2207,7 +2449,51 @@ def main():
                 manifest_rows=cached_manifest_rows
             )
         return
-    
+
+    # =========================================================================
+    # FEATURE ROUTING LAYER: KEV/EPSS/OSV SUPPLY CHAIN CROSS-CHECK DISPATCH LIST
+    # =========================================================================
+    if args.crosscheck:
+        if not args.database:
+            parser.error("[!] The --crosscheck engine requires the --database relational warehouse active.")
+
+        if not target_registries:
+            print(f"\n{BOLD}{RED}[!] CONFIGURATION ERROR: --crosscheck requires an explicit --registry filter.{RESET}")
+            print(f"    -> Usage: python top10ecosystems.py --database --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17\n")
+            sys.exit(1)
+
+        if args.to:
+            date_str = args.to[0]
+            parsed_date = None
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                try:
+                    parsed_date = datetime.datetime.strptime(date_str, fmt).date()
+                    break
+                except ValueError: continue
+            if not parsed_date:
+                print(f"{RED}[-] Invalid --to date format string provided.{RESET}")
+                sys.exit(1)
+            end_window_dt = datetime.datetime.combine(parsed_date, datetime.time.max, tzinfo=datetime.timezone.utc)
+        else:
+            end_window_dt = now_utc
+
+        if args.from_date:
+            start_window_dt = datetime.datetime.combine(datetime.date.fromisoformat(args.from_date), datetime.time.min, tzinfo=datetime.timezone.utc)
+        elif args.days:
+            start_window_dt = end_window_dt - datetime.timedelta(days=args.days)
+        else:
+            start_window_dt = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
+
+        generate_supply_chain_crosscheck(
+            db_path="database/threat_stream.db",
+            start_date=start_window_dt,
+            end_date=end_window_dt,
+            registries=target_registries,
+            export_path=args.crosscheck_export,
+            console_limit=args.crosscheck_limit
+        )
+        return
+
     if args.database:
         global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries)
     else:

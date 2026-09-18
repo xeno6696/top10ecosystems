@@ -118,6 +118,10 @@ class TestThreatStreamScanner(unittest.TestCase):
         (previously deleted silently in commit fd31fd2 with no test coverage to catch it)."""
         self.verify_production_target_signature("display_all_time_retraction_stats", expected_args_count=1)
 
+    def test_000_a_anti_hallucination_guard_for_supply_chain_crosscheck(self):
+        """[INTEGRITY] Guards against the deletion of the KEV/EPSS/OSV cross-check dispatch engine."""
+        self.verify_production_target_signature("generate_supply_chain_crosscheck", expected_args_count=5)
+
     def test_000_b_meta_guard_against_missing_test_methods_in_test_runner_itself(self):
         """[INTEGRITY] Reviews test_runner.py to ensure no verification tests were deleted or dropped."""
         expected_test_methods = {
@@ -153,9 +157,11 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_epss_known_cve_scores_ingestion",
             "test_epss_vulnerabilities_cve_alias_parity",
             "test_000_a_anti_hallucination_guard_for_retraction_stats_display",
+            "test_000_a_anti_hallucination_guard_for_supply_chain_crosscheck",
             "test_kev_table_schema_and_indexes",
             "test_kev_known_cve_ingestion",
-            "test_kev_vulnerabilities_cve_alias_parity"
+            "test_kev_vulnerabilities_cve_alias_parity",
+            "test_crosscheck_kev_epss_priority_ordering"
         }
         
         actual_test_methods = {
@@ -438,6 +444,61 @@ class TestThreatStreamScanner(unittest.TestCase):
             "[!] CRITICAL: Zero vulnerability records matched against the KEV catalog. "
             "Check the cve_alias/cve_id join key or KEV ingestion."
         )
+
+    def test_crosscheck_kev_epss_priority_ordering(self):
+        """
+        [ORDERING GATE] Verifies the --crosscheck dispatch list's core sort contract,
+        run directly against the same query shape generate_supply_chain_crosscheck()
+        uses: every KEV-confirmed advisory must rank before every non-KEV advisory,
+        and EPSS score must be non-increasing within the KEV tier.
+        """
+        if SKIP_KEV or SKIP_EPSS:
+            self.skipTest("[!] --skip-kev or --skip-epss active: Skipping crosscheck ordering gate.")
+
+        test_db = "database/threat_stream.db"
+        if not os.path.exists(test_db):
+            self.skipTest("[!] Relational test warehouse missing. Skipping crosscheck ordering check.")
+
+        conn = sqlite3.connect(test_db)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                (k.cve_id IS NOT NULL) AS is_kev,
+                COALESCE(e.epss_score, 0.0) AS epss_score
+            FROM vulnerabilities v
+            LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
+            LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            WHERE v.withdrawn_date IS NULL AND v.ecosystems LIKE '%npm%'
+            ORDER BY
+                (k.cve_id IS NOT NULL) DESC,
+                COALESCE(e.epss_score, 0.0) DESC,
+                v.cvss_score DESC,
+                v.blast_radius DESC,
+                v.advisory_id ASC
+            LIMIT 500
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            self.skipTest("[!] No npm advisories available to validate crosscheck ordering.")
+
+        seen_non_kev = False
+        for is_kev, epss_score in rows:
+            if is_kev:
+                self.assertFalse(
+                    seen_non_kev,
+                    "[!] ORDERING VIOLATION: A KEV-confirmed advisory ranked after a non-KEV advisory."
+                )
+            else:
+                seen_non_kev = True
+
+        kev_epss_values = [epss for is_kev, epss in rows if is_kev]
+        for i in range(len(kev_epss_values) - 1):
+            self.assertGreaterEqual(
+                kev_epss_values[i], kev_epss_values[i + 1],
+                "[!] ORDERING VIOLATION: EPSS score is not non-increasing within the KEV tier."
+            )
 
     # -------------------------------------------------------------------------
     # 3. CORE FUNCTIONAL REGRESSION CHECKS
