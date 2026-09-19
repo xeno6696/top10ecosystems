@@ -1,9 +1,10 @@
 {
     "metadata": {
-        "generated_at": "2026-09-17T23:18:43.218507+00:00",
+        "generated_at": "2026-09-19T19:33:22.310268+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-20",
-        "target_layer_filter": "app"
+        "target_layer_filter": "app",
+        "priority_sort_active": false
     },
     "leaderboard": {
         "npm": 2268,
@@ -22,17 +23,17 @@
     "threat_profile": {
         "Malware (New Entry)": 1830,
         "Malware (Incremental Update)": 17,
-        "Vulnerability Fix (New Entry)": 264,
-        "Vulnerability Fix (Update)": 2433,
+        "Vulnerability Fix (New Entry)": 266,
+        "Vulnerability Fix (Update)": 2431,
         "Metadata Correction / Adjustments": 356,
         "Withdrawn / Retracted Advisory": 117
     },
     "layer_profile_matrix": {
         "App Software Registry": {
             "Malware (New Entry)": 1830,
-            "Vulnerability Fix (Update)": 2433,
+            "Vulnerability Fix (Update)": 2431,
             "Metadata Correction / Adjustments": 356,
-            "Vulnerability Fix (New Entry)": 264,
+            "Vulnerability Fix (New Entry)": 266,
             "Malware (Incremental Update)": 17,
             "Withdrawn / Retracted Advisory": 117
         }
@@ -79,7 +80,7 @@
     "profile_matrix": {
         "npm": {
             "avg_dwell_mal": 35.69902280130293,
-            "avg_dwell_cve": 81.12960436562074,
+            "avg_dwell_cve": 81.30968622100956,
             "avg_blast_radius": 1.9303350970017636,
             "avg_backlog_age": 332.0
         },
@@ -91,7 +92,7 @@
         },
         "Go (Golang)": {
             "avg_dwell_mal": 9.0,
-            "avg_dwell_cve": 150.13440860215053,
+            "avg_dwell_cve": 150.13799283154123,
             "avg_blast_radius": 0.4727592267135325,
             "avg_backlog_age": 0.0
         },
@@ -109,7 +110,7 @@
         },
         "Crates.io": {
             "avg_dwell_mal": 87.0,
-            "avg_dwell_cve": 167.64976958525347,
+            "avg_dwell_cve": 167.9815668202765,
             "avg_blast_radius": 0.32286995515695066,
             "avg_backlog_age": 0.0
         },

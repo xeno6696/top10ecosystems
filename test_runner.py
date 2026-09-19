@@ -185,7 +185,19 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_velocity_snapshot_dedup_prefers_default_over_priority_sort",
             "test_velocity_filename_no_clobber_between_default_and_priority_sort",
             "test_registry_filter_applies_to_raw_leaderboard_counting_pass",
-            "test_priority_sort_flag_wired_to_main_execution_path"
+            "test_priority_sort_flag_wired_to_main_execution_path",
+            "test_000_a_anti_hallucination_guard_for_repo_anchor_extractor",
+            "test_000_a_anti_hallucination_guard_for_cross_registry_pair_classifier",
+            "test_000_a_anti_hallucination_guard_for_cross_registry_advisory_classifier",
+            "test_000_a_anti_hallucination_guard_for_cross_registry_ranker",
+            "test_cross_registry_webjars_purl_forces_repackaged",
+            "test_cross_registry_repo_anchor_recognizes_native_release",
+            "test_cross_registry_exact_name_match_without_wrapping_is_cross_compiled",
+            "test_cross_registry_substring_wrap_is_repackaged",
+            "test_cross_registry_unrelated_names_return_none",
+            "test_cross_registry_advisory_can_land_in_both_tables",
+            "test_rank_cross_registry_tables_filters_single_ecosystem_advisories",
+            "test_rank_cross_registry_tables_ranks_by_ecosystem_span_then_cvss"
         }
         
         actual_test_methods = {
@@ -590,25 +602,41 @@ class TestThreatStreamScanner(unittest.TestCase):
                     f"Console reported '{console_vcount:,}' while Export contains '{json_vcount:,}'."
                 )
 
-        # 6. PARITY GATE C: Validate Section VIII Cross-Compiled Hardware Matrix counts
-        section_viii_header = "VIII. HARDWARE ARCHITECTURE COMPILATION"
-        if section_viii_header in stdout_capture:
-            section_viii_zone = stdout_capture.split(section_viii_header)[1]
-        else:
-            section_viii_zone = stdout_capture
+        # 6. PARITY GATE C: The legacy "intel_architecture_matrix" export key is retained
+        # unchanged for --velocity trend-diff backward compatibility (see
+        # "VIII. HARDWARE ARCHITECTURE COMPILATION MATRIX VARIANCE ANALYSIS" in the --velocity
+        # report), even though it is no longer rendered in the main dashboard's console output --
+        # Section VIII there was replaced with the two cross-registry tables below. So this gate
+        # now only confirms the export key itself survived, not a console/export text comparison.
+        self.assertIn(
+            "intel_architecture_matrix", export_payload,
+            "[!] REGRESSION: 'intel_architecture_matrix' export key vanished -- this would break "
+            "--velocity trend-diff parity against any snapshot exported before Section VIII's "
+            "cross-registry rework."
+        )
 
-        for eco_source, json_metrics in export_payload.get("intel_architecture_matrix", {}).items():
-            escaped_source = re.escape(eco_source)
-            intel_regex = re.compile(rf"{escaped_source}\s*\|\s*([0-9,]+)\s*\|")
-            
-            match = intel_regex.search(section_viii_zone)
-            if match:
-                console_intel_total = int(match.group(1).replace(",", ""))
-                json_intel_total = json_metrics.get("total", 0)
-                self.assertEqual(
-                    console_intel_total, json_intel_total,
-                    f"[!] TELEMETRY PARITY DRIFT: Section VIII Intel total mismatch for '{eco_source}'. "
-                    f"Console reported '{console_intel_total:,}' while Export contains '{json_intel_total:,}'."
+        # 7. PARITY GATE D: Section VIII cross-registry tables render with the expected headers
+        # and every listed advisory legitimately spans >= 2 registries (structural sanity -- the
+        # specific classification results are covered by test_cross_registry_classification_*).
+        self.assertIn("VIII-A. TRUE CROSS-COMPILED ADVISORIES", stdout_capture)
+        self.assertIn("VIII-B. REPACKAGED-AS-IS ADVISORIES", stdout_capture)
+
+        for header in ("VIII-A. TRUE CROSS-COMPILED ADVISORIES", "VIII-B. REPACKAGED-AS-IS ADVISORIES"):
+            # Table layout is "="*125 / header / "="*125 / rows.../ "="*125 -- split on header
+            # first, then skip the immediate closing divider line to reach the row data between
+            # the second and third "="*125 lines.
+            after_header = stdout_capture.split(header)[1]
+            divider_parts = after_header.split("=" * 125)
+            zone = divider_parts[1] if len(divider_parts) > 1 else ""
+            if "Zero advisories" in zone:
+                continue
+            for row_match in re.finditer(r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(\d+)\s*\|", zone, re.MULTILINE):
+                registry_count = int(row_match.group(2))
+                self.assertGreaterEqual(
+                    registry_count, 2,
+                    f"[!] REGRESSION: Section VIII table listed '{row_match.group(0).strip()}' spanning "
+                    f"fewer than 2 registries -- rank_cross_registry_tables() should only ever surface "
+                    f"advisories with >= 2 distinct package_names_by_ecosystem entries."
                 )
 
     def run_scanner_with_args(self, mock_args):
@@ -794,6 +822,142 @@ class TestThreatStreamScanner(unittest.TestCase):
         vuln_data = {"id": "CVE-2026-0000", "severity": []}
         score = top10ecosystems.extract_cvss_score(vuln_data)
         self.assertEqual(score, 0.0)
+
+    # -------------------------------------------------------------------------
+    # UNIT TESTS: SECTION VIII CROSS-REGISTRY CLASSIFICATION
+    # (replaces the old "HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX" -- see
+    # rank_cross_registry_tables / classify_advisory_cross_registry / classify_cross_registry_pair
+    # / extract_repo_anchor in top10ecosystems.py)
+    # -------------------------------------------------------------------------
+    def test_000_a_anti_hallucination_guard_for_repo_anchor_extractor(self):
+        """[INTEGRITY] Guards against the deletion of the cross-registry repo-identity extractor."""
+        self.verify_production_target_signature("extract_repo_anchor", expected_args_count=1)
+
+    def test_000_a_anti_hallucination_guard_for_cross_registry_pair_classifier(self):
+        """[INTEGRITY] Guards against the deletion of the pairwise cross-registry classifier."""
+        self.verify_production_target_signature("classify_cross_registry_pair", expected_args_count=5)
+
+    def test_000_a_anti_hallucination_guard_for_cross_registry_advisory_classifier(self):
+        """[INTEGRITY] Guards against the deletion of the whole-advisory cross-registry classifier."""
+        self.verify_production_target_signature("classify_advisory_cross_registry", expected_args_count=3)
+
+    def test_000_a_anti_hallucination_guard_for_cross_registry_ranker(self):
+        """[INTEGRITY] Guards against the deletion of the Section VIII table ranking engine."""
+        self.verify_production_target_signature("rank_cross_registry_tables", expected_args_count=3)
+
+    def test_cross_registry_webjars_purl_forces_repackaged(self):
+        """[REGRESSION] A Maven 'org.webjars' purl on either side must always classify as
+        'repackaged', even when the names would otherwise look like an exact cross-compiled
+        match -- webjars mechanically wraps the JS package byte-identically under Maven
+        coordinates, it never represents an independent native Maven release."""
+        verdict = top10ecosystems.classify_cross_registry_pair(
+            "dset", "pkg:npm/dset",
+            "dset", "pkg:maven/org.webjars.npm/dset",
+            None
+        )
+        self.assertEqual(verdict, "repackaged")
+
+    def test_cross_registry_repo_anchor_recognizes_native_release(self):
+        """[REGRESSION] Two dissimilar names that both trace back to the same GitHub repo anchor
+        (e.g. 'pyspark' and 'org.apache.spark:spark-core_2.12', both anchored to apache/spark)
+        must classify as 'cross_compiled', not fall through to the substring/no-match branches."""
+        verdict = top10ecosystems.classify_cross_registry_pair(
+            "org.apache.spark:spark-core_2.12", "pkg:maven/org.apache.spark/spark-core_2.12",
+            "pyspark", "pkg:pypi/pyspark",
+            "apache/spark"
+        )
+        self.assertEqual(verdict, "cross_compiled")
+
+    def test_cross_registry_exact_name_match_without_wrapping_is_cross_compiled(self):
+        """[REGRESSION] Identical normalized names across ecosystems with no webjars/repo-anchor
+        evidence either way should read as parallel native releases (cross_compiled), not as
+        one repackaging the other."""
+        verdict = top10ecosystems.classify_cross_registry_pair(
+            "bootstrap", "pkg:npm/bootstrap",
+            "Bootstrap", "pkg:nuget/Bootstrap",
+            None
+        )
+        self.assertEqual(verdict, "cross_compiled")
+
+    def test_cross_registry_substring_wrap_is_repackaged(self):
+        """[REGRESSION] A decorated/prefixed name that contains another entry's name in full
+        (e.g. Debian-style 'python3-jinja2' wrapping 'jinja2') should read as repackaged."""
+        verdict = top10ecosystems.classify_cross_registry_pair(
+            "jinja2", "pkg:pypi/jinja2",
+            "python3-jinja2", "",
+            None
+        )
+        self.assertEqual(verdict, "repackaged")
+
+    def test_cross_registry_unrelated_names_return_none(self):
+        """[REGRESSION] Two genuinely unrelated package names with no repo-anchor evidence must
+        not be forced into either bucket."""
+        verdict = top10ecosystems.classify_cross_registry_pair(
+            "left-pad", "pkg:npm/left-pad",
+            "django", "pkg:pypi/django",
+            None
+        )
+        self.assertIsNone(verdict)
+
+    def test_cross_registry_advisory_can_land_in_both_tables(self):
+        """[REGRESSION] An advisory can legitimately exhibit BOTH patterns across different
+        ecosystem pairs (e.g. Bootstrap: natively ported to npm/NuGet/RubyGems AND separately
+        vendored into Maven via webjars) -- classify_advisory_cross_registry must report both
+        booleans independently rather than forcing a single verdict per advisory."""
+        names_by_eco = {
+            "npm": ["bootstrap"],
+            "NuGet": ["bootstrap"],
+            "Maven (Java)": ["org.webjars:bootstrap"],
+        }
+        purls_by_eco = {
+            "npm": ["pkg:npm/bootstrap"],
+            "NuGet": ["pkg:nuget/bootstrap"],
+            "Maven (Java)": ["pkg:maven/org.webjars/bootstrap"],
+        }
+        is_cross_compiled, is_repackaged = top10ecosystems.classify_advisory_cross_registry(
+            names_by_eco, purls_by_eco, None
+        )
+        self.assertTrue(is_cross_compiled)
+        self.assertTrue(is_repackaged)
+
+    def test_rank_cross_registry_tables_filters_single_ecosystem_advisories(self):
+        """[REGRESSION] An advisory touching only one ecosystem can never be 'cross-registry' by
+        definition -- rank_cross_registry_tables must exclude it even if present in ghsa_lookup
+        and session_advisory_ids."""
+        ghsa_lookup = {
+            "GHSA-single-eco": {
+                "cvss_score": 9.0,
+                "package_names_by_ecosystem": {"npm": ["solo-package"]},
+                "purls_by_ecosystem": {"npm": ["pkg:npm/solo-package"]},
+                "repo_anchor": None,
+            }
+        }
+        table_a, table_b = top10ecosystems.rank_cross_registry_tables(ghsa_lookup, {"GHSA-single-eco"})
+        self.assertEqual(table_a, [])
+        self.assertEqual(table_b, [])
+
+    def test_rank_cross_registry_tables_ranks_by_ecosystem_span_then_cvss(self):
+        """[REGRESSION] Ranking order must be ecosystem span (desc) first, CVSS (desc) as the
+        tiebreaker -- a 2-registry advisory with a higher CVSS must NOT outrank a 3-registry
+        advisory with a lower CVSS."""
+        ghsa_lookup = {
+            "GHSA-two-eco-high-cvss": {
+                "cvss_score": 9.9,
+                "package_names_by_ecosystem": {"npm": ["pkg-a"], "PyPI": ["pkg-a"]},
+                "purls_by_ecosystem": {"npm": ["pkg:npm/pkg-a"], "PyPI": ["pkg:pypi/pkg-a"]},
+                "repo_anchor": None,
+            },
+            "GHSA-three-eco-low-cvss": {
+                "cvss_score": 4.0,
+                "package_names_by_ecosystem": {"npm": ["pkg-b"], "PyPI": ["pkg-b"], "NuGet": ["pkg-b"]},
+                "purls_by_ecosystem": {"npm": ["pkg:npm/pkg-b"], "PyPI": ["pkg:pypi/pkg-b"], "NuGet": ["pkg:nuget/pkg-b"]},
+                "repo_anchor": None,
+            },
+        }
+        session_ids = {"GHSA-two-eco-high-cvss", "GHSA-three-eco-low-cvss"}
+        table_a, _ = top10ecosystems.rank_cross_registry_tables(ghsa_lookup, session_ids)
+        self.assertEqual(table_a[0][0], "GHSA-three-eco-low-cvss")
+        self.assertEqual(table_a[1][0], "GHSA-two-eco-high-cvss")
 
     # -------------------------------------------------------------------------
     # UNIT TESTS: ARTIFACT LAYER ROUTING

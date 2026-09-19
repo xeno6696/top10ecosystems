@@ -94,6 +94,194 @@ def extract_cvss_score(vuln_data):
     return 0.0
 
 
+# Cross-registry product-identity signal: matches "github.com/OWNER/REPO" wherever it shows up,
+# either in an advisory's own reference links or embedded directly in a Go-ecosystem purl
+# (pkg:golang/github.com/OWNER/REPO...). Mirrors db_warehouse.py's own copy of this constant/
+# helper (the two modules don't import each other, matching the existing extract_cvss_score /
+# extract_production_cvss split), used by extract_repo_anchor() below for the ZIP-fallback
+# ingestion path in build_ghsa_ecosystem_map().
+GITHUB_REPO_URL_REGEX = re.compile(r'github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)', re.IGNORECASE)
+_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github"}
+
+# Namespace prefixes that mark a MECHANICAL, unmodified repackaging of another ecosystem's
+# artifact -- not a native release. Maven's "webjars" project is the textbook example: it wraps
+# npm/Bower JS libraries into Maven coordinates verbatim, byte-identical code, different registry.
+# This is the same pattern the user described for RHEL/Debian OS-vendor repackaging.
+_REPACKAGE_PURL_NAMESPACES = ("pkg:maven/org.webjars",)
+
+
+def extract_repo_anchor(vuln_data):
+    """Derives a canonical 'owner/repo' identity string for an advisory (see db_warehouse.py's
+    identical helper for the full rationale). Used by the Section VIII cross-registry
+    classification to recognize a genuinely multi-ecosystem NATIVE release of the same upstream
+    project, as distinct from one ecosystem mechanically vendoring another's code as-is."""
+    candidates = Counter()
+
+    for ref in vuln_data.get("references", []):
+        url = ref.get("url", "") or ""
+        m = GITHUB_REPO_URL_REGEX.search(url)
+        if m:
+            owner, repo = m.group(1).lower(), re.sub(r'\.git$', '', m.group(2), flags=re.IGNORECASE).lower()
+            if repo in _GITHUB_REPO_ANCHOR_SKIP:
+                continue
+            candidates[f"{owner}/{repo}"] += 1
+
+    for affected in vuln_data.get("affected", []):
+        purl = affected.get("package", {}).get("purl", "") or ""
+        m = GITHUB_REPO_URL_REGEX.search(purl)
+        if m:
+            owner, repo = m.group(1).lower(), re.sub(r'\.git$', '', m.group(2), flags=re.IGNORECASE).lower()
+            if repo in _GITHUB_REPO_ANCHOR_SKIP:
+                continue
+            candidates[f"{owner}/{repo}"] += 2
+
+    if not candidates:
+        return None
+    return candidates.most_common(1)[0][0]
+
+
+def normalize_package_token(name: str) -> str:
+    """Strips punctuation/casing so the same underlying product name can be recognized across
+    ecosystem naming conventions (e.g. 'org.apache.spark:spark-core_2.12' vs 'pyspark')."""
+    if not name:
+        return ""
+    return re.sub(r'[^a-z0-9]+', '', name.strip().lower())
+
+
+# Confidence ranking for the signals classify_cross_registry_pair() can fire on -- only the
+# webjars-style namespace check is an explicit, known convention; everything else is a naming
+# heuristic that can misfire on coincidence, so callers that render this to a human (Section VIII)
+# should say so rather than presenting every verdict as equally certain. Higher = more trustworthy.
+_CROSS_REGISTRY_CONFIDENCE_RANK = {"confirmed": 3, "high": 2, "medium": 1, "low": 0}
+
+_CROSS_REGISTRY_SIGNAL_LABELS = {
+    "known-repackaging-namespace": "known repackaging convention (e.g. Maven webjars)",
+    "shared-upstream-repo": "both trace to the same upstream repo",
+    "exact-name-match": "identical name, no other corroborating evidence",
+    "name-substring-wrap": "one name wraps the other",
+}
+
+
+def _classify_cross_registry_pair_detailed(name_a: str, purl_a: str, name_b: str, purl_b: str, repo_anchor: str):
+    """Does the actual classification work for classify_cross_registry_pair() (see that function
+    for the rule-by-rule rationale), additionally returning a confidence tier and a short signal
+    tag so callers can be honest about how much to trust the verdict instead of asserting it as
+    fact. Returns (verdict, confidence, signal) -- all three None when unrelated/no match."""
+    if any((purl_a or "").startswith(p) or (purl_b or "").startswith(p) for p in _REPACKAGE_PURL_NAMESPACES):
+        return "repackaged", "confirmed", "known-repackaging-namespace"
+
+    norm_a, norm_b = normalize_package_token(name_a), normalize_package_token(name_b)
+    if not norm_a or not norm_b:
+        return None, None, None
+
+    if repo_anchor:
+        owner, _, repo = repo_anchor.partition("/")
+        owner_tok, repo_tok = normalize_package_token(owner), normalize_package_token(repo)
+        for tok in (repo_tok, owner_tok):
+            if tok and len(tok) >= 3 and tok in norm_a and tok in norm_b:
+                return "cross_compiled", "high", "shared-upstream-repo"
+
+    if norm_a == norm_b:
+        # Weakest signal in the set: two identical short names could just as easily be an
+        # unrelated coincidence (a generic word like "core" or "utils") as a genuine parallel
+        # native release, and we have no corroborating repo/namespace evidence either way.
+        return "cross_compiled", "low", "exact-name-match"
+
+    if norm_a in norm_b or norm_b in norm_a:
+        return "repackaged", "medium", "name-substring-wrap"
+
+    return None, None, None
+
+
+def classify_cross_registry_pair(name_a: str, purl_a: str, name_b: str, purl_b: str, repo_anchor: str):
+    """Classifies a pair of same-advisory, different-ecosystem package identities as either a
+    genuinely 'cross-compiled' native release of the same project, or a mechanical repackaging
+    of one into the other. Returns 'cross_compiled', 'repackaged', or None (unrelated/no
+    recognizable relationship). Method order matches the agreed design: try the repo-identity
+    cross-reference first (purl/reference-derived), fall back to normalized name matching.
+
+    1. Maven webjars namespace on either side -> always 'repackaged' (mechanical, unambiguous;
+       checked first so an incidentally-matching name/repo token doesn't override it).
+    2. Both normalized names contain the repo_anchor's owner or repo token -> 'cross_compiled'
+       (both trace back to the same canonical upstream project; a strong, explicit signal).
+    3. Exact normalized-name match with no wrapping evidence -> 'cross_compiled' (parallel
+       identical-name releases, e.g. the same 'bootstrap' name ported to several registries).
+    4. One normalized name is a proper substring of the other -> 'repackaged' (a decorated/
+       prefixed/suffixed wrap of the shorter core name -- 'bootstrap-sass' wraps 'bootstrap',
+       'python3-jinja2' wraps 'jinja2').
+    5. Otherwise -> None.
+
+    See _classify_cross_registry_pair_detailed() for the confidence-tagged version of this same
+    logic, used by Section VIII's rendering so low-confidence verdicts (rule 3) aren't shown with
+    the same certainty as confirmed ones (rule 1).
+    """
+    return _classify_cross_registry_pair_detailed(name_a, purl_a, name_b, purl_b, repo_anchor)[0]
+
+
+def classify_advisory_cross_registry(package_names_by_ecosystem: dict, purls_by_ecosystem: dict, repo_anchor: str):
+    """Given one advisory's per-ecosystem package names/purls, returns (is_cross_compiled,
+    is_repackaged) booleans -- an advisory can exhibit both patterns across different ecosystem
+    pairs (e.g. bootstrap: natively ported to several registries AND separately repackaged into
+    Maven via webjars), so this reports both rather than forcing a single verdict per advisory."""
+    ecosystems = sorted(package_names_by_ecosystem.keys())
+    found_cross_compiled = False
+    found_repackaged = False
+
+    for i in range(len(ecosystems)):
+        for j in range(i + 1, len(ecosystems)):
+            eco_a, eco_b = ecosystems[i], ecosystems[j]
+            names_a = package_names_by_ecosystem.get(eco_a) or []
+            names_b = package_names_by_ecosystem.get(eco_b) or []
+            purls_a = (purls_by_ecosystem or {}).get(eco_a) or []
+            purls_b = (purls_by_ecosystem or {}).get(eco_b) or []
+            for na in names_a:
+                for nb in names_b:
+                    pa = purls_a[0] if purls_a else ""
+                    pb = purls_b[0] if purls_b else ""
+                    verdict = classify_cross_registry_pair(na, pa, nb, pb, repo_anchor)
+                    if verdict == "cross_compiled": found_cross_compiled = True
+                    elif verdict == "repackaged": found_repackaged = True
+
+    return found_cross_compiled, found_repackaged
+
+
+def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, purls_by_ecosystem: dict, repo_anchor: str):
+    """Like classify_advisory_cross_registry(), but instead of plain booleans returns the
+    strongest piece of evidence found for each verdict, so Section VIII can show a reader WHICH
+    ecosystem pair and WHICH signal drove a classification instead of asserting it with false
+    certainty. Returns (cross_compiled_evidence, repackaged_evidence); each is either None (no
+    matching pair found) or a dict: {eco_a, eco_b, name_a, name_b, confidence, signal}. When
+    multiple pairs support the same verdict, the highest-confidence one wins."""
+    ecosystems = sorted(package_names_by_ecosystem.keys())
+    best_cross_compiled = None
+    best_repackaged = None
+
+    for i in range(len(ecosystems)):
+        for j in range(i + 1, len(ecosystems)):
+            eco_a, eco_b = ecosystems[i], ecosystems[j]
+            names_a = package_names_by_ecosystem.get(eco_a) or []
+            names_b = package_names_by_ecosystem.get(eco_b) or []
+            purls_a = (purls_by_ecosystem or {}).get(eco_a) or []
+            purls_b = (purls_by_ecosystem or {}).get(eco_b) or []
+            for na in names_a:
+                for nb in names_b:
+                    pa = purls_a[0] if purls_a else ""
+                    pb = purls_b[0] if purls_b else ""
+                    verdict, confidence, signal = _classify_cross_registry_pair_detailed(na, pa, nb, pb, repo_anchor)
+                    if verdict is None:
+                        continue
+                    entry = {"eco_a": eco_a, "eco_b": eco_b, "name_a": na, "name_b": nb,
+                              "confidence": confidence, "signal": signal}
+                    if verdict == "cross_compiled":
+                        if best_cross_compiled is None or _CROSS_REGISTRY_CONFIDENCE_RANK[confidence] > _CROSS_REGISTRY_CONFIDENCE_RANK[best_cross_compiled["confidence"]]:
+                            best_cross_compiled = entry
+                    elif verdict == "repackaged":
+                        if best_repackaged is None or _CROSS_REGISTRY_CONFIDENCE_RANK[confidence] > _CROSS_REGISTRY_CONFIDENCE_RANK[best_repackaged["confidence"]]:
+                            best_repackaged = entry
+
+    return best_cross_compiled, best_repackaged
+
+
 def run_data_health_check(id_to_meta):
     """Audits the GHSA lookup index for structural integrity."""
     malformed_count = 0
@@ -280,9 +468,13 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: is_malware = True
 
                             max_versions_found = 0
+                            names_by_eco = {}
+                            purls_by_eco = {}
                             for affected in vuln_data.get("affected", []):
-                                eco = affected.get("package", {}).get("ecosystem")
-                                name = affected.get("package", {}).get("name")
+                                pkg_block = affected.get("package", {})
+                                eco = pkg_block.get("ecosystem")
+                                name = pkg_block.get("name")
+                                purl = pkg_block.get("purl")
                                 if eco: ecosystems.add(eco)
                                 if name: p_name = name.strip()
                                 for v in affected.get("versions", []): vuln_versions.add(str(v).strip())
@@ -291,6 +483,18 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                 for ranges in affected.get("ranges", []):
                                     for events in ranges.get("events", []):
                                         if "fixed" in events: has_fixes = True
+                                # Per-ecosystem package identity (see db_warehouse.py's parse_osv_json
+                                # for the full rationale) -- keyed by the SAME raw eco tag this
+                                # function already stores in `ecosystems`, not the hard-mapped name.
+                                if eco and name:
+                                    clean_name = name.strip()
+                                    bucket = names_by_eco.setdefault(eco, [])
+                                    if clean_name and clean_name not in bucket:
+                                        bucket.append(clean_name)
+                                if eco and purl:
+                                    bucket = purls_by_eco.setdefault(eco, [])
+                                    if purl not in bucket:
+                                        bucket.append(purl)
                             
                             published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
@@ -325,7 +529,10 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                     "blast_radius": max_versions_found,
                                     "vulnerable_versions": vuln_versions,
                                     "cvss_score": extract_cvss_score(vuln_data),
-                                    "last_modified": modified_str[:10]
+                                    "last_modified": modified_str[:10],
+                                    "package_names_by_ecosystem": names_by_eco,
+                                    "purls_by_ecosystem": purls_by_eco,
+                                    "repo_anchor": extract_repo_anchor(vuln_data)
                                 }
                         except json.JSONDecodeError: continue 
         print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
@@ -383,33 +590,50 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
+        # BACKWARD COMPAT: package_names_by_ecosystem/purls_by_ecosystem/repo_anchor are new
+        # columns (Section VIII cross-registry rework). A warehouse that hasn't been re-ingested
+        # since the schema migration still gets these columns via ALTER TABLE (see
+        # db_warehouse.py's init_database), but the values are NULL until --rebuild re-ingests --
+        # so we always select them when present rather than crashing on an older physical file.
+        cursor.execute("PRAGMA table_info(vulnerabilities)")
+        available_cols = {row[1] for row in cursor.fetchall()}
+        has_cross_registry_cols = {"package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"} <= available_cols
+
         if priority_sort:
-            cursor.execute("""
+            cross_reg_select = ", v.package_names_by_ecosystem, v.purls_by_ecosystem, v.repo_anchor" if has_cross_registry_cols else ""
+            cursor.execute(f"""
                 SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.threat_profile,
                        v.ecosystems, v.last_modified, v.malware_vector, v.vulnerable_versions, v.dwell_days,
-                       e.epss_score, e.percentile, k.date_added, k.due_date
+                       e.epss_score, e.percentile, k.date_added, k.due_date{cross_reg_select}
                 FROM vulnerabilities v
                 LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
                 LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
             """)
         else:
-            cursor.execute("""
-                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days 
+            cross_reg_select = ", package_names_by_ecosystem, purls_by_ecosystem, repo_anchor" if has_cross_registry_cols else ""
+            cursor.execute(f"""
+                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days{cross_reg_select}
                 FROM vulnerabilities
             """)
-        
+
         for row in cursor.fetchall():
+            row = list(row)
+            names_by_eco_json = purls_by_eco_json = repo_anchor = None
+            if has_cross_registry_cols:
+                names_by_eco_json, purls_by_eco_json, repo_anchor = row[-3], row[-2], row[-1]
+                row = row[:-3]
+
             if priority_sort:
                 v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days, epss_score, epss_pct, kev_added, kev_due = row
             else:
                 v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days = row
             ecosystems_list = json.loads(ecos_json) if ecos_json else ["Android"]
-            
+
             # PERFORMANCE WIN: Early rejection exit prior to heavy allocations
             if filter_set:
                 if not any(e.lower() in filter_set for e in ecosystems_list):
                     continue
-            
+
             version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
             meta_entry = {
                 "ecosystems": ecosystems_list,
@@ -420,7 +644,10 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
                 "blast_radius": radius,
                 "vulnerable_versions": version_set,
                 "cvss_score": cvss,
-                "last_modified": last_mod
+                "last_modified": last_mod,
+                "package_names_by_ecosystem": json.loads(names_by_eco_json) if names_by_eco_json else {},
+                "purls_by_ecosystem": json.loads(purls_by_eco_json) if purls_by_eco_json else {},
+                "repo_anchor": repo_anchor
             }
             if priority_sort:
                 meta_entry["epss_score"] = epss_score
@@ -541,10 +768,18 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
             w_rank, w_id, w_name, w_cvss, w_radius = 6, 56, 22, 6, 22
             w_type = 34
-            total_line_len = w_rank + w_id + w_name + w_cvss + w_radius + 16
-            
+            w_epss_kev = 28
+            # Default-mode width is untouched (pre-existing, out of scope here). Priority-sort mode
+            # bolts an EPSS/KEV column onto the end without ever widening this divider to match, so
+            # the column (and most data rows) print past the right edge of the box -- widen it to
+            # actually cover every column + separator once that column exists.
             if priority_sort_active:
-                print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile':<{w_type}} | {'EPSS / KEV'}")
+                total_line_len = w_rank + w_id + w_name + w_cvss + w_radius + w_type + w_epss_kev + 3 * 6
+            else:
+                total_line_len = w_rank + w_id + w_name + w_cvss + w_radius + 16
+
+            if priority_sort_active:
+                print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile':<{w_type}} | {'EPSS / KEV':<{w_epss_kev}}")
             else:
                 print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-' * total_line_len}")
@@ -588,7 +823,7 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
                     epss_str = f"{item['epss']*100:.1f}%" if item['epss'] is not None else "N/A"
                     kev_str = f"{RED}KEV: {item['kev']}{RESET}" if item['kev'] else "-"
                     epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str}")
+                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str:<{w_epss_kev}}")
                 else:
                     print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
@@ -601,14 +836,21 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
         print(f"{YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
     print("=" * 115)
     
+    # Priority-sort mode bolts an EPSS/KEV column onto a box sized for the three original columns
+    # (52 + 30 + 28 wide); without widening the divider to match, the new column and most rows
+    # print past the right edge of the box. Padding the cell itself to a fixed width (below) keeps
+    # every row's right edge in the same place the divider now expects.
+    w_epss_kev = 28
+    divider_width = (52 + 3 + 30 + 3 + 28 + 3 + w_epss_kev) if priority_sort_active else 115
+
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry New Entries: {eco}{RESET}")
-        print("-" * 115)
+        print("-" * divider_width)
         if priority_sort_active:
-            print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact':<28} | {'EPSS / KEV'}")
+            print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact':<28} | {'EPSS / KEV':<{w_epss_kev}}")
         else:
             print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact'}")
-        print("-" * 115)
+        print("-" * divider_width)
         
         new_window_records = []
         active_new_ids = live_window_new_arrivals.get(eco, set())
@@ -652,12 +894,12 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
                     kev_due = vuln.get('kev_date_added')
                     kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
                     epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display:<28} | {epss_kev_str}")
+                    print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display:<28} | {epss_kev_str:<{w_epss_kev}}")
                 else:
                     print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display}")
         else:
             print("    [-] Zero newly published threat profiles or malicious entry drops recorded in this lookback window.")
-        print("-" * 115)
+        print("-" * divider_width)
 
 
 def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date, *, priority_sort_active: bool = False):
@@ -666,14 +908,19 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
     if priority_sort_active:
         print(f"{YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
     print("=" * 115)
+    # Same fix as Section VI: --priority-sort adds an EPSS/KEV column to a box drawn for the three
+    # original columns, so the divider needs widening (and the new cell fixed-width-padded) to
+    # actually contain it instead of trailing off mid-row.
+    w_epss_kev = 28
+    divider_width = (52 + 3 + 30 + 3 + 28 + 3 + w_epss_kev) if priority_sort_active else 115
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
-        print("-" * 115)
+        print("-" * divider_width)
         if priority_sort_active:
-            print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active':<28} | {'EPSS / KEV'}")
+            print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active':<28} | {'EPSS / KEV':<{w_epss_kev}}")
         else:
             print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active'}")
-        print("-" * 115)
+        print("-" * divider_width)
         
         valid_eco_records = []
         eco_lower_def = eco.lower()
@@ -712,25 +959,97 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
                 kev_due = vuln.get('kev_date_added')
                 kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
                 epss_kev_str = f"{epss_str} / {kev_str}"
-                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display:<28} | {epss_kev_str}")
+                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display:<28} | {epss_kev_str:<{w_epss_kev}}")
             else:
                 print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display}")
-        print("-" * 115)
+        print("-" * divider_width)
 
 
-def print_section_viii_hardware_matrix(intel_feed_matrix):
-    """Renders Section VIII: Hardware Architecture Compilation Cross-Pollination Matrix."""
-    print("\n" + "="*115)
-    print(f"  {BOLD}VIII. HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX (INTEL x86_64){RESET}")
-    print("="*115)
-    if not intel_feed_matrix:
-        print("  [+] Zero explicit Intel/x86_64 architecture compile-target hooks detected in this execution frame.")
+def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top_n: int = 10):
+    """Scans this session's in-scope advisories for cross-registry package relationships and
+    ranks the top N for each of the two Section VIII tables:
+      - Table A (true cross-compiled): the same project natively released to multiple registries.
+      - Table B (repackaged-as-is): one registry's package is a mechanical, unmodified vendoring
+        of another's code (the RHEL/Debian-style repackaging pattern the user flagged).
+    An advisory can land in both tables (e.g. Bootstrap: natively ported to several registries
+    AND separately vendored into Maven via webjars) -- see classify_advisory_cross_registry().
+    Ranked by ecosystem span (desc, i.e. how many registries it touches), then CVSS (desc).
+    Returns (table_a_rows, table_b_rows); each row is (advisory_id, ecosystem_count, cvss_score,
+    package_names_by_ecosystem, evidence) -- evidence is the dict from
+    classify_advisory_cross_registry_evidence() explaining which specific ecosystem pair and
+    signal earned this row its table membership (see that function for the shape)."""
+    table_a_candidates = []
+    table_b_candidates = []
+
+    for v_id in session_advisory_ids:
+        meta = ghsa_lookup.get(v_id)
+        if not meta:
+            continue
+        names_by_eco = meta.get("package_names_by_ecosystem") or {}
+        if len(names_by_eco) < 2:
+            continue
+
+        cross_compiled_evidence, repackaged_evidence = classify_advisory_cross_registry_evidence(
+            names_by_eco, meta.get("purls_by_ecosystem") or {}, meta.get("repo_anchor")
+        )
+        cvss = meta.get("cvss_score", 0.0) or 0.0
+        if cross_compiled_evidence:
+            table_a_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, cross_compiled_evidence))
+        if repackaged_evidence:
+            table_b_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, repackaged_evidence))
+
+    sort_key = lambda r: (-r[1], -r[2], r[0])
+    table_a = sorted(table_a_candidates, key=sort_key)[:top_n]
+    table_b = sorted(table_b_candidates, key=sort_key)[:top_n]
+    return table_a, table_b
+
+
+_CROSS_REGISTRY_EVIDENCE_MAX_WIDTH = 62
+
+
+def _format_cross_registry_evidence(evidence: dict, max_width: int = _CROSS_REGISTRY_EVIDENCE_MAX_WIDTH) -> str:
+    """Renders the specific ecosystem pair and signal that earned a Section VIII row its table
+    membership, so a reader can see WHY it was classified that way instead of taking the verdict
+    on faith -- two rows for the same advisory across tables A/B will cite different pairs/signals
+    rather than looking like duplicates of each other."""
+    if not evidence:
+        return ""
+    label = _CROSS_REGISTRY_SIGNAL_LABELS.get(evidence["signal"], evidence["signal"])
+    text = f"{evidence['eco_a']} \"{evidence['name_a']}\" vs {evidence['eco_b']} \"{evidence['name_b']}\" -- {label}"
+    if len(text) > max_width:
+        text = text[:max_width - 1] + "…"
+    return text
+
+
+def print_section_viii_cross_registry_tables(table_a, table_b):
+    """Renders the two Section VIII replacement tables (see rank_cross_registry_tables): true
+    cross-compiled native multi-registry releases, and repackaged-as-is mechanical vendoring.
+    Each row shows a Confidence tier and the ecosystem-pair evidence behind it -- classification
+    here is a naming/purl heuristic, not a verified fact, so the weakest signal (two identical
+    names with no other corroboration) is labeled LOW rather than presented as certain."""
+    print("\n" + "="*125)
+    print(f"  {BOLD}VIII-A. TRUE CROSS-COMPILED ADVISORIES (SAME PROJECT, NATIVE MULTI-REGISTRY RELEASE){RESET}")
+    print("="*125)
+    if not table_a:
+        print("  [+] Zero advisories in this execution frame matched a same-project, multi-registry native-release pattern.")
     else:
-        print(f"{'Ecosystem / Registry Source':<30} | {'Total Intel Pulls':<18} | {'Malware Payloads':<18} | {'CVE Vulnerabilities':<20} | {'Max Blast Radius'}")
-        print("-" * 115)
-        for eco_source, counts in sorted(intel_feed_matrix.items(), key=lambda x: x[1]["total"], reverse=True):
-            print(f"{eco_source:<30} | {counts['total']:<18,} | {counts['malware']:<18,} | {counts['cve']:<20,} | {counts['max_radius']:,} Versions")
-    print("="*115 + "\n")
+        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
+        print("-" * 125)
+        for v_id, eco_count, cvss, names_by_eco, evidence in table_a:
+            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
+    print("="*125)
+
+    print("\n" + "="*125)
+    print(f"  {BOLD}VIII-B. REPACKAGED-AS-IS ADVISORIES (VENDORED UNMODIFIED ACROSS REGISTRIES){RESET}")
+    print("="*125)
+    if not table_b:
+        print("  [+] Zero advisories in this execution frame matched a mechanical repackaging pattern (e.g. Maven webjars, distro rewraps).")
+    else:
+        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
+        print("-" * 125)
+        for v_id, eco_count, cvss, names_by_eco, evidence in table_b:
+            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
+    print("="*125 + "\n")
 
 
 def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False):
@@ -858,6 +1177,10 @@ def generate_enterprise_threat_leaderboard(
     intel_sig_regex = re.compile(r'(x86|amd64|x64|intel|elf64|pe32|win-64|linux-64)', re.IGNORECASE)
     malware_vector_counts = Counter({"Typosquatting / Brand Hijacking": 0, "Dependency Confusion Campaign": 0, "Data Exfiltration / Credential Stealer": 0, "Persistent Backdoor / Execution Shell": 0, "Unclassified Malicious Payload": 0})
 
+    # Advisory IDs actually in scope for this run (post layer/--registry filtering), fed to
+    # rank_cross_registry_tables() below for the Section VIII cross-registry replacement tables.
+    session_advisory_ids = set()
+
     spatial_dwell_malware = {k: [] for k in master_tracks}
     spatial_dwell_cve = {k: [] for k in master_tracks}
     spatial_blast_radius = {k: [] for k in master_tracks}
@@ -952,6 +1275,9 @@ def generate_enterprise_threat_leaderboard(
                 layer = get_artifact_layer(eco_clean)
                 if target_layer == "container" and layer != "Container Base Image": continue
                 if target_layer == "app" and layer != "App Software Registry": continue
+
+                if current_id in ghsa_lookup:
+                    session_advisory_ids.add(current_id)
 
                 if is_project_mode and current_id in ghsa_lookup:
                     m_name = ghsa_lookup[current_id]["package_name"].lower().strip()
@@ -1054,7 +1380,8 @@ def generate_enterprise_threat_leaderboard(
         priority_sort_active=priority_sort_active
     )
     
-    print_section_viii_hardware_matrix(intel_feed_matrix)
+    table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids)
+    print_section_viii_cross_registry_tables(table_a_cross_compiled, table_b_repackaged)
     
     # Save Snapshot Disk Serialization Routine
     serialize_snapshot_payload(

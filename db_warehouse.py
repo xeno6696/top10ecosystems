@@ -64,6 +64,51 @@ KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux"
 KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 MASTER_TRACKS = KNOWN_CONTAINERS + KNOWN_REGISTRIES + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
 
+# Cross-registry product-identity signal: matches "github.com/OWNER/REPO" wherever it shows up,
+# either in an advisory's own reference links or embedded directly in a Go-ecosystem purl
+# (pkg:golang/github.com/OWNER/REPO...). Used by extract_repo_anchor() below.
+GITHUB_REPO_URL_REGEX = re.compile(r'github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)', re.IGNORECASE)
+_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github"}
+
+
+def extract_repo_anchor(vuln_data):
+    """Derives a canonical 'owner/repo' identity string for an advisory, used downstream to tell
+    a genuinely multi-ecosystem NATIVE release of the same upstream project (true
+    cross-compilation -- e.g. the same project shipping both a Go module and a Rust crate) apart
+    from one ecosystem mechanically vendoring/repackaging another's code as-is (e.g. Maven's
+    webjars wrapping an npm package unmodified, or an OS distro repackaging an upstream lib).
+
+    Pulled from two places, in priority order:
+      1. Go-ecosystem purls, which embed the source repo path directly
+         (pkg:golang/github.com/OWNER/REPO...) -- weighted higher since this is an explicit,
+         structured package-identity field rather than an incidental link.
+      2. The advisory's own references[] list, which almost always includes a link back to the
+         canonical source repo.
+    Returns None when no repo identity can be recovered."""
+    candidates = Counter()
+
+    for ref in vuln_data.get("references", []):
+        url = ref.get("url", "") or ""
+        m = GITHUB_REPO_URL_REGEX.search(url)
+        if m:
+            owner, repo = m.group(1).lower(), re.sub(r'\.git$', '', m.group(2), flags=re.IGNORECASE).lower()
+            if repo in _GITHUB_REPO_ANCHOR_SKIP:
+                continue
+            candidates[f"{owner}/{repo}"] += 1
+
+    for affected in vuln_data.get("affected", []):
+        purl = affected.get("package", {}).get("purl", "") or ""
+        m = GITHUB_REPO_URL_REGEX.search(purl)
+        if m:
+            owner, repo = m.group(1).lower(), re.sub(r'\.git$', '', m.group(2), flags=re.IGNORECASE).lower()
+            if repo in _GITHUB_REPO_ANCHOR_SKIP:
+                continue
+            candidates[f"{owner}/{repo}"] += 2
+
+    if not candidates:
+        return None
+    return candidates.most_common(1)[0][0]
+
 @contextmanager
 def execution_timer(label):
     start = time.perf_counter()
@@ -105,7 +150,10 @@ def init_database():
             published_date TEXT,
             cve_alias TEXT,
             aliases TEXT,
-            cwe_ids TEXT
+            cwe_ids TEXT,
+            package_names_by_ecosystem TEXT,
+            purls_by_ecosystem TEXT,
+            repo_anchor TEXT
         );
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
@@ -113,6 +161,16 @@ def init_database():
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_cwe ON vulnerabilities(cwe_ids);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_published ON vulnerabilities(published_date);")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_modified ON vulnerabilities(last_modified);")
+
+    # MIGRATION: older warehouse files predate the three per-ecosystem columns above.
+    # ALTER TABLE ADD COLUMN is a safe, additive upgrade for a DB that already has rows, so an
+    # existing install doesn't need --rebuild just to gain the columns (a --rebuild re-ingestion
+    # is still required to actually backfill values into already-ingested rows).
+    cursor.execute("PRAGMA table_info(vulnerabilities)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    for new_col in ("package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"):
+        if new_col not in existing_cols:
+            cursor.execute(f"ALTER TABLE vulnerabilities ADD COLUMN {new_col} TEXT")
     
     # 2. Snapshot Anchors
     cursor.execute("""
@@ -267,8 +325,8 @@ def extract_production_cvss(vuln_data):
 def parse_osv_json(vuln_data):
     """Translates raw nested OSV JSON structures into normalized flat relational database rows."""
     v_id = vuln_data.get("id", "")
-    if not v_id: 
-        return (None,) * 15
+    if not v_id:
+        return (None,) * 18
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
     p_date_clean = published_str[:10]
@@ -308,22 +366,26 @@ def parse_osv_json(vuln_data):
     max_versions = 0
     all_versions = set()
     ecosystems_set = set()
-    
+    names_by_eco = {}
+    purls_by_eco = {}
+
     for affected in vuln_data.get("affected", []):
-        eco = affected.get("package", {}).get("ecosystem")
-        name = affected.get("package", {}).get("name")
+        pkg_block = affected.get("package", {})
+        eco = pkg_block.get("ecosystem")
+        name = pkg_block.get("name")
+        purl = pkg_block.get("purl")
         if name: p_name = name.strip()
-        
+
         for v in affected.get("versions", []):
             all_versions.add(str(v).strip())
-            
+
         v_len = len(affected.get("versions", []))
         if v_len > max_versions: max_versions = v_len
-        
+
         for ranges in affected.get("ranges", []):
             for events in ranges.get("events", []):
                 if "fixed" in events: has_fixes = True
-                
+
         if eco:
             eco_lower = eco.strip().lower()
             hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
@@ -335,6 +397,22 @@ def parse_osv_json(vuln_data):
                         break
             if not eco_clean: eco_clean = "Android"
             ecosystems_set.add(eco_clean)
+
+            # Per-ecosystem package identity, not just the last-seen name. A single advisory's
+            # affected[] can legitimately span many ecosystems (a shared library bundled
+            # downstream, or a project natively released to several registries at once) -- the
+            # old single `p_name` above silently overwrote itself on every iteration, so any
+            # display keyed off it showed an arbitrary, possibly unrelated-looking name for
+            # whichever registry was actually being reported on.
+            if name:
+                clean_name = name.strip()
+                bucket = names_by_eco.setdefault(eco_clean, [])
+                if clean_name and clean_name not in bucket:
+                    bucket.append(clean_name)
+            if purl:
+                bucket = purls_by_eco.setdefault(eco_clean, [])
+                if purl not in bucket:
+                    bucket.append(purl)
 
     if not ecosystems_set:
         ecosystems_set.add("Android")
@@ -349,6 +427,9 @@ def parse_osv_json(vuln_data):
     cvss_score = extract_production_cvss(vuln_data)
     v_versions_json = json.dumps(list(all_versions))
     ecosystems_json = json.dumps(list(ecosystems_set))
+    package_names_by_ecosystem_json = json.dumps(names_by_eco)
+    purls_by_ecosystem_json = json.dumps(purls_by_eco)
+    repo_anchor = extract_repo_anchor(vuln_data)
 
     # Canonical CVE alias extraction
     raw_aliases = vuln_data.get("aliases", [])
@@ -363,9 +444,10 @@ def parse_osv_json(vuln_data):
     cwe_json = json.dumps(cwe_list)
     
     return (
-        v_id, p_name, ecosystems_json, cvss_score, max_versions, classification, 
-        modified_str[:10], m_vector, v_versions_json, dwell_days, w_date, 
-        p_date_clean, cve_alias, aliases_json, cwe_json
+        v_id, p_name, ecosystems_json, cvss_score, max_versions, classification,
+        modified_str[:10], m_vector, v_versions_json, dwell_days, w_date,
+        p_date_clean, cve_alias, aliases_json, cwe_json,
+        package_names_by_ecosystem_json, purls_by_ecosystem_json, repo_anchor
     )
 
 
@@ -414,8 +496,9 @@ def bootstrap_warehouse_from_zip(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids,
+                package_names_by_ecosystem, purls_by_ecosystem, repo_anchor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -534,8 +617,9 @@ def sync_incremental_window(conn):
             INSERT OR REPLACE INTO vulnerabilities (
                 advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
                 threat_profile, last_modified, malware_vector, vulnerable_versions, 
-                dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids,
+                package_names_by_ecosystem, purls_by_ecosystem, repo_anchor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
         
     try:
