@@ -2606,7 +2606,7 @@ def main():
     parser.add_argument("--html", metavar="OUTPUT_FILE", help="Override briefing report output path.")
     parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
     parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
-    parser.add_argument("--registry", type=str, help="Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry npm,PyPI,Maven (Java)).")
+    parser.add_argument("--registry", type=str, help='Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry "npm,PyPI,Maven (Java)").')
     parser.add_argument("--hunt-retracted", action="store_true", help="Execute an advanced research hunt for suspicious retracted advisories.")
     parser.add_argument("--trends", action="store_true", help="Activate chronological trend and mutation velocity analysis.")
     parser.add_argument("--window-days", type=int, default=30, help="Telescoping trend evaluation window constraint (Defaults to 30 days).")
