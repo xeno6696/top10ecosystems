@@ -47,7 +47,7 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 To skip heavy scanning overhead and optimize operational speeds, pass the `--registry` option along with a comma-separated checklist array to drop unrelated database footprints instantly:
 ```bash
 # Isolate calculation matrix mappings strictly to target registries
-python top10ecosystems.py --database --registry npm,PyPI,Maven (Java) --from 2026-04-18 --to 2026-05-28
+python top10ecosystems.py --database --registry "npm,PyPI,Maven (Java)" --from 2026-04-18 --to 2026-05-28
 ```
 
 ### 6. Advanced Research Hunting & Snapshot Tooling
