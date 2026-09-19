@@ -334,8 +334,40 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
     return id_to_meta
 
 
-def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_registries: list = None) -> dict:
-    """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map."""
+def _priority_sort_key(entry: dict, id_val: str, priority_sort_active: bool = False):
+    """
+    Shared sort key used everywhere a vulnerability list gets ranked: the
+    global/per-ecosystem rank maps, and the Section V/VI/VII top-N picks.
+
+    When priority_sort_active is False, this is exactly the original
+    (-cvss_score, -blast_radius, id) tuple -- unchanged sort order, so
+    default (--priority-sort omitted) output and golden masters are
+    unaffected byte-for-byte.
+
+    When True, ranking becomes KEV catalog hit (desc) -> EPSS score (desc)
+    -> CVSS (desc) -> blast radius (desc) -> id (asc), matching the same
+    KEV -> EPSS -> OSV/CVSS priority already used by --crosscheck.
+    """
+    cvss = entry.get("cvss_score", 0.0) or 0.0
+    radius = entry.get("blast_radius", 0) or 0
+
+    if not priority_sort_active:
+        return (-cvss, -radius, id_val)
+
+    kev_hit = 0 if entry.get("kev_date_added") else 1
+    epss = entry.get("epss_score") or 0.0
+    return (kev_hit, -epss, -cvss, -radius, id_val)
+
+
+def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_registries: list = None, *, priority_sort: bool = False) -> dict:
+    """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map.
+
+    priority_sort=False (default): identical query/behavior to before this
+    flag existed -- no join, no new dict keys, zero risk to existing output.
+    priority_sort=True: additionally LEFT JOINs epss_scores/kev_catalog on
+    cve_alias, adding epss_score/epss_percentile/kev_date_added/kev_due_date
+    to each entry for the ranking sites that opt into _priority_sort_key().
+    """
     id_to_meta = {}
     if not os.path.exists(db_path):
         return build_ghsa_ecosystem_map()
@@ -344,17 +376,33 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
     print(f"[*] Extracting global context from SQLite warehouse: {db_path}...")
     if filter_set:
         print(f"    -> Applying localized registry isolation filter: {list(filter_set)}")
+    if priority_sort:
+        print(f"    -> --priority-sort active: joining EPSS/KEV enrichment into rank map.")
         
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days 
-            FROM vulnerabilities
-        """)
+
+        if priority_sort:
+            cursor.execute("""
+                SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.threat_profile,
+                       v.ecosystems, v.last_modified, v.malware_vector, v.vulnerable_versions, v.dwell_days,
+                       e.epss_score, e.percentile, k.date_added, k.due_date
+                FROM vulnerabilities v
+                LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
+                LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            """)
+        else:
+            cursor.execute("""
+                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days 
+                FROM vulnerabilities
+            """)
         
         for row in cursor.fetchall():
-            v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days = row
+            if priority_sort:
+                v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days, epss_score, epss_pct, kev_added, kev_due = row
+            else:
+                v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days = row
             ecosystems_list = json.loads(ecos_json) if ecos_json else ["Android"]
             
             # PERFORMANCE WIN: Early rejection exit prior to heavy allocations
@@ -363,7 +411,7 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
                     continue
             
             version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
-            id_to_meta[v_id] = {
+            meta_entry = {
                 "ecosystems": ecosystems_list,
                 "package_name": p_name,
                 "type": t_profile,
@@ -374,6 +422,12 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
                 "cvss_score": cvss,
                 "last_modified": last_mod
             }
+            if priority_sort:
+                meta_entry["epss_score"] = epss_score
+                meta_entry["epss_percentile"] = epss_pct
+                meta_entry["kev_date_added"] = kev_added
+                meta_entry["kev_due_date"] = kev_due
+            id_to_meta[v_id] = meta_entry
         conn.close()
         print(f"[+] Successfully loaded {len(id_to_meta):,} records out of the SQLite warehouse index.")
     except Exception as e:
@@ -473,10 +527,12 @@ def print_section_iv_threat_metabolism(active_matrix_ecosystems, spatial_dwell_m
     print("="*115 + "\n")
 
 
-def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_pools, eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests):
+def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_pools, eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests, *, priority_sort_active: bool = False):
     """Renders Section V: Critical Outlier Attack Surface Radius Pools."""
     print("\n" + "="*115)
     print(f"  {BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS{RESET}")
+    if priority_sort_active:
+        print(f"  {YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
     print("="*115)
     
     for eco in active_matrix_ecosystems:
@@ -484,14 +540,32 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
         if pool:
             print(f"\n{BOLD}[+] {eco} Top Impact Outliers:{RESET}")
             w_rank, w_id, w_name, w_cvss, w_radius = 6, 56, 22, 6, 22
+            w_type = 34
             total_line_len = w_rank + w_id + w_name + w_cvss + w_radius + 16
             
-            print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
+            if priority_sort_active:
+                print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile':<{w_type}} | {'EPSS / KEV'}")
+            else:
+                print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-' * total_line_len}")
             
-            flat_pool = [{"id": r_id, "radius": item[0], "type": item[1], "name": item[2], "cvss": item[3] if len(item) > 3 else 0.0} for r_id, item in pool.items()]
-            full_sorted_pool = sorted(flat_pool, key=lambda x: (-x["cvss"], -x["radius"], x["id"]))
-            export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"]] for item in full_sorted_pool[:50]}
+            flat_pool = [{
+                "id": r_id, "radius": item[0], "type": item[1], "name": item[2],
+                "cvss": item[3] if len(item) > 3 else 0.0,
+                "epss": item[4] if len(item) > 4 else None,
+                "kev": item[5] if len(item) > 5 else None,
+            } for r_id, item in pool.items()]
+            full_sorted_pool = sorted(
+                flat_pool,
+                key=lambda x: _priority_sort_key(
+                    {"cvss_score": x["cvss"], "blast_radius": x["radius"], "epss_score": x["epss"], "kev_date_added": x["kev"]},
+                    x["id"], priority_sort_active
+                )
+            )
+            if priority_sort_active:
+                export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"], item["epss"], item["kev"]] for item in full_sorted_pool[:50]}
+            else:
+                export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"]] for item in full_sorted_pool[:50]}
             
             for rank, item in enumerate(full_sorted_pool[:10], start=1):
                 local_eco_map = eco_absolute_ranks.get(eco, {})
@@ -508,19 +582,32 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
                 artifact_str = item['name'][:19] + "..." if len(item['name']) > 22 else item['name']
                 cvss_str = f"{item['cvss']:.1f}"
                 radius_str = f"{item['radius']:,} Vers"
-                print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
+
+                if priority_sort_active:
+                    type_str = (item['type'][:w_type-1] + "\u2026") if len(item['type']) > w_type else item['type']
+                    epss_str = f"{item['epss']*100:.1f}%" if item['epss'] is not None else "N/A"
+                    kev_str = f"{RED}KEV: {item['kev']}{RESET}" if item['kev'] else "-"
+                    epss_kev_str = f"{epss_str} / {kev_str}"
+                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str}")
+                else:
+                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
 
 
-def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arrivals, ghsa_lookup, global_absolute_ranks):
+def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arrivals, ghsa_lookup, global_absolute_ranks, *, priority_sort_active: bool = False):
     """Renders Section VI: New Arrivals & Campaign Discoveries Within Timeframe."""
     print(f"\n{BOLD}VI. NEW ARRIVALS & CAMPAIGN DISCOVERIES WITHIN TIMEFRAME{RESET}")
+    if priority_sort_active:
+        print(f"{YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
     print("=" * 115)
     
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry New Entries: {eco}{RESET}")
         print("-" * 115)
-        print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact'}")
+        if priority_sort_active:
+            print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact':<28} | {'EPSS / KEV'}")
+        else:
+            print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact'}")
         print("-" * 115)
         
         new_window_records = []
@@ -542,7 +629,7 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
 
         top_new_arrivals = sorted(
             new_window_records, 
-            key=lambda x: (-x['cvss_score'], -x['blast_radius'], x['injected_id'])
+            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_active)
         )[:10]
         
         if top_new_arrivals:
@@ -558,20 +645,34 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
                 id_column_display = f"#{rank:<2} {v_id} {overall_token}"
                 
                 severity_display = f"{RED}CRITICAL (CVSS {cvss:.1f}){RESET}" if cvss >= 9.0 else f"HIGH (CVSS {cvss:.1f})"
-                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display}")
+
+                if priority_sort_active:
+                    epss_score = vuln.get('epss_score')
+                    epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
+                    kev_due = vuln.get('kev_date_added')
+                    kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
+                    epss_kev_str = f"{epss_str} / {kev_str}"
+                    print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display:<28} | {epss_kev_str}")
+                else:
+                    print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display}")
         else:
             print("    [-] Zero newly published threat profiles or malicious entry drops recorded in this lookback window.")
         print("-" * 115)
 
 
-def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date):
+def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date, *, priority_sort_active: bool = False):
     """Renders Section VII: Systemic Risk Vs. Active Exposure (The Attention Deficit)."""
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
+    if priority_sort_active:
+        print(f"{YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
     print("=" * 115)
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
         print("-" * 115)
-        print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active'}")
+        if priority_sort_active:
+            print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active':<28} | {'EPSS / KEV'}")
+        else:
+            print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active'}")
         print("-" * 115)
         
         valid_eco_records = []
@@ -584,7 +685,7 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
 
         static_top_10 = sorted(
             valid_eco_records, 
-            key=lambda x: (-x['cvss_score'], -x['blast_radius'], x['injected_id'])
+            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_active)
         )[:10]
         
         for rank, vuln in enumerate(static_top_10, start=1):
@@ -604,7 +705,16 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
             
             overall_token = f"({global_rank_str} overall)"
             id_column_display = f"#{rank:<2} {v_id} {overall_token}"
-            print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display}")
+
+            if priority_sort_active:
+                epss_score = vuln.get('epss_score')
+                epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
+                kev_due = vuln.get('kev_date_added')
+                kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
+                epss_kev_str = f"{epss_str} / {kev_str}"
+                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display:<28} | {epss_kev_str}")
+            else:
+                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display}")
         print("-" * 115)
 
 
@@ -623,17 +733,19 @@ def print_section_viii_hardware_matrix(intel_feed_matrix):
     print("="*115 + "\n")
 
 
-def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests):
+def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
         return
-        
+
     output_dir = "./output"
     os.makedirs(output_dir, exist_ok=True)
-    if isinstance(custom_export_arg, str): 
+    if isinstance(custom_export_arg, str):
         export_path = custom_export_arg
-    else: 
-        export_path = os.path.join(output_dir, f"threat_landscape_{end_date.strftime('%Y-%m-%d')}_{target_layer if target_layer else 'all'}.json")
+    else:
+        layer_tag = target_layer if target_layer else 'all'
+        suffix = "_priority" if priority_sort_active else ""
+        export_path = os.path.join(output_dir, f"threat_landscape_{end_date.strftime('%Y-%m-%d')}_{layer_tag}{suffix}.json")
 
     os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
     try:
@@ -643,7 +755,8 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
                     "generated_at": now.isoformat(), 
                     "interval_from": start_date.date().isoformat(), 
                     "interval_to": end_date.date().isoformat(), 
-                    "target_layer_filter": target_layer if target_layer else "all"
+                    "target_layer_filter": target_layer if target_layer else "all",
+                    "priority_sort_active": priority_sort_active
                 },
                 "leaderboard": {eco: count for eco, count, _ in filtered_results},
                 "threat_profile": dict(bucket_counts),
@@ -662,14 +775,25 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
 # ==============================================================================
 
 def generate_enterprise_threat_leaderboard(
-    start_date, end_date, target_layer: str = None, debug_mode: bool = False, 
-    custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None, 
+    start_date, end_date, target_layer: str = None, debug_mode: bool = False,
+    custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None,
     forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
-    manifest_rows: list = None  
+    manifest_rows: list = None, *, priority_sort_active: bool = False, target_registries: list = None
     ):
     now = datetime.datetime.now(datetime.timezone.utc)
+
+    # FIX: --registry has always filtered ghsa_lookup (via build_ghsa_from_db) but was never
+    # applied to THIS function's own raw manifest-stream counting pass -- the loop below that
+    # produces Sections I/II/III and total_raw_rows walks the full unfiltered OSV stream index
+    # regardless of --registry, bucketing purely by path prefix. That's why a bare --registry
+    # run (no --layer) looked "dead": container OS churn (Chainguard/Debian/etc.) swamps the
+    # unfiltered top-10, so the requested registries never surface. Mirrors the exact filter_set
+    # construction/semantics already used in build_ghsa_from_db for consistency between the two
+    # filtered code paths (case-insensitive exact match on the raw, pre-hard-mapping ecosystem tag).
+    registry_filter_set = {r.strip().lower() for r in target_registries} if target_registries else None
+
     final_leaderboard = Counter()
-    target_inventory_map = {} 
+    target_inventory_map = {}
     is_project_mode = False
     allowed_project_ecosystems = []
     
@@ -699,7 +823,7 @@ def generate_enterprise_threat_leaderboard(
     # Build True Global Master Rank Map (Across All Rows)
     sorted_global_heap = sorted(
         ghsa_lookup.items(),
-        key=lambda x: (-x[1].get("cvss_score", 0.0), -int(x[1].get("blast_radius", 0)), x[0])
+        key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active)
     )
     global_absolute_ranks = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_global_heap, start=1)}
 
@@ -720,7 +844,7 @@ def generate_enterprise_threat_leaderboard(
 
     eco_absolute_ranks = {}
     for eco_name, advisories in ecosystem_archive_buckets.items():
-        sorted_bucket = sorted(advisories, key=lambda x: (-x[1].get("cvss_score", 0.0), -int(x[1].get("blast_radius", 0)), x[0]))
+        sorted_bucket = sorted(advisories, key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active))
         eco_absolute_ranks[eco_name] = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_bucket, start=1)}
 
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"   
@@ -806,6 +930,14 @@ def generate_enterprise_threat_leaderboard(
             for eco in raw_ecosystems:
                 eco_raw = eco.strip()
                 eco_lower = eco_raw.lower()
+
+                # FIX: apply --registry here too, not just to ghsa_lookup -- see the note at
+                # the top of this function. Same exact-match-on-raw-tag semantics as
+                # build_ghsa_from_db's filter_set, so a term like "Java" that doesn't match the
+                # OSV ecosystem tag "Maven" behaves identically in both filtered code paths.
+                if registry_filter_set and eco_lower not in registry_filter_set:
+                    continue
+
                 hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
                 eco_clean = hard_mappings.get(eco_lower, None)
                 if not eco_clean:
@@ -866,7 +998,10 @@ def generate_enterprise_threat_leaderboard(
                     if meta_entry["blast_radius"] > 0:
                         pool = ecosystem_outlier_pools[eco_clean]
                         if current_id not in pool or meta_entry["blast_radius"] > pool[current_id][0]:
-                            pool[current_id] = (meta_entry["blast_radius"], update_type, meta_entry["package_name"], meta_entry.get("cvss_score", 0.0))
+                            pool[current_id] = (
+                                meta_entry["blast_radius"], update_type, meta_entry["package_name"], meta_entry.get("cvss_score", 0.0),
+                                meta_entry.get("epss_score"), meta_entry.get("kev_date_added")
+                            )
                 final_leaderboard[eco_clean] += 1
     except Exception as e:
         print(f"[-] Threat ledger stream disrupted during processing: {e}")
@@ -905,25 +1040,28 @@ def generate_enterprise_threat_leaderboard(
     
     print_section_v_outlier_pools(
         active_matrix_ecosystems, ecosystem_outlier_pools, 
-        eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests
+        eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests,
+        priority_sort_active=priority_sort_active
     )
     
     print_section_vi_new_arrivals(
         active_matrix_ecosystems, live_window_new_arrivals, 
-        ghsa_lookup, global_absolute_ranks
+        ghsa_lookup, global_absolute_ranks, priority_sort_active=priority_sort_active
     )
     
     print_section_vii_attention_deficit(
-        active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date
+        active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date,
+        priority_sort_active=priority_sort_active
     )
     
     print_section_viii_hardware_matrix(intel_feed_matrix)
     
     # Save Snapshot Disk Serialization Routine
     serialize_snapshot_payload(
-        custom_export_arg, now, start_date, end_date, target_layer, 
-        filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, 
-        malware_vector_counts, export_profile_matrix, export_outlier_manifests
+        custom_export_arg, now, start_date, end_date, target_layer,
+        filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix,
+        malware_vector_counts, export_profile_matrix, export_outlier_manifests,
+        priority_sort_active=priority_sort_active
     )
 
 def generate_html_report(snapshots: list, html_output: str):
@@ -1063,8 +1201,109 @@ def load_snapshots_from_dir(target_dir: str):
                 data = json.load(f)
                 if "metadata" in data and "interval_to" in data["metadata"]: snapshots.append(data)
         except Exception: pass
-    snapshots.sort(key=lambda x: x["metadata"]["interval_to"])
-    return snapshots
+
+    # De-duplicate same day/layer snapshots: a --priority-sort run and a default run for the
+    # same date/layer carry identical leaderboard/threat_profile totals (priority-sort only
+    # re-orders outlier ranking -- see _priority_sort_key -- it never changes the counts), so
+    # keep one entry per (date, layer) instead of plotting/aggregating the same day twice.
+    # Prefer the default (non-priority-sort) file when both exist on disk.
+    deduped = {}
+    for s in snapshots:
+        key = (s["metadata"]["interval_to"], s["metadata"].get("target_layer_filter", "all"))
+        existing = deduped.get(key)
+        if existing is None or (existing["metadata"].get("priority_sort_active") and not s["metadata"].get("priority_sort_active")):
+            deduped[key] = s
+
+    return sorted(deduped.values(), key=lambda x: x["metadata"]["interval_to"])
+
+
+def generate_velocity_matrix(target_dir: str, output_path: str = "./output/velocity_matrix.csv", render_terminal_plot: bool = False):
+    """
+    Ingests a directory of chronological JSON snapshots and stitches them into a time-series
+    CSV matrix, with an optional inline terminal (plotext) velocity chart.
+
+    RESTORED: this function and its wiring into run_velocity_update() were silently dropped
+    during commit 1df05c7 (the call site remained, calling an undefined function, until a
+    later commit quietly deleted the call too rather than restoring the function). Recovered
+    verbatim in spirit from commit 8e21ec0 via `git log --all -S"pltx." -- top10ecosystems.py`,
+    then re-styled to match the current console conventions (BOLD section banners, GREEN/RED
+    status lines) used throughout the rest of the dashboard.
+    """
+    if not os.path.isdir(target_dir):
+        print(f"{RED}[-] Velocity Engine Error: The directory '{target_dir}' does not exist.{RESET}")
+        return
+
+    print("\n" + "="*85 + f"\n  {BOLD}THREAT VELOCITY AGGREGATION ENGINE{RESET}\n" + "="*85)
+
+    snapshots = load_snapshots_from_dir(target_dir)
+    if not snapshots:
+        print(f"{RED}[-] No valid JSON snapshots found in the target directory.{RESET}")
+        return
+
+    # Discover all unique tracking columns across the timeline
+    all_ecosystems = set()
+    all_threat_profiles = set()
+    for s in snapshots:
+        all_ecosystems.update(s.get("leaderboard", {}).keys())
+        all_threat_profiles.update(s.get("threat_profile", {}).keys())
+
+    sorted_ecosystems = sorted(all_ecosystems)
+    sorted_profiles = sorted(all_threat_profiles)
+    headers = ["Date_End", "Layer_Filter"] + sorted_ecosystems + sorted_profiles
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    try:
+        with open(output_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(headers)
+            for s in snapshots:
+                row = [s["metadata"]["interval_to"], s["metadata"].get("target_layer_filter", "all")]
+                row += [s.get("leaderboard", {}).get(eco, 0) for eco in sorted_ecosystems]
+                row += [s.get("threat_profile", {}).get(profile, 0) for profile in sorted_profiles]
+                writer.writerow(row)
+
+        print(f"{GREEN}[+] Aggregation Complete: Processed {len(snapshots):,} chronological snapshots.{RESET}")
+        print(f"{GREEN}[+] Velocity Matrix Saved: {output_path}{RESET}")
+        print("="*85 + "\n")
+
+        # Terminal plotting is intentionally opt-in. plotext.clt() clears the terminal,
+        # which would hide the dashboard output printed immediately before this step, so
+        # it is never called here -- only clear_data(), which resets plot state in place.
+        if not render_terminal_plot:
+            return
+
+        print(f"[*] Generating Multi-Series Terminal Velocity Plot...")
+
+        # Identify the Top 10 ecosystems by total volume across the window
+        eco_totals = {eco: sum(s.get("leaderboard", {}).get(eco, 0) for s in snapshots) for eco in sorted_ecosystems}
+        top_10 = sorted(eco_totals, key=eco_totals.get, reverse=True)[:10]
+        dates = [s["metadata"]["interval_to"] for s in snapshots]
+
+        pltx.clear_data()
+        pltx.date_form(input_form="Y-m-d")
+
+        plotted_any = False
+        for eco in top_10:
+            # Daily/period-over-period deltas, not cumulative totals -- this is the actual
+            # "velocity" signal (net new mutations since the previous snapshot).
+            totals = [s.get("leaderboard", {}).get(eco, 0) for s in snapshots]
+            deltas = [totals[0]] + [totals[i] - totals[i - 1] for i in range(1, len(totals))]
+            if any(d != 0 for d in deltas):
+                pltx.plot(dates, deltas, label=f"{eco} (Delta)")
+                plotted_any = True
+
+        if not plotted_any:
+            print(f"{RED}[-] No non-zero ecosystem deltas to plot across this window.{RESET}")
+            return
+
+        pltx.title("Threat Churn Velocity (Daily Deltas)")
+        pltx.xlabel("Timeline")
+        pltx.ylabel("Net New Mutations")
+        pltx.plotsize(100, 25)
+        pltx.show()
+
+    except Exception as e:
+        print(f"{RED}[-] Velocity Matrix export failed: {e}{RESET}")
 
 
 def calculate_report_windows(args, now_utc):
@@ -1089,8 +1328,9 @@ def calculate_report_windows(args, now_utc):
     return windows
 
 
-def build_snapshot_filename(start_date, end_date, target_layer=None):
-    return f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{target_layer if target_layer else 'all'}.json"
+def build_snapshot_filename(start_date, end_date, target_layer=None, *, priority_sort_active: bool = False):
+    suffix = "_priority" if priority_sort_active else ""
+    return f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{target_layer if target_layer else 'all'}{suffix}.json"
 
 
 def run_velocity_update(args):
@@ -1099,10 +1339,24 @@ def run_velocity_update(args):
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     windows = calculate_report_windows(args, now_utc)
     global_ghsa_lookup = build_ghsa_ecosystem_map()
-    
+
     for calculated_start, calculated_end in windows:
-        snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer))
-        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup)
+        snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer, priority_sort_active=args.priority_sort))
+        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort)
+
+    # RESTORED: stitch the accumulated snapshots into a CSV velocity matrix, with an
+    # opt-in terminal (plotext) chart via --terminal-plot -- see generate_velocity_matrix().
+    generate_velocity_matrix(target_dir=snapshot_dir, output_path=os.path.join(snapshot_dir, "velocity_matrix.csv"), render_terminal_plot=args.terminal_plot)
+
+    # RESTORED: --velocity combined with --html is meant to produce the historical trend
+    # briefing directly (main()'s standalone --html branch is unreachable here because it
+    # explicitly excludes args.velocity, and this function used to return before ever
+    # generating the report). Without this, --html was silently ignored whenever it was
+    # combined with --velocity.
+    if args.html:
+        snapshots = load_snapshots_from_dir(snapshot_dir)
+        if snapshots:
+            generate_html_report(snapshots, args.html)
 
 
 def compare_snapshots(file_base: str, file_current: str, html_output: str = None):
@@ -2359,6 +2613,7 @@ def main():
     parser.add_argument("--crosscheck", action="store_true", help="Generate the KEV -> EPSS -> OSV/CVSS prioritized developer dispatch list.")
     parser.add_argument("--crosscheck-export", nargs='?', const=True, default=False, metavar="PATH", help="Export the cross-check dispatch list as JSON (optionally provide a path). Always exports the FULL list, uncapped.")
     parser.add_argument("--crosscheck-limit", type=int, default=100, metavar="N", help="Cap console output to the top N rows (default 100). Use 0 for no cap. Never affects --crosscheck-export.")
+    parser.add_argument("--priority-sort", action="store_true", help="Rank Sections I/V/VI/VII by KEV -> EPSS -> CVSS/blast-radius instead of CVSS/blast-radius alone. Default (omitted) behavior is completely unchanged.")
     args = parser.parse_args()
     
     if args.hunt_retracted:
@@ -2495,24 +2750,26 @@ def main():
         return
 
     if args.database:
-        global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries)
+        global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries, priority_sort=args.priority_sort)
     else:
         global_ghsa_lookup = build_ghsa_ecosystem_map()
 
     for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
         print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
         generate_enterprise_threat_leaderboard(
-            start_date=calculated_start, 
+            start_date=calculated_start,
             end_date=calculated_end,
-            target_layer=args.layer, 
+            target_layer=args.layer,
             debug_mode=args.debug,
-            custom_export_arg=args.export, 
+            custom_export_arg=args.export,
             run_speedway=args.speedway,
-            project_file_path=args.project_file, 
+            project_file_path=args.project_file,
             forced_format=args.project_format,
             audit_mode=args.audit,
             ghsa_lookup=global_ghsa_lookup,
-            manifest_rows=cached_manifest_rows  
+            manifest_rows=cached_manifest_rows,
+            priority_sort_active=args.priority_sort,
+            target_registries=target_registries
         )
 
 

@@ -122,6 +122,22 @@ class TestThreatStreamScanner(unittest.TestCase):
         """[INTEGRITY] Guards against the deletion of the KEV/EPSS/OSV cross-check dispatch engine."""
         self.verify_production_target_signature("generate_supply_chain_crosscheck", expected_args_count=5)
 
+    def test_000_a_anti_hallucination_guard_for_velocity_matrix_engine(self):
+        """[INTEGRITY] Guards against the deletion of the CSV/terminal-plot velocity aggregation
+        engine (previously deleted silently in commit 1df05c7 -- the call site in
+        run_velocity_update() remained, calling an undefined function, until a later commit
+        quietly deleted the call too instead of restoring the function it pointed to)."""
+        self.verify_production_target_signature("generate_velocity_matrix", expected_args_count=3)
+
+    def test_000_a_anti_hallucination_guard_for_snapshot_filename_builder(self):
+        """[INTEGRITY] Guards against the deletion of the per-window --velocity snapshot
+        filename builder."""
+        self.verify_production_target_signature("build_snapshot_filename", expected_args_count=3)
+
+    def test_000_a_anti_hallucination_guard_for_velocity_update_dispatcher(self):
+        """[INTEGRITY] Guards against the deletion of the --velocity CLI dispatcher itself."""
+        self.verify_production_target_signature("run_velocity_update", expected_args_count=1)
+
     def test_000_b_meta_guard_against_missing_test_methods_in_test_runner_itself(self):
         """[INTEGRITY] Reviews test_runner.py to ensure no verification tests were deleted or dropped."""
         expected_test_methods = {
@@ -161,7 +177,15 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_kev_table_schema_and_indexes",
             "test_kev_known_cve_ingestion",
             "test_kev_vulnerabilities_cve_alias_parity",
-            "test_crosscheck_kev_epss_priority_ordering"
+            "test_crosscheck_kev_epss_priority_ordering",
+            "test_000_a_anti_hallucination_guard_for_velocity_matrix_engine",
+            "test_000_a_anti_hallucination_guard_for_snapshot_filename_builder",
+            "test_000_a_anti_hallucination_guard_for_velocity_update_dispatcher",
+            "test_velocity_matrix_csv_and_delta_math",
+            "test_velocity_snapshot_dedup_prefers_default_over_priority_sort",
+            "test_velocity_filename_no_clobber_between_default_and_priority_sort",
+            "test_registry_filter_applies_to_raw_leaderboard_counting_pass",
+            "test_priority_sort_flag_wired_to_main_execution_path"
         }
         
         actual_test_methods = {
@@ -815,6 +839,89 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertIn("Raw Entry Stream Items:    4", output)
 
     @patch('requests.get')
+    def test_registry_filter_applies_to_raw_leaderboard_counting_pass(self, mock_requests_get):
+        """
+        [REGRESSION] --registry has always filtered ghsa_lookup (via build_ghsa_from_db) but,
+        until this fix, was never applied to generate_enterprise_threat_leaderboard()'s own raw
+        manifest-stream counting pass -- the loop that produces Sections I/II/III and
+        total_raw_rows walked the FULL unfiltered OSV stream regardless of --registry, so a bare
+        --registry run (no --layer) looked "dead": container OS churn swamped the unfiltered
+        top-10 and the requested registries never surfaced. This locks in the fix and proves the
+        default (target_registries omitted) path is unaffected.
+        """
+        mock_response = unittest.mock.MagicMock()
+        mock_response.status_code = 200
+        mock_csv_lines = [
+            b"2026-04-20T10:00:00Z,npm/MAL-mock-1111.json",
+            b"2026-04-20T11:00:00Z,PyPI/GHSA-mock-2222.json",
+            b"2026-04-20T11:30:00Z,Debian/GHSA-mock-3333.json",
+            b"2026-04-20T12:00:00Z,Chainguard/GHSA-mock-4444.json",
+        ]
+        mock_response.iter_lines.return_value = mock_csv_lines
+        mock_requests_get.return_value = mock_response
+
+        window = dict(
+            start_date=datetime.datetime(2026, 4, 18, tzinfo=datetime.timezone.utc),
+            end_date=datetime.datetime(2026, 4, 25, tzinfo=datetime.timezone.utc),
+            target_layer=None, debug_mode=False, ghsa_lookup={}
+        )
+
+        # 1. Default path (no --registry): every ecosystem still counts -- zero impact.
+        captured_default = io.StringIO()
+        with patch('sys.stdout', captured_default):
+            top10ecosystems.generate_enterprise_threat_leaderboard(**window)
+        default_output = captured_default.getvalue()
+        self.assertRegex(default_output, r"npm\s+\|\s+1")
+        self.assertRegex(default_output, r"Debian\s+\|\s+1")
+        self.assertRegex(default_output, r"Chainguard\s+\|\s+1")
+
+        # 2. --registry npm,PyPI: only npm/PyPI should register non-zero counts; container
+        #    ecosystems must drop to zero rather than silently keeping their unfiltered totals.
+        captured_filtered = io.StringIO()
+        with patch('sys.stdout', captured_filtered):
+            top10ecosystems.generate_enterprise_threat_leaderboard(target_registries=["npm", "PyPI"], **window)
+        filtered_output = captured_filtered.getvalue()
+        self.assertRegex(filtered_output, r"npm\s+\|\s+1")
+        self.assertRegex(filtered_output, r"PyPI\s+\|\s+1")
+        self.assertRegex(
+            filtered_output, r"Debian\s+\|\s+0",
+            "[!] --registry regressed: Debian should be excluded from the raw counting pass."
+        )
+        self.assertRegex(
+            filtered_output, r"Chainguard\s+\|\s+0",
+            "[!] --registry regressed: Chainguard should be excluded from the raw counting pass."
+        )
+
+    def test_priority_sort_flag_wired_to_main_execution_path(self):
+        """
+        [REGRESSION] --priority-sort was threaded into build_ghsa_from_db() and into
+        run_velocity_update()'s call to generate_enterprise_threat_leaderboard(), but the
+        primary (non-velocity) CLI call site in main() never actually passed
+        priority_sort_active=args.priority_sort through -- so --priority-sort silently did
+        nothing outside of --velocity runs. This greps main()'s own source for the call rather
+        than re-running the CLI, since the behavioral effect (KEV/EPSS-aware ranking) is already
+        covered by test_crosscheck_kev_epss_priority_ordering and the Section V/VI/VII banner
+        tests; this guards specifically against the wiring gap regressing again.
+        """
+        import inspect
+        main_source = inspect.getsource(top10ecosystems.main)
+
+        # Isolate the plain-path call (the one NOT inside run_velocity_update), i.e. the last
+        # generate_enterprise_threat_leaderboard(...) call in main()'s own source.
+        call_start = main_source.rfind("generate_enterprise_threat_leaderboard(")
+        self.assertNotEqual(call_start, -1, "[!] main() no longer calls generate_enterprise_threat_leaderboard directly.")
+        call_block = main_source[call_start:call_start + 700]
+
+        self.assertIn(
+            "priority_sort_active=args.priority_sort", call_block,
+            "[!] --priority-sort is no longer wired into main()'s primary execution path."
+        )
+        self.assertIn(
+            "target_registries=target_registries", call_block,
+            "[!] --registry is no longer wired into main()'s primary execution path."
+        )
+
+    @patch('requests.get')
     def test_historical_golden_masters(self, mock_requests_get):
         """Iterates over verified historical baseline snapshot payloads to prevent delta regressions."""
         import json
@@ -887,6 +994,133 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertGreaterEqual(
             total_indexed_records, minimum_safe_threshold,
             msg=f"\n\n⚠️ INDEX TRUNCATION DETECTED: {total_indexed_records:,} vs Floor: {minimum_safe_threshold:,}\n"
+        )
+
+    def test_velocity_matrix_csv_and_delta_math(self):
+        """
+        [REGRESSION] Verifies generate_velocity_matrix() (restored this cycle -- see the
+        anti-hallucination guard above) produces a correct CSV time-series matrix, and that
+        its terminal-plot delta series reflects true period-over-period velocity (net new
+        mutations since the previous snapshot), not cumulative totals.
+        """
+        import json
+        import csv
+        import shutil
+
+        temp_dir = "./output/velocity_matrix_test"
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+
+        fixtures = [
+            ("2026-08-01", {"npm": 100, "PyPI": 40}, {"Malware (New Entry)": 10}),
+            ("2026-08-08", {"npm": 150, "PyPI": 55}, {"Malware (New Entry)": 15}),
+            ("2026-08-15", {"npm": 90, "PyPI": 60}, {"Malware (New Entry)": 5}),
+        ]
+        for interval_to, leaderboard, threat_profile in fixtures:
+            payload = {
+                "metadata": {
+                    "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "interval_from": "2026-07-25",
+                    "interval_to": interval_to,
+                    "target_layer_filter": "app",
+                    "priority_sort_active": False
+                },
+                "leaderboard": leaderboard,
+                "threat_profile": threat_profile,
+                "malware_vectors": {},
+                "profile_matrix": {},
+                "outliers_leaderboards": {}
+            }
+            with open(os.path.join(temp_dir, f"snap_{interval_to}.json"), 'w', encoding='utf-8') as f:
+                json.dump(payload, f)
+
+        output_csv = os.path.join(temp_dir, "velocity_matrix.csv")
+        top10ecosystems.generate_velocity_matrix(target_dir=temp_dir, output_path=output_csv, render_terminal_plot=False)
+
+        self.assertTrue(os.path.exists(output_csv), "[!] Velocity matrix CSV was not written to disk.")
+
+        with open(output_csv, newline='', encoding='utf-8') as f:
+            rows = list(csv.DictReader(f))
+
+        self.assertEqual(len(rows), 3, "[!] Expected exactly one CSV row per snapshot.")
+        self.assertEqual([r["Date_End"] for r in rows], ["2026-08-01", "2026-08-08", "2026-08-15"])
+        self.assertEqual(int(rows[1]["npm"]), 150)
+
+        # Independently recompute the delta series the same way the terminal plot does
+        npm_totals = [int(r["npm"]) for r in rows]
+        npm_deltas = [npm_totals[0]] + [npm_totals[i] - npm_totals[i - 1] for i in range(1, len(npm_totals))]
+        self.assertEqual(
+            npm_deltas, [100, 50, -60],
+            "[!] Velocity delta math regressed -- must reflect period-over-period churn, not cumulative totals."
+        )
+
+    def test_velocity_snapshot_dedup_prefers_default_over_priority_sort(self):
+        """
+        [REGRESSION] Verifies load_snapshots_from_dir() collapses a --priority-sort snapshot
+        and a default snapshot for the same date/layer into a single entry instead of
+        double-counting the same day, and prefers the default (non-priority-sort) file when
+        both exist on disk.
+        """
+        import json
+        import shutil
+
+        temp_dir = "./output/velocity_dedup_test"
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+
+        def make_payload(priority_active):
+            return {
+                "metadata": {
+                    "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "interval_from": "2026-08-25",
+                    "interval_to": "2026-09-01",
+                    "target_layer_filter": "app",
+                    "priority_sort_active": priority_active
+                },
+                "leaderboard": {"npm": 42},
+                "threat_profile": {},
+                "malware_vectors": {},
+                "profile_matrix": {},
+                "outliers_leaderboards": {}
+            }
+
+        with open(os.path.join(temp_dir, "default.json"), 'w', encoding='utf-8') as f:
+            json.dump(make_payload(False), f)
+        with open(os.path.join(temp_dir, "default_priority.json"), 'w', encoding='utf-8') as f:
+            json.dump(make_payload(True), f)
+
+        snapshots = top10ecosystems.load_snapshots_from_dir(temp_dir)
+
+        self.assertEqual(len(snapshots), 1, "[!] Same-day default + priority-sort snapshots were not de-duplicated.")
+        self.assertFalse(
+            snapshots[0]["metadata"]["priority_sort_active"],
+            "[!] Dedup should prefer the default (non-priority-sort) snapshot when both exist."
+        )
+
+    def test_velocity_filename_no_clobber_between_default_and_priority_sort(self):
+        """
+        [REGRESSION] Verifies build_snapshot_filename() produces distinct filenames for a
+        --priority-sort run vs. a default run of the same date window/layer, so --velocity
+        snapshots from each mode can coexist on disk without overwriting each other, while
+        the default (flag-off) filename shape is unchanged from its historical form.
+        """
+        start = datetime.datetime(2026, 8, 25, tzinfo=datetime.timezone.utc)
+        end = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+
+        default_name = top10ecosystems.build_snapshot_filename(start, end, "app")
+        priority_name = top10ecosystems.build_snapshot_filename(start, end, "app", priority_sort_active=True)
+
+        self.assertNotEqual(
+            default_name, priority_name,
+            "[!] --priority-sort snapshot filename collides with the default filename."
+        )
+        self.assertEqual(
+            default_name, "25-08-26_to_01-09-26_app.json",
+            "[!] Default filename format regressed away from its historical shape."
         )
 
     def test_compare_snapshots_golden_master_deltas(self):
