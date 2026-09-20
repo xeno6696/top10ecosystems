@@ -617,11 +617,9 @@ class TestThreatStreamScanner(unittest.TestCase):
 
         # 7. PARITY GATE D: Section VIII's three identity-correlation sub-tables render with the
         # expected headers -- A (cross-compiled) and B (repackaged) look WITHIN one advisory's own
-        # listing, C (cross-tracker CVE correlation, consolidated from the former separate Section
-        # IX) looks ACROSS independent advisory records sharing a CVE ID. Every listed row in all
-        # three must legitimately span >= 2 registries/ecosystems (structural sanity -- the
-        # specific classification results are covered by test_cross_registry_classification_* /
-        # test_rank_cross_registry_tables_*).
+        # listing (rendered as Package A/Package B identity columns), C (cross-tracker CVE
+        # correlation, consolidated from the former separate Section IX) looks ACROSS independent
+        # advisory records sharing a CVE ID (rendered as an ecosystem-presence grid).
         self.assertIn("VIII. IS THIS THE SAME VULNERABILITY SHOWING UP MORE THAN ONCE?", stdout_capture)
         sub_headers = [
             "VIII-A. TRUE CROSS-COMPILED",
@@ -637,19 +635,52 @@ class TestThreatStreamScanner(unittest.TestCase):
         sub_positions = [stdout_capture.index(h) for h in sub_headers]
         section_end = stdout_capture.index("=" * 125, sub_positions[-1])
         zone_bounds = sub_positions + [section_end]
+        zone_a = stdout_capture[zone_bounds[0]:zone_bounds[1]]
+        zone_b = stdout_capture[zone_bounds[1]:zone_bounds[2]]
+        zone_c = stdout_capture[zone_bounds[2]:zone_bounds[3]]
 
-        for idx, header in enumerate(sub_headers):
-            zone = stdout_capture[zone_bounds[idx]:zone_bounds[idx + 1]]
-            if "Zero advisories" in zone or "Requires --database" in zone or "0 CVEs confirmed" in zone:
+        # A/B: package-identity table -- structural sanity is that every listed row carries a
+        # real Confidence tier and two non-empty package cells (the specific classification
+        # results are covered by test_cross_registry_classification_* /
+        # test_rank_cross_registry_tables_*; there's no numeric span field left in the console
+        # display to regex-check now that Registries/CVSS were dropped to make room for Package
+        # A/B, but that >= 2 ecosystems invariant is still enforced at the data layer by those
+        # other tests).
+        for zone, header in ((zone_a, sub_headers[0]), (zone_b, sub_headers[1])):
+            if "Zero advisories" in zone:
                 continue
-            for row_match in re.finditer(r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(\d+)\s*\|", zone, re.MULTILINE):
-                span_count = int(row_match.group(2))
+            for row_match in re.finditer(
+                r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(CONFIRMED|HIGH|MEDIUM|LOW)\s*\|\s*(\S.*?)\s*\|\s*(\S.*)$",
+                zone, re.MULTILINE
+            ):
+                pkg_a, pkg_b = row_match.group(3), row_match.group(4)
+                self.assertTrue(
+                    pkg_a.strip() and pkg_b.strip(),
+                    f"[!] REGRESSION: Section VIII sub-table '{header}' row '{row_match.group(0).strip()}' is "
+                    f"missing a Package A or Package B identifier."
+                )
+
+        # C: presence grid -- every listed CVE row must carry >= 2 'X' marks across its ecosystem
+        # columns, matching the >= 2 distinct ecosystems invariant enforced by
+        # find_cross_ecosystem_cve_correlations(). A raw numeric field can no longer be
+        # regex-matched here the way A/B once were: the grid's first number column is "Rec"
+        # (advisory-record count), a different metric NOT guaranteed to be >= 2 (e.g. a single
+        # GHSA record that itself lists 5 ecosystems is 1 record spanning 5 ecosystems).
+        if "0 CVEs confirmed" not in zone_c and "Requires --database" not in zone_c:
+            grid_lines = zone_c.splitlines()
+            header_idx = next((i for i, l in enumerate(grid_lines) if "CVE ID" in l and "Rec" in l), None)
+            self.assertIsNotNone(header_idx, "[!] REGRESSION: Section VIII-C grid header not found where expected.")
+            for line in grid_lines[header_idx + 2:]:  # skip the header row and its divider
+                stripped = line.strip()
+                if not stripped or stripped.startswith("=") or stripped.startswith("("):
+                    break
+                cells = line.split("|")
+                x_count = sum(1 for c in cells[2:] if c.strip() == "X")  # cells[0]=CVE ID, [1]=Rec
                 self.assertGreaterEqual(
-                    span_count, 2,
-                    f"[!] REGRESSION: Section VIII sub-table '{header}' listed '{row_match.group(0).strip()}' "
-                    f"spanning fewer than 2 registries/ecosystems -- rank_cross_registry_tables() and "
-                    f"find_cross_ecosystem_cve_correlations() should only ever surface entries with >= 2 "
-                    f"distinct spans."
+                    x_count, 2,
+                    f"[!] REGRESSION: Section VIII-C grid row '{stripped}' has fewer than 2 'X' marks -- "
+                    f"find_cross_ecosystem_cve_correlations() should only ever surface CVEs spanning >= 2 "
+                    f"distinct ecosystems."
                 )
 
     def run_scanner_with_args(self, mock_args):

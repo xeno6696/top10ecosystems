@@ -154,14 +154,6 @@ def normalize_package_token(name: str) -> str:
 # should say so rather than presenting every verdict as equally certain. Higher = more trustworthy.
 _CROSS_REGISTRY_CONFIDENCE_RANK = {"confirmed": 3, "high": 2, "medium": 1, "low": 0}
 
-_CROSS_REGISTRY_SIGNAL_LABELS = {
-    "known-repackaging-namespace": "known repackaging convention (e.g. Maven webjars)",
-    "shared-upstream-repo": "both trace to the same upstream repo",
-    "exact-name-match": "identical name, no other corroborating evidence",
-    "name-substring-wrap": "one name wraps the other",
-}
-
-
 def _classify_cross_registry_pair_detailed(name_a: str, purl_a: str, name_b: str, purl_b: str, repo_anchor: str):
     """Does the actual classification work for classify_cross_registry_pair() (see that function
     for the rule-by-rule rationale), additionally returning a confidence tier and a short signal
@@ -763,6 +755,14 @@ def _truncate_with_ellipsis(text: str, max_len: int) -> str:
     return text[:max_len - 1] + "…"
 
 
+def _abbreviate_ecosystem_label(name: str, width: int = 5) -> str:
+    """Deterministic fixed-width column label for the Section VIII-C presence grid: strips
+    everything but letters/digits and uppercases, so 'Go (Golang)' -> 'GO', 'Crates.io' ->
+    'CRATE', 'Packagist (PHP)' -> 'PACKA'. Not guaranteed collision-free against an arbitrary
+    future ecosystem name, but there are none among the known registries/containers today."""
+    return re.sub(r'[^A-Za-z0-9]', '', name).upper()[:width]
+
+
 def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_pools, eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests, *, priority_sort_active: bool = False):
     """Renders Section V: Critical Outlier Attack Surface Radius Pools."""
     print("\n" + "="*115)
@@ -1013,23 +1013,6 @@ def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top
     return table_a, table_b
 
 
-_CROSS_REGISTRY_EVIDENCE_MAX_WIDTH = 62
-
-
-def _format_cross_registry_evidence(evidence: dict, max_width: int = _CROSS_REGISTRY_EVIDENCE_MAX_WIDTH) -> str:
-    """Renders the specific ecosystem pair and signal that earned a Section VIII row its table
-    membership, so a reader can see WHY it was classified that way instead of taking the verdict
-    on faith -- two rows for the same advisory across tables A/B will cite different pairs/signals
-    rather than looking like duplicates of each other."""
-    if not evidence:
-        return ""
-    label = _CROSS_REGISTRY_SIGNAL_LABELS.get(evidence["signal"], evidence["signal"])
-    text = f"{evidence['eco_a']} \"{evidence['name_a']}\" vs {evidence['eco_b']} \"{evidence['name_b']}\" -- {label}"
-    if len(text) > max_width:
-        text = text[:max_width - 1] + "…"
-    return text
-
-
 # Section VIII (rank_cross_registry_tables) only ever looks INSIDE one advisory's own `affected`
 # list -- it can tell you npm/Maven/NuGet are related because a single GHSA record lists all
 # three. It has zero visibility into a second, wholly independent advisory record (e.g. Debian's
@@ -1103,6 +1086,39 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
     return len(qualifying), qualifying[:top_n]
 
 
+_CVE_GRID_MAX_COLUMNS = 15
+
+
+def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int = 5, max_columns: int = _CVE_GRID_MAX_COLUMNS) -> list:
+    """Builds the VIII-C ecosystem-presence grid as a list of print-ready lines: a fixed-width X
+    per ecosystem actually touched by these rows (not the full universe of known ecosystems, which
+    would mostly be empty columns), ordered by how many rows touch it so the busiest columns land
+    on the left. Capped at max_columns -- past that point a column-per-ecosystem grid stops being
+    more scannable than prose, so anything beyond the cap is called out by count instead of given
+    its own column. A 'Rec' column carries the raw advisory-record count per CVE (distinct from
+    the ecosystem count implied by the X's) since that's where things like Bitnami's one-advisory-
+    per-container-image practice becomes visible."""
+    eco_counts = Counter()
+    for _, _, _, ecosystems in rows:
+        eco_counts.update(ecosystems)
+
+    ordered_ecos = [eco for eco, _ in eco_counts.most_common()]
+    shown_ecos = ordered_ecos[:max_columns]
+    hidden_count = len(ordered_ecos) - len(shown_ecos)
+
+    def cell(text):
+        return f"| {text:<{col_width}} "
+
+    header = f"{'CVE ID':<{id_width}}" + cell("Rec") + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
+    lines = [header, "-" * len(header)]
+    for cve_id, eco_count, record_count, ecosystems in rows:
+        eco_set = set(ecosystems)
+        lines.append(f"{cve_id:<{id_width}}" + cell(str(record_count)) + "".join(cell("X" if eco in eco_set else "") for eco in shown_ecos))
+    if hidden_count > 0:
+        lines.append(f"  (+{hidden_count} additional ecosystem(s) touched by these CVEs, not broken out as separate columns)")
+    return lines
+
+
 def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_available: bool, qualifying_count: int, cve_correlation_rows: list):
     """Renders Section VIII as three sub-tables answering one question -- is this vulnerability
     actually the same thing being counted more than once -- at two different scopes:
@@ -1115,64 +1131,80 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     Previously split across two separately-numbered sections (VIII "cross-registry" and IX
     "cross-ecosystem"); consolidated after the near-synonymous names and separate numbering made
     two views of the same underlying question read as unrelated rankings."""
-    print("\n" + "="*125)
+    # The C grid's width depends on how many distinct ecosystems appear across these specific
+    # rows (13+ columns is common), which can legitimately exceed the 125 chars that comfortably
+    # fits A/B -- so the box width is computed from whichever is actually wider, the same fix
+    # applied to Sections V/VI/VII earlier for the same underlying mistake (a hardcoded border
+    # that doesn't match real content width).
+    grid_lines = _render_cross_ecosystem_grid(cve_correlation_rows) if (cve_correlation_available and cve_correlation_rows) else []
+    box_width = max([125] + [len(l) for l in grid_lines])
+
+    print("\n" + "="*box_width)
     print(f"  {BOLD}VIII. IS THIS THE SAME VULNERABILITY SHOWING UP MORE THAN ONCE?{RESET}")
-    print("="*125)
+    print("="*box_width)
     print("  A and B look WITHIN one advisory's own package listing (e.g. one GHSA record that")
     print("  lists npm, Maven, and NuGet together) and ask whether that's a genuine native port of")
     print("  the same project (A) or one registry mechanically vendoring another's artifact (B).")
     print("  C looks ACROSS independently-tracked advisory records (e.g. GHSA vs. Debian's own")
     print("  tracker) sharing the same CVE ID -- something A and B can't see at all, since they")
     print("  never look outside a single record.")
+    print("  A/B Confidence: CONFIRMED = known repackaging convention (e.g. Maven webjars) | HIGH =")
+    print("  both trace to the same upstream repo | MEDIUM = one name wraps the other | LOW = identical")
+    print("  name only, no other corroborating evidence.")
 
-    print("-" * 125)
+    # A/B previously showed Registries/CVSS/a prose "Evidence" sentence -- per review, the actual
+    # package identifier (what a developer greps a pom.xml/build.gradle/package.json against) was
+    # buried inside that sentence. Package A/B are now their own columns; Registries/CVSS are
+    # dropped from this specific table (both are already shown elsewhere in the dashboard, and
+    # this table's job is identity, not risk-scoring) to make room.
+    print("-" * box_width)
     print(f"  {BOLD}VIII-A. TRUE CROSS-COMPILED (same project, independently native-released to multiple registries){RESET}")
-    print("-" * 125)
+    print("-" * box_width)
     if not table_a:
         print("  [+] Zero advisories in this execution frame matched a same-project, multi-registry native-release pattern.")
     else:
-        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
-        print("-" * 125)
+        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Package A':<38} | {'Package B'}")
+        print("-" * box_width)
         for v_id, eco_count, cvss, names_by_eco, evidence in table_a:
-            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
+            pkg_a = _truncate_with_ellipsis(f"{evidence['eco_a']}: {evidence['name_a']}", 38)
+            pkg_b = _truncate_with_ellipsis(f"{evidence['eco_b']}: {evidence['name_b']}", 44)
+            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_a:<38} | {pkg_b}")
 
     print()
-    print("-" * 125)
+    print("-" * box_width)
     print(f"  {BOLD}VIII-B. REPACKAGED-AS-IS (one registry vendoring another's artifact unmodified){RESET}")
-    print("-" * 125)
+    print("-" * box_width)
     if not table_b:
         print("  [+] Zero advisories in this execution frame matched a mechanical repackaging pattern (e.g. Maven webjars, distro rewraps).")
     else:
-        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
-        print("-" * 125)
+        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Package A':<38} | {'Package B'}")
+        print("-" * box_width)
         for v_id, eco_count, cvss, names_by_eco, evidence in table_b:
-            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
+            pkg_a = _truncate_with_ellipsis(f"{evidence['eco_a']}: {evidence['name_a']}", 38)
+            pkg_b = _truncate_with_ellipsis(f"{evidence['eco_b']}: {evidence['name_b']}", 44)
+            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_a:<38} | {pkg_b}")
 
     print()
-    print("-" * 125)
+    print("-" * box_width)
     print(f"  {BOLD}VIII-C. CROSS-TRACKER CVE CORRELATION (same CVE, independently-tracked advisory records){RESET}")
     if not cve_correlation_available:
-        print("-" * 125)
+        print("-" * box_width)
         print("  [+] Requires --database (needs a table-wide query with no cheap non-database equivalent).")
     else:
         print("  [!] Coverage floor: ~8.3% of tracked advisories carry a resolvable CVE ID -- absence")
         print("      here means untraceable, not necessarily isolated.")
-        print("-" * 125)
+        print("-" * box_width)
         if not cve_correlation_rows:
             print("  [+] This window: 0 CVEs confirmed to span 2+ independently-tracked ecosystems.")
         else:
             print(f"  This window: {qualifying_count} CVE(s) confirmed to span 2+ independently-tracked ecosystems.")
             print()
-            print(f"{'CVE ID':<18} | {'Ecosystems':<11} | {'Records':<8} | {'Spans'}")
-            print("-" * 125)
-            # Prefix (cve_id + ecosystems + records columns, with their " | " separators) is 46
-            # chars, so capping "spans" at 69 keeps every row at or under the 125-char box width.
-            for cve_id, eco_count, record_count, ecosystems in cve_correlation_rows:
-                spans = ", ".join(ecosystems)
-                if len(spans) > 69:
-                    spans = spans[:68] + "…"
-                print(f"{cve_id:<18} | {eco_count:<11} | {record_count:<8} | {spans}")
-    print("="*125 + "\n")
+            # Presence grid instead of a prose ecosystem list -- fixed-width X-per-ecosystem reads
+            # as a scannable pattern across rows, and (unlike a name/prose column) never needs
+            # truncation regardless of how long an ecosystem's real name is.
+            for line in grid_lines:
+                print(line)
+    print("="*box_width + "\n")
 
 
 def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False):
