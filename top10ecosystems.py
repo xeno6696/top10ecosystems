@@ -109,6 +109,14 @@ _GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".g
 # This is the same pattern the user described for RHEL/Debian OS-vendor repackaging.
 _REPACKAGE_PURL_NAMESPACES = ("pkg:maven/org.webjars",)
 
+# Language/package registries (where maintainers actually publish releases) vs. OS/container image
+# vendors (which only ever re-bundle someone else's already-published code, never originate it).
+# Used by generate_enterprise_threat_leaderboard()'s own layer routing AND by Section VIII-C's
+# presence grid to mark which columns could plausibly be "where the fix ships first" -- a
+# container-ecosystem column can never be that, by definition, so it's never highlighted.
+_KNOWN_CONTAINER_ECOSYSTEMS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
+_KNOWN_REGISTRY_ECOSYSTEMS = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
+
 
 def extract_repo_anchor(vuln_data):
     """Derives a canonical 'owner/repo' identity string for an advisory (see db_warehouse.py's
@@ -156,33 +164,44 @@ _CROSS_REGISTRY_CONFIDENCE_RANK = {"confirmed": 3, "high": 2, "medium": 1, "low"
 
 def _classify_cross_registry_pair_detailed(name_a: str, purl_a: str, name_b: str, purl_b: str, repo_anchor: str):
     """Does the actual classification work for classify_cross_registry_pair() (see that function
-    for the rule-by-rule rationale), additionally returning a confidence tier and a short signal
-    tag so callers can be honest about how much to trust the verdict instead of asserting it as
-    fact. Returns (verdict, confidence, signal) -- all three None when unrelated/no match."""
-    if any((purl_a or "").startswith(p) or (purl_b or "").startswith(p) for p in _REPACKAGE_PURL_NAMESPACES):
-        return "repackaged", "confirmed", "known-repackaging-namespace"
+    for the rule-by-rule rationale), additionally returning a confidence tier, a short signal
+    tag, and -- for 'repackaged' verdicts only -- which side is the downstream wrapper ('a' or
+    'b'), so callers can state the dependency direction (which side is waiting on which) instead
+    of a neutral, directionless pairing. Returns (verdict, confidence, signal, wrapper_side); all
+    four None when unrelated/no match, and wrapper_side is None for 'cross_compiled' verdicts
+    since native releases are peers with no dependency direction between them."""
+    for p in _REPACKAGE_PURL_NAMESPACES:
+        if (purl_a or "").startswith(p):
+            return "repackaged", "confirmed", "known-repackaging-namespace", "a"
+        if (purl_b or "").startswith(p):
+            return "repackaged", "confirmed", "known-repackaging-namespace", "b"
 
     norm_a, norm_b = normalize_package_token(name_a), normalize_package_token(name_b)
     if not norm_a or not norm_b:
-        return None, None, None
+        return None, None, None, None
 
     if repo_anchor:
         owner, _, repo = repo_anchor.partition("/")
         owner_tok, repo_tok = normalize_package_token(owner), normalize_package_token(repo)
         for tok in (repo_tok, owner_tok):
             if tok and len(tok) >= 3 and tok in norm_a and tok in norm_b:
-                return "cross_compiled", "high", "shared-upstream-repo"
+                return "cross_compiled", "high", "shared-upstream-repo", None
 
     if norm_a == norm_b:
         # Weakest signal in the set: two identical short names could just as easily be an
         # unrelated coincidence (a generic word like "core" or "utils") as a genuine parallel
         # native release, and we have no corroborating repo/namespace evidence either way.
-        return "cross_compiled", "low", "exact-name-match"
+        return "cross_compiled", "low", "exact-name-match", None
 
-    if norm_a in norm_b or norm_b in norm_a:
-        return "repackaged", "medium", "name-substring-wrap"
+    # Whichever normalized name CONTAINS the other is the decorated/prefixed/suffixed wrap (the
+    # downstream side); the one that IS the substring is the shorter core name (upstream) --
+    # 'python3-jinja2' (b) wraps 'jinja2' (a), so b is the wrapper here.
+    if norm_a in norm_b:
+        return "repackaged", "medium", "name-substring-wrap", "b"
+    if norm_b in norm_a:
+        return "repackaged", "medium", "name-substring-wrap", "a"
 
-    return None, None, None
+    return None, None, None, None
 
 
 def classify_cross_registry_pair(name_a: str, purl_a: str, name_b: str, purl_b: str, repo_anchor: str):
@@ -242,8 +261,11 @@ def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, 
     strongest piece of evidence found for each verdict, so Section VIII can show a reader WHICH
     ecosystem pair and WHICH signal drove a classification instead of asserting it with false
     certainty. Returns (cross_compiled_evidence, repackaged_evidence); each is either None (no
-    matching pair found) or a dict: {eco_a, eco_b, name_a, name_b, confidence, signal}. When
-    multiple pairs support the same verdict, the highest-confidence one wins."""
+    matching pair found) or a dict: {eco_a, eco_b, name_a, name_b, confidence, signal,
+    wrapper_side}. wrapper_side ('a' or 'b') identifies the downstream/repackaged side for
+    repackaged evidence (None for cross_compiled, since native releases have no dependency
+    direction between them). When multiple pairs support the same verdict, the highest-confidence
+    one wins."""
     ecosystems = sorted(package_names_by_ecosystem.keys())
     best_cross_compiled = None
     best_repackaged = None
@@ -259,11 +281,11 @@ def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, 
                 for nb in names_b:
                     pa = purls_a[0] if purls_a else ""
                     pb = purls_b[0] if purls_b else ""
-                    verdict, confidence, signal = _classify_cross_registry_pair_detailed(na, pa, nb, pb, repo_anchor)
+                    verdict, confidence, signal, wrapper_side = _classify_cross_registry_pair_detailed(na, pa, nb, pb, repo_anchor)
                     if verdict is None:
                         continue
                     entry = {"eco_a": eco_a, "eco_b": eco_b, "name_a": na, "name_b": nb,
-                              "confidence": confidence, "signal": signal}
+                              "confidence": confidence, "signal": signal, "wrapper_side": wrapper_side}
                     if verdict == "cross_compiled":
                         if best_cross_compiled is None or _CROSS_REGISTRY_CONFIDENCE_RANK[confidence] > _CROSS_REGISTRY_CONFIDENCE_RANK[best_cross_compiled["confidence"]]:
                             best_cross_compiled = entry
@@ -755,6 +777,18 @@ def _truncate_with_ellipsis(text: str, max_len: int) -> str:
     return text[:max_len - 1] + "…"
 
 
+_ANSI_ESCAPE_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+
+def _visible_length(text: str) -> int:
+    """Length of text as it will actually appear on screen, ignoring ANSI color/style escape
+    codes -- those count toward len() but occupy zero screen columns. Used wherever a computed
+    box/divider width needs to match real rendered width; a naive len() on colored text (e.g. the
+    VIII-C grid's red registry X's) would over-count by the invisible escape bytes and print a
+    border wider than the content actually needs."""
+    return len(_ANSI_ESCAPE_RE.sub('', text))
+
+
 def _abbreviate_ecosystem_label(name: str, width: int = 5) -> str:
     """Deterministic fixed-width column label for the Section VIII-C presence grid: strips
     everything but letters/digits and uppercases, so 'Go (Golang)' -> 'GO', 'Crates.io' ->
@@ -1097,7 +1131,15 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
     more scannable than prose, so anything beyond the cap is called out by count instead of given
     its own column. A 'Rec' column carries the raw advisory-record count per CVE (distinct from
     the ecosystem count implied by the X's) since that's where things like Bitnami's one-advisory-
-    per-container-image practice becomes visible."""
+    per-container-image practice becomes visible.
+
+    Registry-ecosystem X's (npm, Maven, PyPI, etc. -- where maintainers actually publish) are
+    rendered in RED: those are the only columns that could plausibly be where a fix ships first.
+    A container/OS-image ecosystem (Debian, Bitnami, Chainguard, ...) can never be that -- it only
+    ever re-bundles code published elsewhere -- so its X's are left uncolored. This does NOT mean
+    there's exactly one red column per row: a CVE natively maintained in multiple registries (e.g.
+    both a Go module and its Java bindings) legitimately gets multiple red X's, each on its own
+    release schedule -- red marks "a plausible fix origin," not "the one true source."""
     eco_counts = Counter()
     for _, _, _, ecosystems in rows:
         eco_counts.update(ecosystems)
@@ -1109,13 +1151,25 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
     def cell(text):
         return f"| {text:<{col_width}} "
 
+    def x_cell(is_present: bool, eco: str):
+        # Pad the plain "X"/"" text to its true visible width FIRST, then wrap in color codes --
+        # coloring before padding would make the format spec count the invisible ANSI bytes as
+        # part of the string length, under-padding the cell and drifting every column after it
+        # (the exact bug fixed for the Section V/VI/VII EPSS/KEV columns earlier this session).
+        text = "X" if is_present else ""
+        padded = f"{text:<{col_width}}"
+        if is_present and eco in _KNOWN_REGISTRY_ECOSYSTEMS:
+            padded = f"{RED}{padded}{RESET}"
+        return f"| {padded} "
+
     header = f"{'CVE ID':<{id_width}}" + cell("Rec") + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
     lines = [header, "-" * len(header)]
     for cve_id, eco_count, record_count, ecosystems in rows:
         eco_set = set(ecosystems)
-        lines.append(f"{cve_id:<{id_width}}" + cell(str(record_count)) + "".join(cell("X" if eco in eco_set else "") for eco in shown_ecos))
+        lines.append(f"{cve_id:<{id_width}}" + cell(str(record_count)) + "".join(x_cell(eco in eco_set, eco) for eco in shown_ecos))
     if hidden_count > 0:
         lines.append(f"  (+{hidden_count} additional ecosystem(s) touched by these CVEs, not broken out as separate columns)")
+    lines.append(f"  {RED}Red{RESET} = language/package registry (a plausible fix origin); plain = OS/container image (always downstream).")
     return lines
 
 
@@ -1137,7 +1191,7 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     # applied to Sections V/VI/VII earlier for the same underlying mistake (a hardcoded border
     # that doesn't match real content width).
     grid_lines = _render_cross_ecosystem_grid(cve_correlation_rows) if (cve_correlation_available and cve_correlation_rows) else []
-    box_width = max([125] + [len(l) for l in grid_lines])
+    box_width = max([125] + [_visible_length(l) for l in grid_lines])
 
     print("\n" + "="*box_width)
     print(f"  {BOLD}VIII. IS THIS THE SAME VULNERABILITY SHOWING UP MORE THAN ONCE?{RESET}")
@@ -1148,28 +1202,31 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     print("  C looks ACROSS independently-tracked advisory records (e.g. GHSA vs. Debian's own")
     print("  tracker) sharing the same CVE ID -- something A and B can't see at all, since they")
     print("  never look outside a single record.")
-    print("  A/B Confidence: CONFIRMED = known repackaging convention (e.g. Maven webjars) | HIGH =")
-    print("  both trace to the same upstream repo | MEDIUM = one name wraps the other | LOW = identical")
-    print("  name only, no other corroborating evidence.")
+    print("  A Confidence: HIGH = both trace to the same upstream repo | LOW = identical name only,")
+    print("  no other corroborating evidence. B: which side is the downstream repackage, waiting on")
+    print("  the upstream side's fix to ship before it can be republished -- CONFIRMED = known")
+    print("  repackaging convention (e.g. Maven webjars) | MEDIUM = one name wraps the other.")
 
-    # A/B previously showed Registries/CVSS/a prose "Evidence" sentence -- per review, the actual
-    # package identifier (what a developer greps a pom.xml/build.gradle/package.json against) was
-    # buried inside that sentence. Package A/B are now their own columns; Registries/CVSS are
-    # dropped from this specific table (both are already shown elsewhere in the dashboard, and
-    # this table's job is identity, not risk-scoring) to make room.
+    # A: independent native releases are peers with no dependency direction between them, so the
+    # single "best pair" that proved the classification isn't the useful thing to show -- the full
+    # set of ecosystems/names is (that's everywhere you'd need to go check), per review feedback
+    # that a flat artifact-name list is more actionable here than a pairwise comparison.
     print("-" * box_width)
     print(f"  {BOLD}VIII-A. TRUE CROSS-COMPILED (same project, independently native-released to multiple registries){RESET}")
     print("-" * box_width)
     if not table_a:
         print("  [+] Zero advisories in this execution frame matched a same-project, multi-registry native-release pattern.")
     else:
-        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Package A':<38} | {'Package B'}")
+        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Ecosystems / Package Names'}")
         print("-" * box_width)
         for v_id, eco_count, cvss, names_by_eco, evidence in table_a:
-            pkg_a = _truncate_with_ellipsis(f"{evidence['eco_a']}: {evidence['name_a']}", 38)
-            pkg_b = _truncate_with_ellipsis(f"{evidence['eco_b']}: {evidence['name_b']}", 44)
-            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_a:<38} | {pkg_b}")
+            parts = [f"{eco}: {names[0]}" for eco, names in sorted(names_by_eco.items()) if names]
+            flat = _truncate_with_ellipsis(", ".join(parts), 85)
+            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {flat}")
 
+    # B: unlike A, a repackaged pair DOES have a dependency direction -- the downstream side's fix
+    # is gated on the upstream side shipping first and someone noticing/republishing. Columns are
+    # ordered to state that directly instead of a neutral "vs" pairing.
     print()
     print("-" * box_width)
     print(f"  {BOLD}VIII-B. REPACKAGED-AS-IS (one registry vendoring another's artifact unmodified){RESET}")
@@ -1177,12 +1234,18 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     if not table_b:
         print("  [+] Zero advisories in this execution frame matched a mechanical repackaging pattern (e.g. Maven webjars, distro rewraps).")
     else:
-        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Package A':<38} | {'Package B'}")
+        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Downstream (repackaged)':<38} | {'Upstream (fix ships here first)'}")
         print("-" * box_width)
         for v_id, eco_count, cvss, names_by_eco, evidence in table_b:
-            pkg_a = _truncate_with_ellipsis(f"{evidence['eco_a']}: {evidence['name_a']}", 38)
-            pkg_b = _truncate_with_ellipsis(f"{evidence['eco_b']}: {evidence['name_b']}", 44)
-            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_a:<38} | {pkg_b}")
+            if evidence.get("wrapper_side") == "a":
+                down_eco, down_name = evidence["eco_a"], evidence["name_a"]
+                up_eco, up_name = evidence["eco_b"], evidence["name_b"]
+            else:
+                down_eco, down_name = evidence["eco_b"], evidence["name_b"]
+                up_eco, up_name = evidence["eco_a"], evidence["name_a"]
+            pkg_down = _truncate_with_ellipsis(f"{down_eco}: {down_name}", 38)
+            pkg_up = _truncate_with_ellipsis(f"{up_eco}: {up_name}", 44)
+            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_down:<38} | {pkg_up}")
 
     print()
     print("-" * box_width)
@@ -1272,8 +1335,8 @@ def generate_enterprise_threat_leaderboard(
     is_project_mode = False
     allowed_project_ecosystems = []
     
-    known_containers = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-    known_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
+    known_containers = _KNOWN_CONTAINER_ECOSYSTEMS
+    known_registries = _KNOWN_REGISTRY_ECOSYSTEMS
     master_tracks = known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
     
     if target_layer == "app": final_leaderboard.update({k: 0 for k in known_registries})

@@ -639,25 +639,35 @@ class TestThreatStreamScanner(unittest.TestCase):
         zone_b = stdout_capture[zone_bounds[1]:zone_bounds[2]]
         zone_c = stdout_capture[zone_bounds[2]:zone_bounds[3]]
 
-        # A/B: package-identity table -- structural sanity is that every listed row carries a
-        # real Confidence tier and two non-empty package cells (the specific classification
-        # results are covered by test_cross_registry_classification_* /
-        # test_rank_cross_registry_tables_*; there's no numeric span field left in the console
-        # display to regex-check now that Registries/CVSS were dropped to make room for Package
-        # A/B, but that >= 2 ecosystems invariant is still enforced at the data layer by those
-        # other tests).
-        for zone, header in ((zone_a, sub_headers[0]), (zone_b, sub_headers[1])):
-            if "Zero advisories" in zone:
-                continue
+        # A: flat artifact-name-per-ecosystem list (independent native releases are peers with no
+        # dependency direction, so the useful thing to show is everywhere you'd need to go check,
+        # not one representative pair) -- structural sanity is a real Confidence tier and a
+        # non-empty name list. The >= 2 ecosystems invariant itself is enforced at the data layer
+        # by test_rank_cross_registry_tables_* / test_cross_registry_classification_*, not
+        # re-derivable from this console format (no numeric span field is printed here anymore).
+        if "Zero advisories" not in zone_a:
+            for row_match in re.finditer(
+                r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(CONFIRMED|HIGH|MEDIUM|LOW)\s*\|\s*(\S.*)$",
+                zone_a, re.MULTILINE
+            ):
+                self.assertTrue(
+                    row_match.group(3).strip(),
+                    f"[!] REGRESSION: Section VIII-A row '{row_match.group(0).strip()}' is missing its "
+                    f"ecosystems/package-names list."
+                )
+
+        # B: repackaged pairs DO have a dependency direction (downstream waits on upstream), so
+        # this table keeps two package cells, now labeled Downstream/Upstream instead of A/B.
+        if "Zero advisories" not in zone_b:
             for row_match in re.finditer(
                 r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(CONFIRMED|HIGH|MEDIUM|LOW)\s*\|\s*(\S.*?)\s*\|\s*(\S.*)$",
-                zone, re.MULTILINE
+                zone_b, re.MULTILINE
             ):
-                pkg_a, pkg_b = row_match.group(3), row_match.group(4)
+                pkg_down, pkg_up = row_match.group(3), row_match.group(4)
                 self.assertTrue(
-                    pkg_a.strip() and pkg_b.strip(),
-                    f"[!] REGRESSION: Section VIII sub-table '{header}' row '{row_match.group(0).strip()}' is "
-                    f"missing a Package A or Package B identifier."
+                    pkg_down.strip() and pkg_up.strip(),
+                    f"[!] REGRESSION: Section VIII-B row '{row_match.group(0).strip()}' is missing its "
+                    f"Downstream or Upstream package identifier."
                 )
 
         # C: presence grid -- every listed CVE row must carry >= 2 'X' marks across its ecosystem
@@ -665,17 +675,22 @@ class TestThreatStreamScanner(unittest.TestCase):
         # find_cross_ecosystem_cve_correlations(). A raw numeric field can no longer be
         # regex-matched here the way A/B once were: the grid's first number column is "Rec"
         # (advisory-record count), a different metric NOT guaranteed to be >= 2 (e.g. a single
-        # GHSA record that itself lists 5 ecosystems is 1 record spanning 5 ecosystems).
+        # GHSA record that itself lists 5 ecosystems is 1 record spanning 5 ecosystems). Rows are
+        # distinguished from footnote/legend lines by pipe count rather than specific wording, so
+        # this doesn't need updating every time a new note is added below the grid.
         if "0 CVEs confirmed" not in zone_c and "Requires --database" not in zone_c:
             grid_lines = zone_c.splitlines()
             header_idx = next((i for i, l in enumerate(grid_lines) if "CVE ID" in l and "Rec" in l), None)
             self.assertIsNotNone(header_idx, "[!] REGRESSION: Section VIII-C grid header not found where expected.")
             for line in grid_lines[header_idx + 2:]:  # skip the header row and its divider
                 stripped = line.strip()
-                if not stripped or stripped.startswith("=") or stripped.startswith("("):
+                if not stripped or stripped.startswith("=") or line.count("|") < 2:
                     break
                 cells = line.split("|")
-                x_count = sum(1 for c in cells[2:] if c.strip() == "X")  # cells[0]=CVE ID, [1]=Rec
+                # Registry-ecosystem X's are wrapped in ANSI red (see _render_cross_ecosystem_grid),
+                # so a colored cell's stripped content is "\x1b[91mX\x1b[0m", not the bare string
+                # "X" -- substring containment still catches both plain and colored marks.
+                x_count = sum(1 for c in cells[2:] if "X" in c)  # cells[0]=CVE ID, [1]=Rec
                 self.assertGreaterEqual(
                     x_count, 2,
                     f"[!] REGRESSION: Section VIII-C grid row '{stripped}' has fewer than 2 'X' marks -- "
