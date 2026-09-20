@@ -484,6 +484,7 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             max_versions_found = 0
                             names_by_eco = {}
                             purls_by_eco = {}
+                            fixed_by_eco = {}
                             for affected in vuln_data.get("affected", []):
                                 pkg_block = affected.get("package", {})
                                 eco = pkg_block.get("ecosystem")
@@ -494,9 +495,16 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                 for v in affected.get("versions", []): vuln_versions.add(str(v).strip())
                                 v_len = len(affected.get("versions", []))
                                 if v_len > max_versions_found: max_versions_found = v_len
+                                # entry_has_fix mirrors db_warehouse.py's parse_osv_json: scoped to
+                                # just this affected[] block (one ecosystem), not OR'd across the
+                                # whole advisory like has_fixes below -- see that function's comment
+                                # for why the whole-advisory flag can't tell ecosystems apart.
+                                entry_has_fix = False
                                 for ranges in affected.get("ranges", []):
                                     for events in ranges.get("events", []):
-                                        if "fixed" in events: has_fixes = True
+                                        if "fixed" in events:
+                                            has_fixes = True
+                                            entry_has_fix = True
                                 # Per-ecosystem package identity (see db_warehouse.py's parse_osv_json
                                 # for the full rationale) -- keyed by the SAME raw eco tag this
                                 # function already stores in `ecosystems`, not the hard-mapped name.
@@ -509,6 +517,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                     bucket = purls_by_eco.setdefault(eco, [])
                                     if purl not in bucket:
                                         bucket.append(purl)
+                                if eco:
+                                    fixed_by_eco[eco] = fixed_by_eco.get(eco, False) or entry_has_fix
                             
                             published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
                             modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
@@ -546,7 +556,8 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                                     "last_modified": modified_str[:10],
                                     "package_names_by_ecosystem": names_by_eco,
                                     "purls_by_ecosystem": purls_by_eco,
-                                    "repo_anchor": extract_repo_anchor(vuln_data)
+                                    "repo_anchor": extract_repo_anchor(vuln_data),
+                                    "fixed_by_ecosystem": fixed_by_eco
                                 }
                         except json.JSONDecodeError: continue 
         print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
@@ -604,35 +615,46 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # BACKWARD COMPAT: package_names_by_ecosystem/purls_by_ecosystem/repo_anchor are new
-        # columns (Section VIII cross-registry rework). A warehouse that hasn't been re-ingested
-        # since the schema migration still gets these columns via ALTER TABLE (see
-        # db_warehouse.py's init_database), but the values are NULL until --rebuild re-ingests --
-        # so we always select them when present rather than crashing on an older physical file.
+        # BACKWARD COMPAT: package_names_by_ecosystem/purls_by_ecosystem/repo_anchor (Section VIII
+        # cross-registry rework) and fixed_by_ecosystem (Section VIII-C fix-status grid) are both
+        # additive columns from later schema migrations. A warehouse that hasn't been re-ingested
+        # since either migration still gets the columns via ALTER TABLE (see db_warehouse.py's
+        # init_database), but the values are NULL until --rebuild re-ingests -- so each is only
+        # selected when actually present, rather than crashing on an older physical file.
         cursor.execute("PRAGMA table_info(vulnerabilities)")
         available_cols = {row[1] for row in cursor.fetchall()}
         has_cross_registry_cols = {"package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"} <= available_cols
+        has_fixed_by_eco_col = "fixed_by_ecosystem" in available_cols
+
+        extra_cols = []
+        if has_cross_registry_cols:
+            extra_cols += ["package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"]
+        if has_fixed_by_eco_col:
+            extra_cols.append("fixed_by_ecosystem")
 
         if priority_sort:
-            cross_reg_select = ", v.package_names_by_ecosystem, v.purls_by_ecosystem, v.repo_anchor" if has_cross_registry_cols else ""
+            extra_select = "".join(f", v.{c}" for c in extra_cols)
             cursor.execute(f"""
                 SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.threat_profile,
                        v.ecosystems, v.last_modified, v.malware_vector, v.vulnerable_versions, v.dwell_days,
-                       e.epss_score, e.percentile, k.date_added, k.due_date{cross_reg_select}
+                       e.epss_score, e.percentile, k.date_added, k.due_date{extra_select}
                 FROM vulnerabilities v
                 LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
                 LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
             """)
         else:
-            cross_reg_select = ", package_names_by_ecosystem, purls_by_ecosystem, repo_anchor" if has_cross_registry_cols else ""
+            extra_select = "".join(f", {c}" for c in extra_cols)
             cursor.execute(f"""
-                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days{cross_reg_select}
+                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days{extra_select}
                 FROM vulnerabilities
             """)
 
         for row in cursor.fetchall():
             row = list(row)
-            names_by_eco_json = purls_by_eco_json = repo_anchor = None
+            names_by_eco_json = purls_by_eco_json = repo_anchor = fixed_by_eco_json = None
+            if has_fixed_by_eco_col:
+                fixed_by_eco_json = row[-1]
+                row = row[:-1]
             if has_cross_registry_cols:
                 names_by_eco_json, purls_by_eco_json, repo_anchor = row[-3], row[-2], row[-1]
                 row = row[:-3]
@@ -661,7 +683,8 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
                 "last_modified": last_mod,
                 "package_names_by_ecosystem": json.loads(names_by_eco_json) if names_by_eco_json else {},
                 "purls_by_ecosystem": json.loads(purls_by_eco_json) if purls_by_eco_json else {},
-                "repo_anchor": repo_anchor
+                "repo_anchor": repo_anchor,
+                "fixed_by_ecosystem": json.loads(fixed_by_eco_json) if fixed_by_eco_json else {}
             }
             if priority_sort:
                 meta_entry["epss_score"] = epss_score
@@ -1018,9 +1041,11 @@ def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top
     AND separately vendored into Maven via webjars) -- see classify_advisory_cross_registry().
     Ranked by ecosystem span (desc, i.e. how many registries it touches), then CVSS (desc).
     Returns (table_a_rows, table_b_rows); each row is (advisory_id, ecosystem_count, cvss_score,
-    package_names_by_ecosystem, evidence) -- evidence is the dict from
+    package_names_by_ecosystem, evidence, fixed_by_ecosystem) -- evidence is the dict from
     classify_advisory_cross_registry_evidence() explaining which specific ecosystem pair and
-    signal earned this row its table membership (see that function for the shape)."""
+    signal earned this row its table membership (see that function for the shape).
+    fixed_by_ecosystem (dict: ecosystem -> bool) lets the renderer show which of the listed
+    ecosystems still need a fix, same field Section VIII-C's grid uses."""
     table_a_candidates = []
     table_b_candidates = []
 
@@ -1036,10 +1061,11 @@ def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top
             names_by_eco, meta.get("purls_by_ecosystem") or {}, meta.get("repo_anchor")
         )
         cvss = meta.get("cvss_score", 0.0) or 0.0
+        fixed_by_eco = meta.get("fixed_by_ecosystem") or {}
         if cross_compiled_evidence:
-            table_a_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, cross_compiled_evidence))
+            table_a_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, cross_compiled_evidence, fixed_by_eco))
         if repackaged_evidence:
-            table_b_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, repackaged_evidence))
+            table_b_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, repackaged_evidence, fixed_by_eco))
 
     sort_key = lambda r: (-r[1], -r[2], r[0])
     table_a = sorted(table_a_candidates, key=sort_key)[:top_n]
@@ -1070,13 +1096,23 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
     image that bundles the flaw), which would otherwise dominate the ranking without actually
     reflecting how many distinct registries/supply-chain surfaces are affected.
     Returns (qualifying_count, top_rows); each row is
-    (cve_id, ecosystem_count, record_count, sorted_ecosystems)."""
+    (cve_id, ecosystem_count, record_count, sorted_ecosystems, fixed_status). fixed_status is a
+    dict mapping ecosystem -> bool, OR'd across every constituent record for that CVE (an
+    ecosystem counts as fixed the moment ANY contributing record shows a fix, even if another
+    record for the same ecosystem doesn't yet reflect it). An ecosystem absent from fixed_status
+    means no record contributed any fix-status data for it at all -- e.g. the warehouse hasn't
+    been --rebuild'd since this column was added -- which is a genuinely different, weaker claim
+    than 'confirmed still unfixed', and callers should render it as unknown, not as unfixed."""
     if not session_advisory_ids:
         return 0, []
 
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     try:
+        cursor.execute("PRAGMA table_info(vulnerabilities)")
+        has_fixed_col = "fixed_by_ecosystem" in {row[1] for row in cursor.fetchall()}
+        fixed_select = ", fixed_by_ecosystem" if has_fixed_col else ""
+
         id_list = list(session_advisory_ids)
         chunk_size = 500
 
@@ -1091,28 +1127,36 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
             )
             relevant_aliases.update(row[0] for row in cursor.fetchall())
 
-        groups = defaultdict(lambda: {"advisory_ids": set(), "ecosystems": set()})
+        groups = defaultdict(lambda: {"advisory_ids": set(), "ecosystems": set(), "fixed_status": {}})
         alias_list = list(relevant_aliases)
         for i in range(0, len(alias_list), chunk_size):
             chunk = alias_list[i:i + chunk_size]
             placeholders = ",".join("?" * len(chunk))
             cursor.execute(
-                f"SELECT cve_alias, advisory_id, ecosystems FROM vulnerabilities WHERE cve_alias IN ({placeholders})",
+                f"SELECT cve_alias, advisory_id, ecosystems{fixed_select} FROM vulnerabilities WHERE cve_alias IN ({placeholders})",
                 chunk
             )
-            for cve_alias, advisory_id, eco_json in cursor.fetchall():
+            for row in cursor.fetchall():
+                cve_alias, advisory_id, eco_json = row[0], row[1], row[2]
+                fixed_json = row[3] if has_fixed_col else None
                 try:
                     ecos = json.loads(eco_json) if eco_json else []
                 except (TypeError, ValueError):
                     ecos = []
+                try:
+                    record_fixed = json.loads(fixed_json) if fixed_json else {}
+                except (TypeError, ValueError):
+                    record_fixed = {}
                 group = groups[cve_alias]
                 group["advisory_ids"].add(advisory_id)
                 group["ecosystems"].update(ecos)
+                for eco, is_fixed in record_fixed.items():
+                    group["fixed_status"][eco] = group["fixed_status"].get(eco, False) or bool(is_fixed)
     finally:
         conn.close()
 
     qualifying = [
-        (cve_alias, len(g["ecosystems"]), len(g["advisory_ids"]), sorted(g["ecosystems"]))
+        (cve_alias, len(g["ecosystems"]), len(g["advisory_ids"]), sorted(g["ecosystems"]), g["fixed_status"])
         for cve_alias, g in groups.items()
         if len(g["ecosystems"]) >= 2
     ]
@@ -1124,24 +1168,33 @@ _CVE_GRID_MAX_COLUMNS = 15
 
 
 def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int = 5, max_columns: int = _CVE_GRID_MAX_COLUMNS) -> list:
-    """Builds the VIII-C ecosystem-presence grid as a list of print-ready lines: a fixed-width X
-    per ecosystem actually touched by these rows (not the full universe of known ecosystems, which
-    would mostly be empty columns), ordered by how many rows touch it so the busiest columns land
-    on the left. Capped at max_columns -- past that point a column-per-ecosystem grid stops being
-    more scannable than prose, so anything beyond the cap is called out by count instead of given
-    its own column. A 'Rec' column carries the raw advisory-record count per CVE (distinct from
-    the ecosystem count implied by the X's) since that's where things like Bitnami's one-advisory-
-    per-container-image practice becomes visible.
+    """Builds the VIII-C ecosystem-status grid as a list of print-ready lines: a fixed-width
+    F/U/? per ecosystem actually touched by these rows (not the full universe of known
+    ecosystems, which would mostly be empty columns), ordered by how many rows touch it so the
+    busiest columns land on the left. Capped at max_columns -- past that point a column-per-
+    ecosystem grid stops being more scannable than prose, so anything beyond the cap is called
+    out by count instead of given its own column. A 'Rec' column carries the raw advisory-record
+    count per CVE (distinct from the ecosystem count implied by the marked columns) since that's
+    where things like Bitnami's one-advisory-per-container-image practice becomes visible.
 
-    Registry-ecosystem X's (npm, Maven, PyPI, etc. -- where maintainers actually publish) are
-    rendered in RED: those are the only columns that could plausibly be where a fix ships first.
-    A container/OS-image ecosystem (Debian, Bitnami, Chainguard, ...) can never be that -- it only
-    ever re-bundles code published elsewhere -- so its X's are left uncolored. This does NOT mean
-    there's exactly one red column per row: a CVE natively maintained in multiple registries (e.g.
-    both a Go module and its Java bindings) legitimately gets multiple red X's, each on its own
-    release schedule -- red marks "a plausible fix origin," not "the one true source."""
+    Presence alone ("does this ecosystem appear at all") isn't actionable -- it tells you how
+    many release schedules exist, not which ones still need chasing. Each present cell instead
+    shows:
+      F = this ecosystem's own record(s) show a fixed version already shipped
+      U = this ecosystem's own record(s) exist but show no fixed version yet
+      ? = present, but no fix-status data at all for it (e.g. warehouse not yet --rebuild'd since
+          this column was added) -- genuinely unknown, deliberately NOT rendered as U, since
+          claiming "confirmed still unfixed" from an absence of data would overstate what's known.
+    Registry-ecosystem cells (npm, Maven, PyPI, etc. -- where maintainers actually publish) are
+    additionally colored RED: those are the only columns that could plausibly be where a fix
+    ships first. A container/OS-image ecosystem (Debian, Bitnami, Chainguard, ...) can never be
+    that -- it only ever re-bundles code published elsewhere -- so its cells stay uncolored. This
+    does NOT mean there's exactly one red column per row: a CVE natively maintained in multiple
+    registries (e.g. both a Go module and its Java bindings) legitimately gets multiple red
+    cells, each on its own release schedule -- red marks "a plausible fix origin," not "the one
+    true source.\""""
     eco_counts = Counter()
-    for _, _, _, ecosystems in rows:
+    for _, _, _, ecosystems, _ in rows:
         eco_counts.update(ecosystems)
 
     ordered_ecos = [eco for eco, _ in eco_counts.most_common()]
@@ -1151,12 +1204,17 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
     def cell(text):
         return f"| {text:<{col_width}} "
 
-    def x_cell(is_present: bool, eco: str):
-        # Pad the plain "X"/"" text to its true visible width FIRST, then wrap in color codes --
+    def status_cell(is_present: bool, eco: str, fixed_status: dict):
+        # Pad the plain status text to its true visible width FIRST, then wrap in color codes --
         # coloring before padding would make the format spec count the invisible ANSI bytes as
         # part of the string length, under-padding the cell and drifting every column after it
         # (the exact bug fixed for the Section V/VI/VII EPSS/KEV columns earlier this session).
-        text = "X" if is_present else ""
+        if not is_present:
+            text = ""
+        elif eco not in fixed_status:
+            text = "?"
+        else:
+            text = "F" if fixed_status[eco] else "U"
         padded = f"{text:<{col_width}}"
         if is_present and eco in _KNOWN_REGISTRY_ECOSYSTEMS:
             padded = f"{RED}{padded}{RESET}"
@@ -1164,13 +1222,25 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
 
     header = f"{'CVE ID':<{id_width}}" + cell("Rec") + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
     lines = [header, "-" * len(header)]
-    for cve_id, eco_count, record_count, ecosystems in rows:
+    for cve_id, eco_count, record_count, ecosystems, fixed_status in rows:
         eco_set = set(ecosystems)
-        lines.append(f"{cve_id:<{id_width}}" + cell(str(record_count)) + "".join(x_cell(eco in eco_set, eco) for eco in shown_ecos))
+        lines.append(f"{cve_id:<{id_width}}" + cell(str(record_count)) + "".join(status_cell(eco in eco_set, eco, fixed_status) for eco in shown_ecos))
     if hidden_count > 0:
         lines.append(f"  (+{hidden_count} additional ecosystem(s) touched by these CVEs, not broken out as separate columns)")
+    lines.append("  F = fix shipped for that ecosystem | U = no fix shipped yet | ? = fix status unknown (needs --rebuild)")
     lines.append(f"  {RED}Red{RESET} = language/package registry (a plausible fix origin); plain = OS/container image (always downstream).")
     return lines
+
+
+def _fix_status_tag(fixed_by_eco: dict, eco: str) -> str:
+    """Short bracketed status tag for a package's fix state within Section VIII-A/B's listings --
+    same F/U/? semantics as VIII-C's grid: F = confirmed fixed, U = confirmed not yet fixed, ? =
+    no fix-status data available for this ecosystem (a genuinely weaker claim than U -- see
+    find_cross_ecosystem_cve_correlations's docstring for why absence of data isn't evidence of
+    no fix)."""
+    if eco not in fixed_by_eco:
+        return "?"
+    return "F" if fixed_by_eco[eco] else "U"
 
 
 def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_available: bool, qualifying_count: int, cve_correlation_rows: list):
@@ -1219,8 +1289,8 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     else:
         print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Ecosystems / Package Names'}")
         print("-" * box_width)
-        for v_id, eco_count, cvss, names_by_eco, evidence in table_a:
-            parts = [f"{eco}: {names[0]}" for eco, names in sorted(names_by_eco.items()) if names]
+        for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_a:
+            parts = [f"{eco}: {names[0]} [{_fix_status_tag(fixed_by_eco, eco)}]" for eco, names in sorted(names_by_eco.items()) if names]
             flat = _truncate_with_ellipsis(", ".join(parts), 85)
             print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {flat}")
 
@@ -1236,15 +1306,15 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     else:
         print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Downstream (repackaged)':<38} | {'Upstream (fix ships here first)'}")
         print("-" * box_width)
-        for v_id, eco_count, cvss, names_by_eco, evidence in table_b:
+        for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_b:
             if evidence.get("wrapper_side") == "a":
                 down_eco, down_name = evidence["eco_a"], evidence["name_a"]
                 up_eco, up_name = evidence["eco_b"], evidence["name_b"]
             else:
                 down_eco, down_name = evidence["eco_b"], evidence["name_b"]
                 up_eco, up_name = evidence["eco_a"], evidence["name_a"]
-            pkg_down = _truncate_with_ellipsis(f"{down_eco}: {down_name}", 38)
-            pkg_up = _truncate_with_ellipsis(f"{up_eco}: {up_name}", 44)
+            pkg_down = _truncate_with_ellipsis(f"{down_eco}: {down_name} [{_fix_status_tag(fixed_by_eco, down_eco)}]", 38)
+            pkg_up = _truncate_with_ellipsis(f"{up_eco}: {up_name} [{_fix_status_tag(fixed_by_eco, up_eco)}]", 44)
             print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_down:<38} | {pkg_up}")
 
     print()
