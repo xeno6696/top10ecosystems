@@ -1021,43 +1021,15 @@ def _format_cross_registry_evidence(evidence: dict, max_width: int = _CROSS_REGI
     return text
 
 
-def print_section_viii_cross_registry_tables(table_a, table_b):
-    """Renders the two Section VIII replacement tables (see rank_cross_registry_tables): true
-    cross-compiled native multi-registry releases, and repackaged-as-is mechanical vendoring.
-    Each row shows a Confidence tier and the ecosystem-pair evidence behind it -- classification
-    here is a naming/purl heuristic, not a verified fact, so the weakest signal (two identical
-    names with no other corroboration) is labeled LOW rather than presented as certain."""
-    print("\n" + "="*125)
-    print(f"  {BOLD}VIII-A. TRUE CROSS-COMPILED ADVISORIES (SAME PROJECT, NATIVE MULTI-REGISTRY RELEASE){RESET}")
-    print("="*125)
-    if not table_a:
-        print("  [+] Zero advisories in this execution frame matched a same-project, multi-registry native-release pattern.")
-    else:
-        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
-        print("-" * 125)
-        for v_id, eco_count, cvss, names_by_eco, evidence in table_a:
-            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
-    print("="*125)
-
-    print("\n" + "="*125)
-    print(f"  {BOLD}VIII-B. REPACKAGED-AS-IS ADVISORIES (VENDORED UNMODIFIED ACROSS REGISTRIES){RESET}")
-    print("="*125)
-    if not table_b:
-        print("  [+] Zero advisories in this execution frame matched a mechanical repackaging pattern (e.g. Maven webjars, distro rewraps).")
-    else:
-        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
-        print("-" * 125)
-        for v_id, eco_count, cvss, names_by_eco, evidence in table_b:
-            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
-    print("="*125 + "\n")
-
-
 # Section VIII (rank_cross_registry_tables) only ever looks INSIDE one advisory's own `affected`
 # list -- it can tell you npm/Maven/NuGet are related because a single GHSA record lists all
 # three. It has zero visibility into a second, wholly independent advisory record (e.g. Debian's
 # or Bitnami's own tracker) that happens to describe the exact same CVE. That's a different,
 # cross-RECORD correlation, only findable via the shared cve_alias column across the whole
-# `vulnerabilities` table -- hence its own function/section rather than folding into Section VIII.
+# `vulnerabilities` table -- rendered as sub-table C of the same Section VIII (see
+# print_section_viii_identity_correlation) rather than a separately-numbered section, since it's
+# the same underlying question ("is this one vulnerability being counted more than once?") at a
+# different scope, not an unrelated ranking.
 #
 # Coverage caveat (verified against the live warehouse on 2026-09-19): ~91.7% of rows have no
 # resolvable cve_alias at all, so this can only ever speak for the ~8.3% that do. A CVE not
@@ -1122,39 +1094,76 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
     return len(qualifying), qualifying[:top_n]
 
 
-def print_section_ix_cross_ecosystem_cve_correlation(qualifying_count: int, rows: list):
-    """Renders Section IX: confirmed cross-ecosystem CVE correlation (see
-    find_cross_ecosystem_cve_correlations for what this can and can't see). Leads with a headline
-    digest -- what an executive skimming the dashboard actually wants -- then the full per-CVE
-    detail table in the same section, so nobody has to burn a second execution behind a flag just
-    to see which records back up the headline count."""
-    print("\n" + "="*115)
-    print(f"  {BOLD}IX. CONFIRMED CROSS-ECOSYSTEM CVE CORRELATION{RESET}")
-    print("="*115)
-    print(f"  [!] Correlated via shared CVE ID across independent advisory records (e.g. a GHSA")
-    print(f"      entry and a separate Debian/Bitnami tracker entry for the same flaw) -- NOT the")
-    print(f"      same thing as Section VIII, which only sees ecosystems listed in one record.")
-    print(f"      Coverage floor: ~8.3% of tracked advisories carry a resolvable CVE ID, so a CVE")
-    print(f"      absent here may still be cross-published; it just isn't visible to this query.")
-    print("-" * 115)
+def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_available: bool, qualifying_count: int, cve_correlation_rows: list):
+    """Renders Section VIII as three sub-tables answering one question -- is this vulnerability
+    actually the same thing being counted more than once -- at two different scopes:
+      A, B: WITHIN one advisory's own package listing (see rank_cross_registry_tables) -- is a
+            listed pair a genuine independent native release of the same project (A), or one
+            registry mechanically vendoring another's artifact unmodified (B)?
+      C:    ACROSS independently-tracked advisory records sharing the same CVE ID (see
+            find_cross_ecosystem_cve_correlations) -- something A/B cannot see at all, since they
+            never look outside a single advisory record.
+    Previously split across two separately-numbered sections (VIII "cross-registry" and IX
+    "cross-ecosystem"); consolidated after the near-synonymous names and separate numbering made
+    two views of the same underlying question read as unrelated rankings."""
+    print("\n" + "="*125)
+    print(f"  {BOLD}VIII. IS THIS THE SAME VULNERABILITY SHOWING UP MORE THAN ONCE?{RESET}")
+    print("="*125)
+    print("  A and B look WITHIN one advisory's own package listing (e.g. one GHSA record that")
+    print("  lists npm, Maven, and NuGet together) and ask whether that's a genuine native port of")
+    print("  the same project (A) or one registry mechanically vendoring another's artifact (B).")
+    print("  C looks ACROSS independently-tracked advisory records (e.g. GHSA vs. Debian's own")
+    print("  tracker) sharing the same CVE ID -- something A and B can't see at all, since they")
+    print("  never look outside a single record.")
 
-    if not rows:
-        print(f"  [+] This window: 0 CVEs confirmed to span 2+ independently-tracked ecosystems.")
-        print("="*115 + "\n")
-        return
+    print("-" * 125)
+    print(f"  {BOLD}VIII-A. TRUE CROSS-COMPILED (same project, independently native-released to multiple registries){RESET}")
+    print("-" * 125)
+    if not table_a:
+        print("  [+] Zero advisories in this execution frame matched a same-project, multi-registry native-release pattern.")
+    else:
+        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
+        print("-" * 125)
+        for v_id, eco_count, cvss, names_by_eco, evidence in table_a:
+            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
 
-    print(f"  This window: {qualifying_count} CVE(s) confirmed to span 2+ independently-tracked ecosystems.")
     print()
-    print(f"{'CVE ID':<18} | {'Ecosystems':<11} | {'Records':<8} | {'Spans'}")
-    print("-" * 115)
-    # Prefix (cve_id + ecosystems + records columns, with their " | " separators) is 46 chars, so
-    # capping "spans" at 69 keeps every row at or under the 115-char divider above/below the table.
-    for cve_id, eco_count, record_count, ecosystems in rows:
-        spans = ", ".join(ecosystems)
-        if len(spans) > 69:
-            spans = spans[:68] + "…"
-        print(f"{cve_id:<18} | {eco_count:<11} | {record_count:<8} | {spans}")
-    print("="*115 + "\n")
+    print("-" * 125)
+    print(f"  {BOLD}VIII-B. REPACKAGED-AS-IS (one registry vendoring another's artifact unmodified){RESET}")
+    print("-" * 125)
+    if not table_b:
+        print("  [+] Zero advisories in this execution frame matched a mechanical repackaging pattern (e.g. Maven webjars, distro rewraps).")
+    else:
+        print(f"{'Advisory ID':<24} | {'Registries':<11} | {'CVSS':<6} | {'Confidence':<10} | {'Evidence'}")
+        print("-" * 125)
+        for v_id, eco_count, cvss, names_by_eco, evidence in table_b:
+            print(f"{v_id:<24} | {eco_count:<11} | {cvss:<6.1f} | {evidence['confidence'].upper():<10} | {_format_cross_registry_evidence(evidence)}")
+
+    print()
+    print("-" * 125)
+    print(f"  {BOLD}VIII-C. CROSS-TRACKER CVE CORRELATION (same CVE, independently-tracked advisory records){RESET}")
+    if not cve_correlation_available:
+        print("-" * 125)
+        print("  [+] Requires --database (needs a table-wide query with no cheap non-database equivalent).")
+    else:
+        print("  [!] Coverage floor: ~8.3% of tracked advisories carry a resolvable CVE ID -- absence")
+        print("      here means untraceable, not necessarily isolated.")
+        print("-" * 125)
+        if not cve_correlation_rows:
+            print("  [+] This window: 0 CVEs confirmed to span 2+ independently-tracked ecosystems.")
+        else:
+            print(f"  This window: {qualifying_count} CVE(s) confirmed to span 2+ independently-tracked ecosystems.")
+            print()
+            print(f"{'CVE ID':<18} | {'Ecosystems':<11} | {'Records':<8} | {'Spans'}")
+            print("-" * 125)
+            # Prefix (cve_id + ecosystems + records columns, with their " | " separators) is 46
+            # chars, so capping "spans" at 69 keeps every row at or under the 125-char box width.
+            for cve_id, eco_count, record_count, ecosystems in cve_correlation_rows:
+                spans = ", ".join(ecosystems)
+                if len(spans) > 69:
+                    spans = spans[:68] + "…"
+                print(f"{cve_id:<18} | {eco_count:<11} | {record_count:<8} | {spans}")
+    print("="*125 + "\n")
 
 
 def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False):
@@ -1487,14 +1496,15 @@ def generate_enterprise_threat_leaderboard(
     )
     
     table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids)
-    print_section_viii_cross_registry_tables(table_a_cross_compiled, table_b_repackaged)
 
-    # Cross-record CVE correlation (Section IX) needs a table-wide GROUP BY over the whole
-    # `vulnerabilities` table, which only exists in --database mode -- there's no cheap in-memory
-    # equivalent for the ZIP-streaming fallback path, so this is silently skipped otherwise.
+    # Sub-table C needs a table-wide GROUP BY over the whole `vulnerabilities` table, which only
+    # exists in --database mode -- there's no cheap in-memory equivalent for the ZIP-streaming
+    # fallback path, so it's rendered as unavailable rather than silently omitted in that case.
     if db_path:
         qualifying_count, cve_correlation_rows = find_cross_ecosystem_cve_correlations(db_path, session_advisory_ids)
-        print_section_ix_cross_ecosystem_cve_correlation(qualifying_count, cve_correlation_rows)
+        print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, True, qualifying_count, cve_correlation_rows)
+    else:
+        print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, False, 0, [])
 
     # Save Snapshot Disk Serialization Routine
     serialize_snapshot_payload(

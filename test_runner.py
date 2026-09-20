@@ -606,8 +606,8 @@ class TestThreatStreamScanner(unittest.TestCase):
         # unchanged for --velocity trend-diff backward compatibility (see
         # "VIII. HARDWARE ARCHITECTURE COMPILATION MATRIX VARIANCE ANALYSIS" in the --velocity
         # report), even though it is no longer rendered in the main dashboard's console output --
-        # Section VIII there was replaced with the two cross-registry tables below. So this gate
-        # now only confirms the export key itself survived, not a console/export text comparison.
+        # Section VIII there was replaced with the identity-correlation sub-tables below. So this
+        # gate now only confirms the export key itself survived, not a console/export comparison.
         self.assertIn(
             "intel_architecture_matrix", export_payload,
             "[!] REGRESSION: 'intel_architecture_matrix' export key vanished -- this would break "
@@ -615,28 +615,41 @@ class TestThreatStreamScanner(unittest.TestCase):
             "cross-registry rework."
         )
 
-        # 7. PARITY GATE D: Section VIII cross-registry tables render with the expected headers
-        # and every listed advisory legitimately spans >= 2 registries (structural sanity -- the
-        # specific classification results are covered by test_cross_registry_classification_*).
-        self.assertIn("VIII-A. TRUE CROSS-COMPILED ADVISORIES", stdout_capture)
-        self.assertIn("VIII-B. REPACKAGED-AS-IS ADVISORIES", stdout_capture)
+        # 7. PARITY GATE D: Section VIII's three identity-correlation sub-tables render with the
+        # expected headers -- A (cross-compiled) and B (repackaged) look WITHIN one advisory's own
+        # listing, C (cross-tracker CVE correlation, consolidated from the former separate Section
+        # IX) looks ACROSS independent advisory records sharing a CVE ID. Every listed row in all
+        # three must legitimately span >= 2 registries/ecosystems (structural sanity -- the
+        # specific classification results are covered by test_cross_registry_classification_* /
+        # test_rank_cross_registry_tables_*).
+        self.assertIn("VIII. IS THIS THE SAME VULNERABILITY SHOWING UP MORE THAN ONCE?", stdout_capture)
+        sub_headers = [
+            "VIII-A. TRUE CROSS-COMPILED",
+            "VIII-B. REPACKAGED-AS-IS",
+            "VIII-C. CROSS-TRACKER CVE CORRELATION",
+        ]
+        for header in sub_headers:
+            self.assertIn(header, stdout_capture)
 
-        for header in ("VIII-A. TRUE CROSS-COMPILED ADVISORIES", "VIII-B. REPACKAGED-AS-IS ADVISORIES"):
-            # Table layout is "="*125 / header / "="*125 / rows.../ "="*125 -- split on header
-            # first, then skip the immediate closing divider line to reach the row data between
-            # the second and third "="*125 lines.
-            after_header = stdout_capture.split(header)[1]
-            divider_parts = after_header.split("=" * 125)
-            zone = divider_parts[1] if len(divider_parts) > 1 else ""
-            if "Zero advisories" in zone:
+        # All three sub-tables now live inside ONE box (a single "="*125 pair wraps the whole
+        # section; internal dividers between A/B/C are "-"*125), so a zone is bounded by
+        # consecutive sub-header positions, with the final zone running to the closing "="*125.
+        sub_positions = [stdout_capture.index(h) for h in sub_headers]
+        section_end = stdout_capture.index("=" * 125, sub_positions[-1])
+        zone_bounds = sub_positions + [section_end]
+
+        for idx, header in enumerate(sub_headers):
+            zone = stdout_capture[zone_bounds[idx]:zone_bounds[idx + 1]]
+            if "Zero advisories" in zone or "Requires --database" in zone or "0 CVEs confirmed" in zone:
                 continue
             for row_match in re.finditer(r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(\d+)\s*\|", zone, re.MULTILINE):
-                registry_count = int(row_match.group(2))
+                span_count = int(row_match.group(2))
                 self.assertGreaterEqual(
-                    registry_count, 2,
-                    f"[!] REGRESSION: Section VIII table listed '{row_match.group(0).strip()}' spanning "
-                    f"fewer than 2 registries -- rank_cross_registry_tables() should only ever surface "
-                    f"advisories with >= 2 distinct package_names_by_ecosystem entries."
+                    span_count, 2,
+                    f"[!] REGRESSION: Section VIII sub-table '{header}' listed '{row_match.group(0).strip()}' "
+                    f"spanning fewer than 2 registries/ecosystems -- rank_cross_registry_tables() and "
+                    f"find_cross_ecosystem_cve_correlations() should only ever surface entries with >= 2 "
+                    f"distinct spans."
                 )
 
     def run_scanner_with_args(self, mock_args):
