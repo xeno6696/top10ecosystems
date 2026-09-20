@@ -754,6 +754,15 @@ def print_section_iv_threat_metabolism(active_matrix_ecosystems, spatial_dwell_m
     print("="*115 + "\n")
 
 
+def _truncate_with_ellipsis(text: str, max_len: int) -> str:
+    """Truncates to max_len characters, replacing the final one with an ellipsis when the
+    original was longer -- avoids silently chopping a name mid-word with no indicator anything
+    was cut (e.g. 'Microsoft.NETCore.App.Runti' instead of 'Microsoft.NETCore.App.Run...')."""
+    if len(text) <= max_len:
+        return text
+    return text[:max_len - 1] + "…"
+
+
 def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_pools, eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests, *, priority_sort_active: bool = False):
     """Renders Section V: Critical Outlier Attack Surface Radius Pools."""
     print("\n" + "="*115)
@@ -894,9 +903,9 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
                     kev_due = vuln.get('kev_date_added')
                     kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
                     epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display:<28} | {epss_kev_str:<{w_epss_kev}}")
+                    print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {severity_display:<28} | {epss_kev_str:<{w_epss_kev}}")
                 else:
-                    print(f"{id_column_display:<52} | {p_name[:27]:<30} | {severity_display}")
+                    print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {severity_display}")
         else:
             print("    [-] Zero newly published threat profiles or malicious entry drops recorded in this lookback window.")
         print("-" * divider_width)
@@ -959,9 +968,9 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
                 kev_due = vuln.get('kev_date_added')
                 kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
                 epss_kev_str = f"{epss_str} / {kev_str}"
-                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display:<28} | {epss_kev_str:<{w_epss_kev}}")
+                print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {status_display:<28} | {epss_kev_str:<{w_epss_kev}}")
             else:
-                print(f"{id_column_display:<52} | {p_name[:27]:<30} | {status_display}")
+                print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {status_display}")
         print("-" * divider_width)
 
 
