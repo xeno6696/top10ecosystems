@@ -153,7 +153,8 @@ def init_database():
             cwe_ids TEXT,
             package_names_by_ecosystem TEXT,
             purls_by_ecosystem TEXT,
-            repo_anchor TEXT
+            repo_anchor TEXT,
+            fixed_by_ecosystem TEXT
         );
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_vuln_eco ON vulnerabilities(ecosystems);")
@@ -168,7 +169,7 @@ def init_database():
     # is still required to actually backfill values into already-ingested rows).
     cursor.execute("PRAGMA table_info(vulnerabilities)")
     existing_cols = {row[1] for row in cursor.fetchall()}
-    for new_col in ("package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"):
+    for new_col in ("package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor", "fixed_by_ecosystem"):
         if new_col not in existing_cols:
             cursor.execute(f"ALTER TABLE vulnerabilities ADD COLUMN {new_col} TEXT")
     
@@ -326,7 +327,7 @@ def parse_osv_json(vuln_data):
     """Translates raw nested OSV JSON structures into normalized flat relational database rows."""
     v_id = vuln_data.get("id", "")
     if not v_id:
-        return (None,) * 18
+        return (None,) * 19
 
     published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
     p_date_clean = published_str[:10]
@@ -368,6 +369,7 @@ def parse_osv_json(vuln_data):
     ecosystems_set = set()
     names_by_eco = {}
     purls_by_eco = {}
+    fixed_by_eco = {}
 
     for affected in vuln_data.get("affected", []):
         pkg_block = affected.get("package", {})
@@ -382,9 +384,18 @@ def parse_osv_json(vuln_data):
         v_len = len(affected.get("versions", []))
         if v_len > max_versions: max_versions = v_len
 
+        # entry_has_fix is scoped to just THIS affected[] block (one ecosystem/package), unlike
+        # has_fixes below which ORs across the whole advisory -- that whole-advisory flag drives
+        # the classification bucket (unchanged), but conflates ecosystems when one advisory lists
+        # several (e.g. a GHSA record covering npm, Maven, and NuGet together): "has_fixes=True"
+        # there could mean only ONE of those three has actually shipped a patch. fixed_by_eco
+        # preserves the distinction Section VIII-C needs -- which SPECIFIC ecosystem is done.
+        entry_has_fix = False
         for ranges in affected.get("ranges", []):
             for events in ranges.get("events", []):
-                if "fixed" in events: has_fixes = True
+                if "fixed" in events:
+                    has_fixes = True
+                    entry_has_fix = True
 
         if eco:
             eco_lower = eco.strip().lower()
@@ -414,6 +425,12 @@ def parse_osv_json(vuln_data):
                 if purl not in bucket:
                     bucket.append(purl)
 
+            # OR across every affected[] block seen so far for this ecosystem, not overwrite --
+            # an advisory can list separate version-range blocks for the same ecosystem (e.g. a
+            # 1.x line and a 2.x line), and the ecosystem counts as fixed if ANY of them shipped
+            # a patched version, even if a later/earlier block for that same ecosystem didn't.
+            fixed_by_eco[eco_clean] = fixed_by_eco.get(eco_clean, False) or entry_has_fix
+
     if not ecosystems_set:
         ecosystems_set.add("Android")
 
@@ -429,6 +446,7 @@ def parse_osv_json(vuln_data):
     ecosystems_json = json.dumps(list(ecosystems_set))
     package_names_by_ecosystem_json = json.dumps(names_by_eco)
     purls_by_ecosystem_json = json.dumps(purls_by_eco)
+    fixed_by_ecosystem_json = json.dumps(fixed_by_eco)
     repo_anchor = extract_repo_anchor(vuln_data)
 
     # Canonical CVE alias extraction
@@ -447,7 +465,8 @@ def parse_osv_json(vuln_data):
         v_id, p_name, ecosystems_json, cvss_score, max_versions, classification,
         modified_str[:10], m_vector, v_versions_json, dwell_days, w_date,
         p_date_clean, cve_alias, aliases_json, cwe_json,
-        package_names_by_ecosystem_json, purls_by_ecosystem_json, repo_anchor
+        package_names_by_ecosystem_json, purls_by_ecosystem_json, repo_anchor,
+        fixed_by_ecosystem_json
     )
 
 
@@ -494,11 +513,11 @@ def bootstrap_warehouse_from_zip(conn):
         print(f"[*] Committing {len(vulnerabilities_batch):,} entries down to SQLite storage blocks...")
         cursor.executemany("""
             INSERT OR REPLACE INTO vulnerabilities (
-                advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
-                threat_profile, last_modified, malware_vector, vulnerable_versions, 
+                advisory_id, package_name, ecosystems, cvss_score, blast_radius,
+                threat_profile, last_modified, malware_vector, vulnerable_versions,
                 dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids,
-                package_names_by_ecosystem, purls_by_ecosystem, repo_anchor
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                package_names_by_ecosystem, purls_by_ecosystem, repo_anchor, fixed_by_ecosystem
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -615,11 +634,11 @@ def sync_incremental_window(conn):
         print(f"[*] Executing transactional upsert for {len(updates_batch):,} localized stream elements...")
         cursor.executemany("""
             INSERT OR REPLACE INTO vulnerabilities (
-                advisory_id, package_name, ecosystems, cvss_score, blast_radius, 
-                threat_profile, last_modified, malware_vector, vulnerable_versions, 
+                advisory_id, package_name, ecosystems, cvss_score, blast_radius,
+                threat_profile, last_modified, malware_vector, vulnerable_versions,
                 dwell_days, withdrawn_date, published_date, cve_alias, aliases, cwe_ids,
-                package_names_by_ecosystem, purls_by_ecosystem, repo_anchor
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                package_names_by_ecosystem, purls_by_ecosystem, repo_anchor, fixed_by_ecosystem
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
         
     try:

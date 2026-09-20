@@ -670,32 +670,38 @@ class TestThreatStreamScanner(unittest.TestCase):
                     f"Downstream or Upstream package identifier."
                 )
 
-        # C: presence grid -- every listed CVE row must carry >= 2 'X' marks across its ecosystem
-        # columns, matching the >= 2 distinct ecosystems invariant enforced by
-        # find_cross_ecosystem_cve_correlations(). A raw numeric field can no longer be
-        # regex-matched here the way A/B once were: the grid's first number column is "Rec"
-        # (advisory-record count), a different metric NOT guaranteed to be >= 2 (e.g. a single
-        # GHSA record that itself lists 5 ecosystems is 1 record spanning 5 ecosystems). Rows are
-        # distinguished from footnote/legend lines by pipe count rather than specific wording, so
-        # this doesn't need updating every time a new note is added below the grid.
+        # C: status grid -- every listed CVE row must carry >= 2 marked (F/U/?) columns, matching
+        # the >= 2 distinct ecosystems invariant enforced by find_cross_ecosystem_cve_correlations().
+        # A raw numeric field can no longer be regex-matched here the way A/B once were: the grid's
+        # first number column is "Rec" (advisory-record count), a different metric NOT guaranteed
+        # to be >= 2 (e.g. a single GHSA record that itself lists 5 ecosystems is 1 record spanning
+        # 5 ecosystems). Rows are distinguished from footnote/legend lines by pipe count rather
+        # than specific wording, so this doesn't need updating every time a new note is added.
         if "0 CVEs confirmed" not in zone_c and "Requires --database" not in zone_c:
             grid_lines = zone_c.splitlines()
             header_idx = next((i for i, l in enumerate(grid_lines) if "CVE ID" in l and "Rec" in l), None)
             self.assertIsNotNone(header_idx, "[!] REGRESSION: Section VIII-C grid header not found where expected.")
+            # A real data row has exactly as many "|" separators as the header (same cell count);
+            # footnote/legend lines below the grid won't reliably have fewer -- a two-pipe legend
+            # line ("F = ... | U = ... | ? = ...") is exactly the kind of near-miss that broke a
+            # fixed "< 2" threshold here previously -- so compare against the header's own count
+            # instead of guessing a number that has to be re-tuned every time a note is added.
+            expected_pipes = grid_lines[header_idx].count("|")
             for line in grid_lines[header_idx + 2:]:  # skip the header row and its divider
                 stripped = line.strip()
-                if not stripped or stripped.startswith("=") or line.count("|") < 2:
+                if not stripped or stripped.startswith("=") or line.count("|") < expected_pipes:
                     break
                 cells = line.split("|")
-                # Registry-ecosystem X's are wrapped in ANSI red (see _render_cross_ecosystem_grid),
-                # so a colored cell's stripped content is "\x1b[91mX\x1b[0m", not the bare string
-                # "X" -- substring containment still catches both plain and colored marks.
-                x_count = sum(1 for c in cells[2:] if "X" in c)  # cells[0]=CVE ID, [1]=Rec
+                # A present ecosystem cell holds F/U/?, optionally ANSI-red-wrapped for a registry
+                # ecosystem (see _render_cross_ecosystem_grid) -- an absent one is pure whitespace,
+                # so "any non-whitespace content" reliably distinguishes present from absent
+                # regardless of which status letter or color wrapping is in play.
+                marked_count = sum(1 for c in cells[2:] if c.strip())  # cells[0]=CVE ID, [1]=Rec
                 self.assertGreaterEqual(
-                    x_count, 2,
-                    f"[!] REGRESSION: Section VIII-C grid row '{stripped}' has fewer than 2 'X' marks -- "
-                    f"find_cross_ecosystem_cve_correlations() should only ever surface CVEs spanning >= 2 "
-                    f"distinct ecosystems."
+                    marked_count, 2,
+                    f"[!] REGRESSION: Section VIII-C grid row '{stripped}' has fewer than 2 marked "
+                    f"ecosystem columns -- find_cross_ecosystem_cve_correlations() should only ever "
+                    f"surface CVEs spanning >= 2 distinct ecosystems."
                 )
 
     def run_scanner_with_args(self, mock_args):
