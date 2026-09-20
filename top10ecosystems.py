@@ -1892,11 +1892,20 @@ def run_velocity_update(args):
     os.makedirs(snapshot_dir, exist_ok=True)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     windows = calculate_report_windows(args, now_utc)
-    global_ghsa_lookup = build_ghsa_ecosystem_map()
+    target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
+
+    # Previously always the ZIP-streaming path regardless of --database -- this was the one
+    # remaining CLI mode that ignored the flag entirely. Same db_path convention as main()'s
+    # primary path: None (ZIP fallback) when --database is omitted.
+    db_path = "database/threat_stream.db" if args.database else None
+    if db_path:
+        global_ghsa_lookup = build_ghsa_from_db(db_path=db_path, target_registries=target_registries, priority_sort=args.priority_sort)
+    else:
+        global_ghsa_lookup = build_ghsa_ecosystem_map()
 
     for calculated_start, calculated_end in windows:
         snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer, priority_sort_active=args.priority_sort))
-        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort)
+        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
 
     # RESTORED: stitch the accumulated snapshots into a CSV velocity matrix, with an
     # opt-in terminal (plotext) chart via --terminal-plot -- see generate_velocity_matrix().
