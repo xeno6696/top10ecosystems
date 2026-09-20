@@ -1052,6 +1052,111 @@ def print_section_viii_cross_registry_tables(table_a, table_b):
     print("="*125 + "\n")
 
 
+# Section VIII (rank_cross_registry_tables) only ever looks INSIDE one advisory's own `affected`
+# list -- it can tell you npm/Maven/NuGet are related because a single GHSA record lists all
+# three. It has zero visibility into a second, wholly independent advisory record (e.g. Debian's
+# or Bitnami's own tracker) that happens to describe the exact same CVE. That's a different,
+# cross-RECORD correlation, only findable via the shared cve_alias column across the whole
+# `vulnerabilities` table -- hence its own function/section rather than folding into Section VIII.
+#
+# Coverage caveat (verified against the live warehouse on 2026-09-19): ~91.7% of rows have no
+# resolvable cve_alias at all, so this can only ever speak for the ~8.3% that do. A CVE not
+# listed here may still be genuinely cross-published; it just isn't visible to this query. Always
+# state that caveat alongside the numbers rather than implying completeness.
+def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: set, top_n: int = 10):
+    """Finds CVEs relevant to this session (i.e. at least one of their advisory records fell in
+    session_advisory_ids) that are tracked under 2+ DISTINCT advisory records spanning 2+ DISTINCT
+    ecosystems -- the cross-record analogue of Section VIII's within-record classification.
+    Deliberately reports ecosystem count, not raw advisory-record count: a single CVE can produce
+    many near-duplicate records from one source (e.g. Bitnami publishes one advisory per container
+    image that bundles the flaw), which would otherwise dominate the ranking without actually
+    reflecting how many distinct registries/supply-chain surfaces are affected.
+    Returns (qualifying_count, top_rows); each row is
+    (cve_id, ecosystem_count, record_count, sorted_ecosystems)."""
+    if not session_advisory_ids:
+        return 0, []
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    try:
+        id_list = list(session_advisory_ids)
+        chunk_size = 500
+
+        relevant_aliases = set()
+        for i in range(0, len(id_list), chunk_size):
+            chunk = id_list[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            cursor.execute(
+                f"SELECT DISTINCT cve_alias FROM vulnerabilities "
+                f"WHERE advisory_id IN ({placeholders}) AND cve_alias IS NOT NULL AND cve_alias != ''",
+                chunk
+            )
+            relevant_aliases.update(row[0] for row in cursor.fetchall())
+
+        groups = defaultdict(lambda: {"advisory_ids": set(), "ecosystems": set()})
+        alias_list = list(relevant_aliases)
+        for i in range(0, len(alias_list), chunk_size):
+            chunk = alias_list[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            cursor.execute(
+                f"SELECT cve_alias, advisory_id, ecosystems FROM vulnerabilities WHERE cve_alias IN ({placeholders})",
+                chunk
+            )
+            for cve_alias, advisory_id, eco_json in cursor.fetchall():
+                try:
+                    ecos = json.loads(eco_json) if eco_json else []
+                except (TypeError, ValueError):
+                    ecos = []
+                group = groups[cve_alias]
+                group["advisory_ids"].add(advisory_id)
+                group["ecosystems"].update(ecos)
+    finally:
+        conn.close()
+
+    qualifying = [
+        (cve_alias, len(g["ecosystems"]), len(g["advisory_ids"]), sorted(g["ecosystems"]))
+        for cve_alias, g in groups.items()
+        if len(g["ecosystems"]) >= 2
+    ]
+    qualifying.sort(key=lambda r: (-r[1], -r[2], r[0]))
+    return len(qualifying), qualifying[:top_n]
+
+
+def print_section_ix_cross_ecosystem_cve_correlation(qualifying_count: int, rows: list):
+    """Renders Section IX: confirmed cross-ecosystem CVE correlation (see
+    find_cross_ecosystem_cve_correlations for what this can and can't see). Leads with a headline
+    digest -- what an executive skimming the dashboard actually wants -- then the full per-CVE
+    detail table in the same section, so nobody has to burn a second execution behind a flag just
+    to see which records back up the headline count."""
+    print("\n" + "="*115)
+    print(f"  {BOLD}IX. CONFIRMED CROSS-ECOSYSTEM CVE CORRELATION{RESET}")
+    print("="*115)
+    print(f"  [!] Correlated via shared CVE ID across independent advisory records (e.g. a GHSA")
+    print(f"      entry and a separate Debian/Bitnami tracker entry for the same flaw) -- NOT the")
+    print(f"      same thing as Section VIII, which only sees ecosystems listed in one record.")
+    print(f"      Coverage floor: ~8.3% of tracked advisories carry a resolvable CVE ID, so a CVE")
+    print(f"      absent here may still be cross-published; it just isn't visible to this query.")
+    print("-" * 115)
+
+    if not rows:
+        print(f"  [+] This window: 0 CVEs confirmed to span 2+ independently-tracked ecosystems.")
+        print("="*115 + "\n")
+        return
+
+    print(f"  This window: {qualifying_count} CVE(s) confirmed to span 2+ independently-tracked ecosystems.")
+    print()
+    print(f"{'CVE ID':<18} | {'Ecosystems':<11} | {'Records':<8} | {'Spans'}")
+    print("-" * 115)
+    # Prefix (cve_id + ecosystems + records columns, with their " | " separators) is 46 chars, so
+    # capping "spans" at 69 keeps every row at or under the 115-char divider above/below the table.
+    for cve_id, eco_count, record_count, ecosystems in rows:
+        spans = ", ".join(ecosystems)
+        if len(spans) > 69:
+            spans = spans[:68] + "…"
+        print(f"{cve_id:<18} | {eco_count:<11} | {record_count:<8} | {spans}")
+    print("="*115 + "\n")
+
+
 def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
@@ -1097,7 +1202,8 @@ def generate_enterprise_threat_leaderboard(
     start_date, end_date, target_layer: str = None, debug_mode: bool = False,
     custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None,
     forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
-    manifest_rows: list = None, *, priority_sort_active: bool = False, target_registries: list = None
+    manifest_rows: list = None, *, priority_sort_active: bool = False, target_registries: list = None,
+    db_path: str = None
     ):
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -1382,7 +1488,14 @@ def generate_enterprise_threat_leaderboard(
     
     table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids)
     print_section_viii_cross_registry_tables(table_a_cross_compiled, table_b_repackaged)
-    
+
+    # Cross-record CVE correlation (Section IX) needs a table-wide GROUP BY over the whole
+    # `vulnerabilities` table, which only exists in --database mode -- there's no cheap in-memory
+    # equivalent for the ZIP-streaming fallback path, so this is silently skipped otherwise.
+    if db_path:
+        qualifying_count, cve_correlation_rows = find_cross_ecosystem_cve_correlations(db_path, session_advisory_ids)
+        print_section_ix_cross_ecosystem_cve_correlation(qualifying_count, cve_correlation_rows)
+
     # Save Snapshot Disk Serialization Routine
     serialize_snapshot_payload(
         custom_export_arg, now, start_date, end_date, target_layer,
@@ -3096,7 +3209,8 @@ def main():
             ghsa_lookup=global_ghsa_lookup,
             manifest_rows=cached_manifest_rows,
             priority_sort_active=args.priority_sort,
-            target_registries=target_registries
+            target_registries=target_registries,
+            db_path="database/threat_stream.db" if args.database else None
         )
 
 
