@@ -2628,6 +2628,32 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     conn.close()
     print("=" * 145)
 
+def _resolve_registry_specific_name(names_by_eco_json, registry_target: str, fallback_name: str) -> str:
+    """Looks up the package name specific to registry_target from a package_names_by_ecosystem
+    JSON blob, instead of trusting the flat package_name column -- that column stores whichever
+    ecosystem's name was parsed LAST while walking an advisory's affected[] list during ingestion
+    (see db_warehouse.py's parse_osv_json), which is arbitrary and frequently wrong for any
+    cross-published advisory. Confirmed concretely: GHSA-j7hp-h8jx-5ppr's package_name column is
+    'github.com/chai2010/webp' (its Go entry), even though its actual PyPI name is 'pillow' --
+    exactly the problem package_names_by_ecosystem was built to solve for Section VIII, just
+    never wired into --trends until now. Matches ecosystem names the same loose,
+    case-insensitive/substring way this function's own --registry filter does (registry_target is
+    a free-form CLI value like 'pypi', while stored keys are canonical names like 'PyPI'). Falls
+    back to fallback_name (the flat column) when there's no per-ecosystem data at all (e.g. a row
+    ingested before this column existed) or no ecosystem key matches the target."""
+    if not names_by_eco_json:
+        return fallback_name
+    try:
+        names_by_eco = json.loads(names_by_eco_json)
+    except (TypeError, ValueError):
+        return fallback_name
+    target_lower = registry_target.lower()
+    for eco, names in names_by_eco.items():
+        if names and (target_lower in eco.lower() or eco.lower() in target_lower):
+            return names[0]
+    return fallback_name
+
+
 def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, registry_target: str, manifest_rows: list, *, priority_sort_active: bool = False):
     """
     Computes lookback trend metrics, mutation velocity spikes from live streams,
@@ -2695,15 +2721,16 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             break
             
         cursor.execute("""
-            SELECT package_name, cvss_score, published_date 
-            FROM vulnerabilities 
+            SELECT package_name, cvss_score, published_date, package_names_by_ecosystem
+            FROM vulnerabilities
             WHERE advisory_id = ? AND ecosystems LIKE ?
         """, (adv_id, relaxed_like_pattern))
-        
+
         db_match = cursor.fetchone()
         if db_match:
-            p_name, cvss, pub_date_str = db_match
-            
+            p_name, cvss, pub_date_str, names_by_eco_json = db_match
+            p_name = _resolve_registry_specific_name(names_by_eco_json, registry_target, p_name)
+
             age_str = "N/A"
             if pub_date_str:
                 try:
@@ -2735,7 +2762,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     if priority_sort_active:
         cursor.execute("""
             SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.published_date,
-                   e.epss_score, k.date_added
+                   e.epss_score, k.date_added, v.package_names_by_ecosystem
             FROM vulnerabilities v
             LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
             LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
@@ -2743,14 +2770,20 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         """, (relaxed_like_pattern,))
     else:
         cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, blast_radius, published_date
+            SELECT advisory_id, package_name, cvss_score, blast_radius, published_date, package_names_by_ecosystem
             FROM vulnerabilities
             WHERE ecosystems LIKE ? AND threat_profile NOT LIKE '%Withdrawn%'
         """, (relaxed_like_pattern,))
     raw_rows = cursor.fetchall()
     # Normalize to one shape regardless of mode so the dedup/ranking logic below never needs to
-    # branch on priority_sort_active itself -- only this fetch and the two prints above do.
-    all_repo_records = [(r[0], r[1], r[2], r[3], r[4], r[5] if priority_sort_active else None, r[6] if priority_sort_active else None) for r in raw_rows]
+    # branch on priority_sort_active itself -- only this fetch and the two prints above do. Also
+    # resolves the registry-specific name here, up front, so the dedup clustering below groups by
+    # the CORRECT name for this registry rather than the flat (often wrong-ecosystem) column.
+    all_repo_records = [
+        (r[0], _resolve_registry_specific_name(r[7] if priority_sort_active else r[5], registry_target, r[1]),
+         r[2], r[3], r[4], r[5] if priority_sort_active else None, r[6] if priority_sort_active else None)
+        for r in raw_rows
+    ]
 
     # 1. Canonical deduplication for twin advisories (collapse GHSA / PYSEC pairs)
     vuln_clusters = {}
@@ -2848,7 +2881,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 
     if priority_sort_active:
         cursor.execute("""
-            SELECT v.advisory_id, v.package_name, v.cvss_score, v.last_modified, e.epss_score, k.date_added
+            SELECT v.advisory_id, v.package_name, v.cvss_score, v.last_modified, e.epss_score, k.date_added, v.package_names_by_ecosystem
             FROM vulnerabilities v
             LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
             LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
@@ -2858,7 +2891,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         """, (start_str, relaxed_like_pattern))
     else:
         cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, last_modified
+            SELECT advisory_id, package_name, cvss_score, last_modified, package_names_by_ecosystem
             FROM vulnerabilities
             WHERE cvss_score >= 8.5 AND last_modified < ? AND ecosystems LIKE ?
             GROUP BY advisory_id
@@ -2870,9 +2903,10 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     if rows_dormant:
         for row in rows_dormant:
             if priority_sort_active:
-                aid, p_name, cvss, last_mod_str, epss_score, kev_added = row
+                aid, p_name, cvss, last_mod_str, epss_score, kev_added, names_by_eco_json = row
             else:
-                aid, p_name, cvss, last_mod_str = row
+                aid, p_name, cvss, last_mod_str, names_by_eco_json = row
+            p_name = _resolve_registry_specific_name(names_by_eco_json, registry_target, p_name)
             mod_date = datetime.datetime.strptime(last_mod_str, "%Y-%m-%d").date()
             days_dormant = (end_date.date() - mod_date).days
             if priority_sort_active:
@@ -2899,7 +2933,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     if priority_sort_active:
         cursor.execute("""
             SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.threat_profile, v.published_date,
-                   e.epss_score, k.date_added
+                   e.epss_score, k.date_added, v.package_names_by_ecosystem
             FROM vulnerabilities v
             LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
             LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
@@ -2912,7 +2946,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         """, (start_str, relaxed_like_pattern, start_str))
     else:
         cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, published_date
+            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, published_date, package_names_by_ecosystem
             FROM vulnerabilities
             WHERE last_modified >= ?
               AND ecosystems LIKE ?
@@ -2922,7 +2956,10 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             LIMIT 50
         """, (start_str, relaxed_like_pattern, start_str))
 
-    raw_worst = cursor.fetchall()
+    # Resolve the registry-specific name up front so both the dedup key below and the eventual
+    # display use the CORRECT name for this registry, not the flat (often wrong-ecosystem) column.
+    names_col = 8 if priority_sort_active else 6
+    raw_worst = [row[:1] + (_resolve_registry_specific_name(row[names_col], registry_target, row[1]),) + row[2:names_col] for row in cursor.fetchall()]
     seen_worst_pkgs = set()
     deduped_worst = []
     for row in raw_worst:
@@ -2975,7 +3012,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     if priority_sort_active:
         cursor.execute("""
             SELECT v.advisory_id, v.package_name, v.cvss_score, v.last_modified, v.threat_profile, v.dwell_days,
-                   e.epss_score, k.date_added
+                   e.epss_score, k.date_added, v.package_names_by_ecosystem
             FROM vulnerabilities v
             LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
             LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
@@ -2987,7 +3024,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         """, (start_str, relaxed_like_pattern))
     else:
         cursor.execute("""
-            SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days
+            SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days, package_names_by_ecosystem
             FROM vulnerabilities
             WHERE last_modified >= ? AND ecosystems LIKE ?
               AND threat_profile LIKE '%Fix%'
@@ -2996,7 +3033,8 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             LIMIT 25
         """, (start_str, relaxed_like_pattern))
 
-    raw_fixed = cursor.fetchall()
+    names_col = 8 if priority_sort_active else 6
+    raw_fixed = [row[:1] + (_resolve_registry_specific_name(row[names_col], registry_target, row[1]),) + row[2:names_col] for row in cursor.fetchall()]
     seen_fixed_pkgs = set()
     deduped_fixed = []
     for row in raw_fixed:
@@ -3034,18 +3072,19 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print("-" * 115)
     
     cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days
+        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days, package_names_by_ecosystem
         FROM vulnerabilities
-        WHERE last_modified >= ? AND ecosystems LIKE ? 
+        WHERE last_modified >= ? AND ecosystems LIKE ?
           AND (threat_profile LIKE '%Withdrawn%' OR threat_profile = 'Withdrawn / Retracted Advisory')
         ORDER BY last_modified DESC
         LIMIT 3
     """, (start_str, relaxed_like_pattern))
-    
+
     rows_withdrawn = cursor.fetchall()
     if rows_withdrawn:
         for row in rows_withdrawn:
-            aid, p_name, cvss, last_mod_str, t_profile, dwell = row
+            aid, p_name, cvss, last_mod_str, t_profile, dwell, names_by_eco_json = row
+            p_name = _resolve_registry_specific_name(names_by_eco_json, registry_target, p_name)
             date_short = last_mod_str[5:] if len(last_mod_str) >= 10 else last_mod_str
             cvss_str = f"{cvss:.1f}" if cvss > 0 else "N/A"
             dwell_str = f"{int(dwell)}d" if dwell is not None else "N/A"
