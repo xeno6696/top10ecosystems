@@ -827,6 +827,42 @@ def _format_epss_kev_column(epss_score, kev_date_added, width: int = 28) -> str:
     return f"{epss_str} / {kev_display}{padding}"
 
 
+def _epss_watchlist(pool: list, extract_fn, already_shown_ids: set, top_n: int = 5) -> list:
+    """Given a candidate pool and a function extracting (id, name, cvss, epss, kev) from each
+    row, returns up to top_n (id, name, cvss, epss) tuples for whichever have the highest EPSS
+    score among rows that are NOT already KEV-confirmed and NOT already in already_shown_ids --
+    the complementary 'predicted risk, not yet officially confirmed' watchlist alongside a
+    KEV-first primary list. Exists because KEV always sorts first in the primary list, so a
+    registry with a large confirmed-exploited population (e.g. 41 for PyPI, observed against the
+    live warehouse) can fill every primary slot and leave zero visibility into anything else --
+    EPSS predicts near-term exploitation even for things not yet officially in KEV, which is a
+    different, real signal that was otherwise invisible. Excludes KEV rows outright (not just
+    ones that happened to make the primary list's cut), so this stays correct even for a registry
+    with fewer KEV-confirmed items than the primary list's own size."""
+    extracted = [extract_fn(r) for r in pool]
+    candidates = [(aid, name, cvss, epss) for aid, name, cvss, epss, kev in extracted if aid not in already_shown_ids and not kev]
+    return sorted(candidates, key=lambda t: -(t[3] or 0.0))[:top_n]
+
+
+def _print_epss_watchlist(registry_target: str, watchlist: list, width: int):
+    """Renders the 'highest EPSS, not yet KEV-confirmed' secondary watchlist shared by all four
+    priority-ranked --trends sub-tables. watchlist entries are (advisory_id, artifact_name, cvss,
+    epss_score) 4-tuples from _epss_watchlist()."""
+    print()
+    print("-" * width)
+    print(f"  Highest EPSS Exploitation Probability -- Not Yet KEV-Confirmed (inside {registry_target}):")
+    print("-" * width)
+    print(f"{'Advisory ID':<24} | {'Artifact Name':<28} | {'CVSS':<6} | {'EPSS Score'}")
+    print("-" * width)
+    if not watchlist:
+        print("  [+] Zero non-KEV-confirmed candidates available for this watchlist.")
+    else:
+        for aid, name, cvss, epss in watchlist:
+            epss_str = f"{epss*100:.1f}%" if epss is not None else "N/A"
+            print(f"{aid:<24} | {name[:28]:<28} | {cvss:<6.1f} | {epss_str}")
+    print("-" * width)
+
+
 def _abbreviate_ecosystem_label(name: str, width: int = 5) -> str:
     """Deterministic fixed-width column label for the Section VIII-C presence grid: strips
     everything but letters/digits and uppercases, so 'Go (Golang)' -> 'GO', 'Crates.io' ->
@@ -2703,8 +2739,11 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print(f"   IX. CHRONOLOGICAL LOOKBACK TREND ANALYTICS: {registry_target.upper()} REGISTRY")
     if priority_sort_active:
         print(f"   {YELLOW}[--priority-sort active] Rank Shifts / Technical Debt / Threat Arrivals / Code-Fixed")
-        print(f"   ranked by KEV -> EPSS -> CVSS instead of CVSS alone. High-Chatter (mutation volume)")
-        print(f"   and Retractions (chronological audit) aren't severity rankings, so unaffected.{RESET}")
+        print(f"   ranked by KEV -> EPSS -> CVSS instead of CVSS alone, each followed by a second")
+        print(f"   'Highest EPSS -- Not Yet KEV-Confirmed' watchlist -- a KEV-heavy registry can fill")
+        print(f"   every primary slot with confirmed-exploited items, so this surfaces predicted-risk")
+        print(f"   items that would otherwise have zero visibility. High-Chatter (mutation volume) and")
+        print(f"   Retractions (chronological audit) aren't severity rankings, so unaffected.{RESET}")
     print("="*115)
     
     # -------------------------------------------------------------------------
@@ -2858,6 +2897,15 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         print("    [-] No catalog vulnerabilities found matching this registry.")
     print("-" * section2_width)
 
+    if priority_sort_active:
+        shown_ids = {row[0] for row in top_5_leaderboard}
+        watchlist = _epss_watchlist(
+            deduped_catalog,
+            lambda r: (r[0], r[1], r[2], r[5], r[6]),
+            shown_ids
+        )
+        _print_epss_watchlist(registry_target, watchlist, section2_width)
+
     # -------------------------------------------------------------------------
     # 3. HIGH RISK TECHNICAL DEBT CALCIFICATION (DORMANCY TRACKING)
     # -------------------------------------------------------------------------
@@ -2880,6 +2928,11 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     print("-" * section3_width)
 
     if priority_sort_active:
+        # Widened from 5 to 50: a KEV-heavy registry can fill all top slots with confirmed-
+        # exploited items (41 for PyPI, observed against the live warehouse), so a wider pool is
+        # fetched here and sliced to 5 in Python below, leaving enough of it left over to also
+        # derive the EPSS watchlist from -- same wide-fetch-then-slice pattern already used by
+        # the Threat Arrivals and Code-Fixed sections.
         cursor.execute("""
             SELECT v.advisory_id, v.package_name, v.cvss_score, v.last_modified, e.epss_score, k.date_added, v.package_names_by_ecosystem
             FROM vulnerabilities v
@@ -2887,7 +2940,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
             WHERE v.cvss_score >= 8.5 AND v.last_modified < ? AND v.ecosystems LIKE ?
             ORDER BY (CASE WHEN k.date_added IS NOT NULL THEN 0 ELSE 1 END), e.epss_score DESC, v.cvss_score DESC, v.last_modified ASC
-            LIMIT 5
+            LIMIT 50
         """, (start_str, relaxed_like_pattern))
     else:
         cursor.execute("""
@@ -2899,7 +2952,8 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             LIMIT 5
         """, (start_str, relaxed_like_pattern))
 
-    rows_dormant = cursor.fetchall()
+    dormant_pool = cursor.fetchall()
+    rows_dormant = dormant_pool[:5]
     if rows_dormant:
         for row in rows_dormant:
             if priority_sort_active:
@@ -2917,6 +2971,15 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     else:
         print("    [-] Zero high-risk technical debt structures remain stagnant outside the window boundary.")
     print("-" * section3_width)
+
+    if priority_sort_active:
+        shown_ids = {row[0] for row in rows_dormant}
+        watchlist = _epss_watchlist(
+            [(r[0], _resolve_registry_specific_name(r[6], registry_target, r[1]), r[2], r[4], r[5]) for r in dormant_pool],
+            lambda r: r,
+            shown_ids
+        )
+        _print_epss_watchlist(registry_target, watchlist, section3_width)
 
     # -------------------------------------------------------------------------
     # 4. TOP 10 CRITICAL THREAT ARRIVALS & CAMPAIGNS (DEDUPLICATED)
@@ -2996,7 +3059,16 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     else:
         print("    [-] No severe new threat arrivals or malware campaigns recorded in this window.")
     print("-" * section4_width)
-        
+
+    if priority_sort_active:
+        shown_ids = {row[0] for row in deduped_worst}
+        watchlist = _epss_watchlist(
+            raw_worst,
+            lambda r: (r[0], r[1], r[2], r[6], r[7]),
+            shown_ids
+        )
+        _print_epss_watchlist(registry_target, watchlist, section4_width)
+
     # -------------------------------------------------------------------------
     # 5. WHICH THINGS ACTUALLY GOT FIXED? (DEDUPLICATED)
     # -------------------------------------------------------------------------
@@ -3062,6 +3134,15 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     else:
         print("    [-] No vulnerability mitigations or upstream fixes published in this window.")
     print("-" * section5_width)
+
+    if priority_sort_active:
+        shown_ids = {row[0] for row in deduped_fixed}
+        watchlist = _epss_watchlist(
+            raw_fixed,
+            lambda r: (r[0], r[1], r[2], r[6], r[7]),
+            shown_ids
+        )
+        _print_epss_watchlist(registry_target, watchlist, section5_width)
 
     # -------------------------------------------------------------------------
     # 6. WHICH THINGS WERE WITHDRAWN / RETRACTED? (Intel Noise Filter)
