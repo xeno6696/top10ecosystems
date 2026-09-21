@@ -812,6 +812,21 @@ def _visible_length(text: str) -> int:
     return len(_ANSI_ESCAPE_RE.sub('', text))
 
 
+def _format_epss_kev_column(epss_score, kev_date_added, width: int = 28) -> str:
+    """Fixed-width 'EPSS / KEV' cell for --priority-sort-enriched tables. Pads to `width` based
+    on the TRUE visible text BEFORE the KEV portion is colored, not after -- coloring first would
+    make a naive :<N format spec count the invisible ANSI bytes as string length and under-pad
+    the cell, drifting every column printed after it (the same bug fixed for the VIII-C grid and
+    the Section V/VI/VII EPSS/KEV columns earlier this session; done correctly here from the
+    start rather than accepting the small residual overflow those two settled for)."""
+    epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
+    kev_visible = f"KEV: {kev_date_added}" if kev_date_added else "-"
+    kev_display = f"{RED}{kev_visible}{RESET}" if kev_date_added else "-"
+    visible_text = f"{epss_str} / {kev_visible}"
+    padding = " " * max(0, width - len(visible_text))
+    return f"{epss_str} / {kev_display}{padding}"
+
+
 def _abbreviate_ecosystem_label(name: str, width: int = 5) -> str:
     """Deterministic fixed-width column label for the Section VIII-C presence grid: strips
     everything but letters/digits and uppercases, so 'Go (Golang)' -> 'GO', 'Crates.io' ->
@@ -2613,10 +2628,19 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     conn.close()
     print("=" * 145)
 
-def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, registry_target: str, manifest_rows: list):
+def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, registry_target: str, manifest_rows: list, *, priority_sort_active: bool = False):
     """
     Computes lookback trend metrics, mutation velocity spikes from live streams,
     and dormancy decay models using a standardized 115-character wide grid.
+
+    priority_sort_active=False (default): identical query/ranking/output to before this flag
+    existed -- zero risk to existing behavior.
+    priority_sort_active=True: the four genuinely severity-ranked sub-tables (Rank Shifts,
+    Technical Debt Calcification, Threat Arrivals, Code-Fixed) re-rank by KEV -> EPSS -> CVSS
+    instead of CVSS alone (same _priority_sort_key ordering used everywhere else this applies),
+    and gain an EPSS/KEV column. The other two sub-tables (High-Chatter, which ranks by mutation
+    volume, and Retractions, which is a chronological audit list) aren't severity rankings to
+    begin with, so priority-sort has nothing to reorder there and they're left unchanged.
     """
     if not os.path.exists(db_path):
         print(f"{RED}[-] Trend Engine Aborted: Relational warehouse missing at {db_path}{RESET}")
@@ -2651,6 +2675,10 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     
     print("\n" + "="*115)
     print(f"   IX. CHRONOLOGICAL LOOKBACK TREND ANALYTICS: {registry_target.upper()} REGISTRY")
+    if priority_sort_active:
+        print(f"   {YELLOW}[--priority-sort active] Rank Shifts / Technical Debt / Threat Arrivals / Code-Fixed")
+        print(f"   ranked by KEV -> EPSS -> CVSS instead of CVSS alone. High-Chatter (mutation volume)")
+        print(f"   and Retractions (chronological audit) aren't severity rankings, so unaffected.{RESET}")
     print("="*115)
     
     # -------------------------------------------------------------------------
@@ -2696,55 +2724,87 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     # 2. INTERNAL REGISTRY SEVERITY RANK SHIFTS (HARDCORE LEADERBOARD MOVEMENT)
     # -------------------------------------------------------------------------
     print(f"\n[+] Internal Registry Severity Rank Shifts (Leaderboard Velocity inside {registry_target}):")
-    print("-" * 115)
-    print(f"{'Catalog Rank':<14} | {'Advisory ID':<22} | {'Artifact Name':<28} | {'CVSS':<6} | {'Historical Movement'}")
-    print("-" * 115)
+    section2_width = 155 if priority_sort_active else 115
+    print("-" * section2_width)
+    if priority_sort_active:
+        print(f"{'Catalog Rank':<14} | {'Advisory ID':<22} | {'Artifact Name':<28} | {'CVSS':<6} | {'EPSS / KEV':<28} | {'Historical Movement'}")
+    else:
+        print(f"{'Catalog Rank':<14} | {'Advisory ID':<22} | {'Artifact Name':<28} | {'CVSS':<6} | {'Historical Movement'}")
+    print("-" * section2_width)
 
-    cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, blast_radius, published_date
-        FROM vulnerabilities
-        WHERE ecosystems LIKE ? AND threat_profile NOT LIKE '%Withdrawn%'
-    """, (relaxed_like_pattern,))
-    all_repo_records = cursor.fetchall()
+    if priority_sort_active:
+        cursor.execute("""
+            SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.published_date,
+                   e.epss_score, k.date_added
+            FROM vulnerabilities v
+            LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
+            LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            WHERE v.ecosystems LIKE ? AND v.threat_profile NOT LIKE '%Withdrawn%'
+        """, (relaxed_like_pattern,))
+    else:
+        cursor.execute("""
+            SELECT advisory_id, package_name, cvss_score, blast_radius, published_date
+            FROM vulnerabilities
+            WHERE ecosystems LIKE ? AND threat_profile NOT LIKE '%Withdrawn%'
+        """, (relaxed_like_pattern,))
+    raw_rows = cursor.fetchall()
+    # Normalize to one shape regardless of mode so the dedup/ranking logic below never needs to
+    # branch on priority_sort_active itself -- only this fetch and the two prints above do.
+    all_repo_records = [(r[0], r[1], r[2], r[3], r[4], r[5] if priority_sort_active else None, r[6] if priority_sort_active else None) for r in raw_rows]
 
     # 1. Canonical deduplication for twin advisories (collapse GHSA / PYSEC pairs)
     vuln_clusters = {}
     for row in all_repo_records:
-        adv_id, p_name, cvss, radius, pub_date = row
+        adv_id, p_name, cvss, radius, pub_date, epss_score, kev_added = row
         cluster_key = (p_name.lower().strip(), cvss, radius)
-        
+
         if cluster_key not in vuln_clusters:
             vuln_clusters[cluster_key] = row
         else:
             existing = vuln_clusters[cluster_key]
             earlier_pub = min(filter(None, [existing[4], pub_date]), default=existing[4])
             canonical_id = adv_id if adv_id.startswith("GHSA-") else existing[0]
-            vuln_clusters[cluster_key] = (canonical_id, p_name, cvss, radius, earlier_pub)
+            # Prefer whichever twin actually carries EPSS/KEV data if the other doesn't.
+            merged_epss = existing[5] if existing[5] is not None else epss_score
+            merged_kev = existing[6] if existing[6] is not None else kev_added
+            vuln_clusters[cluster_key] = (canonical_id, p_name, cvss, radius, earlier_pub, merged_epss, merged_kev)
 
     deduped_catalog = list(vuln_clusters.values())
 
+    # Sort key preserves this table's EXISTING tiebreak chain (name, then id) exactly when
+    # priority-sort is inactive -- deliberately NOT reusing the shared _priority_sort_key() here,
+    # since that function's own inactive-mode tuple (-cvss, -radius, id) drops the name tiebreak
+    # this table has always used, which would silently change default output.
+    def _rank_shift_sort_key(row):
+        _, p_name, cvss, radius, _, epss_score, kev_added = row
+        if not priority_sort_active:
+            return (-cvss, -radius, p_name.lower(), row[0])
+        kev_hit = 0 if kev_added else 1
+        epss = epss_score or 0.0
+        return (kev_hit, -epss, -cvss, -radius, p_name.lower(), row[0])
+
     # 2. Current catalog ranking (All known items in registry)
-    current_sorted = sorted(deduped_catalog, key=lambda x: (-x[2], -x[3], x[1].lower(), x[0]))
+    current_sorted = sorted(deduped_catalog, key=_rank_shift_sort_key)
     current_rank_map = {row[0]: idx for idx, row in enumerate(current_sorted, start=1)}
 
     # 3. Historical catalog ranking (Items published strictly prior to start_date)
     historical_snapshot = [
-        r for r in deduped_catalog 
+        r for r in deduped_catalog
         if r[4] and r[4][:10] < start_str
     ]
-    historical_sorted = sorted(historical_snapshot, key=lambda x: (-x[2], -x[3], x[1].lower(), x[0]))
+    historical_sorted = sorted(historical_snapshot, key=_rank_shift_sort_key)
     historical_rank_map = {row[0]: idx for idx, row in enumerate(historical_sorted, start=1)}
 
     # 4. Evaluate the true Top 5 leaderboard positions (#1 through #5)
     top_5_leaderboard = current_sorted[:5]
 
     for c_rank, db_row in enumerate(top_5_leaderboard, start=1):
-        adv_id, p_name, cvss, radius, pub_date = db_row
-        
+        adv_id, p_name, cvss, radius, pub_date, epss_score, kev_added = db_row
+
         # Check if this disclosure was first published within the active window
         is_new_arrival = (pub_date is not None and pub_date[:10] >= start_str)
         b_rank = historical_rank_map.get(adv_id, None)
-        
+
         if is_new_arrival or b_rank is None:
             shift_display = f"{YELLOW}New Arrival (Entered at #{c_rank}){RESET}"
         elif b_rank == c_rank:
@@ -2753,70 +2813,115 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
             shift_display = f"{GREEN}Ascended +{b_rank - c_rank} spots (Was #{b_rank}){RESET}"
         else:
             shift_display = f"{RED}Dropped -{c_rank - b_rank} spots (Was #{b_rank}){RESET}"
-            
+
         rank_label = f"#{c_rank}"
-        print(f"{rank_label:<14} | {adv_id:<22} | {p_name[:28]:<28} | {cvss:<6.1f} | {shift_display}")
+        if priority_sort_active:
+            epss_kev_col = _format_epss_kev_column(epss_score, kev_added)
+            print(f"{rank_label:<14} | {adv_id:<22} | {p_name[:28]:<28} | {cvss:<6.1f} | {epss_kev_col} | {shift_display}")
+        else:
+            print(f"{rank_label:<14} | {adv_id:<22} | {p_name[:28]:<28} | {cvss:<6.1f} | {shift_display}")
 
     if not top_5_leaderboard:
         print("    [-] No catalog vulnerabilities found matching this registry.")
-    print("-" * 115)
-        
+    print("-" * section2_width)
+
     # -------------------------------------------------------------------------
     # 3. HIGH RISK TECHNICAL DEBT CALCIFICATION (DORMANCY TRACKING)
     # -------------------------------------------------------------------------
     print(f"\n[+] High-Severity Technical Debt Calcification (Dormant inside {registry_target} > {start_date.date()}):")
-    
+    section3_width = 145 if priority_sort_active else 115
+
     cursor.execute("""
         SELECT COUNT(DISTINCT advisory_id)
         FROM vulnerabilities
         WHERE cvss_score >= 8.5 AND last_modified < ? AND ecosystems LIKE ?
     """, (start_str, relaxed_like_pattern))
     total_stagnant_debt = cursor.fetchone()[0]
-    
+
     print(f"    [*] Identified {total_stagnant_debt:,} total critical technical debt entries calcified prior to this window.")
-    print("-" * 115)
-    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Days Since Last Active'}")
-    print("-" * 115)
-    
-    cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, last_modified
-        FROM vulnerabilities
-        WHERE cvss_score >= 8.5 AND last_modified < ? AND ecosystems LIKE ?
-        GROUP BY advisory_id
-        ORDER BY cvss_score DESC, last_modified ASC
-        LIMIT 5
-    """, (start_str, relaxed_like_pattern))
-    
+    print("-" * section3_width)
+    if priority_sort_active:
+        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'EPSS / KEV':<28} | {'Days Since Last Active'}")
+    else:
+        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Days Since Last Active'}")
+    print("-" * section3_width)
+
+    if priority_sort_active:
+        cursor.execute("""
+            SELECT v.advisory_id, v.package_name, v.cvss_score, v.last_modified, e.epss_score, k.date_added
+            FROM vulnerabilities v
+            LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
+            LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            WHERE v.cvss_score >= 8.5 AND v.last_modified < ? AND v.ecosystems LIKE ?
+            ORDER BY (CASE WHEN k.date_added IS NOT NULL THEN 0 ELSE 1 END), e.epss_score DESC, v.cvss_score DESC, v.last_modified ASC
+            LIMIT 5
+        """, (start_str, relaxed_like_pattern))
+    else:
+        cursor.execute("""
+            SELECT advisory_id, package_name, cvss_score, last_modified
+            FROM vulnerabilities
+            WHERE cvss_score >= 8.5 AND last_modified < ? AND ecosystems LIKE ?
+            GROUP BY advisory_id
+            ORDER BY cvss_score DESC, last_modified ASC
+            LIMIT 5
+        """, (start_str, relaxed_like_pattern))
+
     rows_dormant = cursor.fetchall()
     if rows_dormant:
         for row in rows_dormant:
-            aid, p_name, cvss, last_mod_str = row
+            if priority_sort_active:
+                aid, p_name, cvss, last_mod_str, epss_score, kev_added = row
+            else:
+                aid, p_name, cvss, last_mod_str = row
             mod_date = datetime.datetime.strptime(last_mod_str, "%Y-%m-%d").date()
             days_dormant = (end_date.date() - mod_date).days
-            print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {days_dormant}d stagnant")
+            if priority_sort_active:
+                epss_kev_col = _format_epss_kev_column(epss_score, kev_added)
+                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {epss_kev_col} | {days_dormant}d stagnant")
+            else:
+                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {days_dormant}d stagnant")
     else:
         print("    [-] Zero high-risk technical debt structures remain stagnant outside the window boundary.")
-    print("-" * 115)
+    print("-" * section3_width)
 
     # -------------------------------------------------------------------------
     # 4. TOP 10 CRITICAL THREAT ARRIVALS & CAMPAIGNS (DEDUPLICATED)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 10 Critical Threat Arrivals & Campaigns (Published Since {start_str}):")
-    print("-" * 115)
-    print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Age':<6} | {'Threat Profile'}")
-    print("-" * 115)
-    
-    cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, published_date
-        FROM vulnerabilities
-        WHERE last_modified >= ? 
-          AND ecosystems LIKE ? 
-          AND published_date >= ?
-          AND threat_profile NOT LIKE '%Withdrawn%'
-        ORDER BY cvss_score DESC, blast_radius DESC, advisory_id ASC
-        LIMIT 50
-    """, (start_str, relaxed_like_pattern, start_str))
-    
+    section4_width = 155 if priority_sort_active else 115
+    print("-" * section4_width)
+    if priority_sort_active:
+        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Age':<6} | {'EPSS / KEV':<28} | {'Threat Profile'}")
+    else:
+        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Age':<6} | {'Threat Profile'}")
+    print("-" * section4_width)
+
+    if priority_sort_active:
+        cursor.execute("""
+            SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.threat_profile, v.published_date,
+                   e.epss_score, k.date_added
+            FROM vulnerabilities v
+            LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
+            LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            WHERE v.last_modified >= ?
+              AND v.ecosystems LIKE ?
+              AND v.published_date >= ?
+              AND v.threat_profile NOT LIKE '%Withdrawn%'
+            ORDER BY (CASE WHEN k.date_added IS NOT NULL THEN 0 ELSE 1 END), e.epss_score DESC, v.cvss_score DESC, v.blast_radius DESC, v.advisory_id ASC
+            LIMIT 50
+        """, (start_str, relaxed_like_pattern, start_str))
+    else:
+        cursor.execute("""
+            SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, published_date
+            FROM vulnerabilities
+            WHERE last_modified >= ?
+              AND ecosystems LIKE ?
+              AND published_date >= ?
+              AND threat_profile NOT LIKE '%Withdrawn%'
+            ORDER BY cvss_score DESC, blast_radius DESC, advisory_id ASC
+            LIMIT 50
+        """, (start_str, relaxed_like_pattern, start_str))
+
     raw_worst = cursor.fetchall()
     seen_worst_pkgs = set()
     deduped_worst = []
@@ -2831,9 +2936,12 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 
     if deduped_worst:
         for row in deduped_worst:
-            aid, p_name, cvss, radius, t_profile, pub_date_str = row
+            if priority_sort_active:
+                aid, p_name, cvss, radius, t_profile, pub_date_str, epss_score, kev_added = row
+            else:
+                aid, p_name, cvss, radius, t_profile, pub_date_str = row
             radius_str = f"{radius:,} Vers"
-            
+
             age_str = "N/A"
             if pub_date_str:
                 try:
@@ -2842,30 +2950,52 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
                     age_str = f"{age_days}d"
                 except ValueError:
                     pass
-                    
-            print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {radius_str:<14} | {age_str:<6} | {t_profile}")
+
+            if priority_sort_active:
+                epss_kev_col = _format_epss_kev_column(epss_score, kev_added)
+                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {radius_str:<14} | {age_str:<6} | {epss_kev_col} | {t_profile}")
+            else:
+                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {radius_str:<14} | {age_str:<6} | {t_profile}")
     else:
         print("    [-] No severe new threat arrivals or malware campaigns recorded in this window.")
-    print("-" * 115)
+    print("-" * section4_width)
         
     # -------------------------------------------------------------------------
     # 5. WHICH THINGS ACTUALLY GOT FIXED? (DEDUPLICATED)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 5 Critical Vulnerabilities Code-Fixed (Remediated Since {start_str}):")
-    print("-" * 115)
-    print(f"{'Advisory ID':<28} | {'Artifact Name':<22} | {'CVSS':<5} | {'Fixed':<6} | {'Days Alive':<10} | {'Resolution State'}")
-    print("-" * 115)
-    
-    cursor.execute("""
-        SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days
-        FROM vulnerabilities
-        WHERE last_modified >= ? AND ecosystems LIKE ? 
-          AND threat_profile LIKE '%Fix%'
-          AND threat_profile NOT LIKE '%Withdrawn%'
-        ORDER BY cvss_score DESC, last_modified DESC
-        LIMIT 25
-    """, (start_str, relaxed_like_pattern))
-    
+    section5_width = 155 if priority_sort_active else 115
+    print("-" * section5_width)
+    if priority_sort_active:
+        print(f"{'Advisory ID':<28} | {'Artifact Name':<22} | {'CVSS':<5} | {'Fixed':<6} | {'Days Alive':<10} | {'EPSS / KEV':<28} | {'Resolution State'}")
+    else:
+        print(f"{'Advisory ID':<28} | {'Artifact Name':<22} | {'CVSS':<5} | {'Fixed':<6} | {'Days Alive':<10} | {'Resolution State'}")
+    print("-" * section5_width)
+
+    if priority_sort_active:
+        cursor.execute("""
+            SELECT v.advisory_id, v.package_name, v.cvss_score, v.last_modified, v.threat_profile, v.dwell_days,
+                   e.epss_score, k.date_added
+            FROM vulnerabilities v
+            LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
+            LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
+            WHERE v.last_modified >= ? AND v.ecosystems LIKE ?
+              AND v.threat_profile LIKE '%Fix%'
+              AND v.threat_profile NOT LIKE '%Withdrawn%'
+            ORDER BY (CASE WHEN k.date_added IS NOT NULL THEN 0 ELSE 1 END), e.epss_score DESC, v.cvss_score DESC, v.last_modified DESC
+            LIMIT 25
+        """, (start_str, relaxed_like_pattern))
+    else:
+        cursor.execute("""
+            SELECT advisory_id, package_name, cvss_score, last_modified, threat_profile, dwell_days
+            FROM vulnerabilities
+            WHERE last_modified >= ? AND ecosystems LIKE ?
+              AND threat_profile LIKE '%Fix%'
+              AND threat_profile NOT LIKE '%Withdrawn%'
+            ORDER BY cvss_score DESC, last_modified DESC
+            LIMIT 25
+        """, (start_str, relaxed_like_pattern))
+
     raw_fixed = cursor.fetchall()
     seen_fixed_pkgs = set()
     deduped_fixed = []
@@ -2880,13 +3010,20 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 
     if deduped_fixed:
         for row in deduped_fixed:
-            aid, p_name, cvss, last_mod_str, t_profile, dwell = row
+            if priority_sort_active:
+                aid, p_name, cvss, last_mod_str, t_profile, dwell, epss_score, kev_added = row
+            else:
+                aid, p_name, cvss, last_mod_str, t_profile, dwell = row
             date_short = last_mod_str[5:] if len(last_mod_str) >= 10 else last_mod_str
             dwell_str = f"{int(dwell)}d" if dwell is not None else "N/A"
-            print(f"{aid:<28} | {p_name[:22]:<22} | {cvss:<5.1f} | {date_short:<6} | {dwell_str:<10} | {t_profile}")
+            if priority_sort_active:
+                epss_kev_col = _format_epss_kev_column(epss_score, kev_added)
+                print(f"{aid:<28} | {p_name[:22]:<22} | {cvss:<5.1f} | {date_short:<6} | {dwell_str:<10} | {epss_kev_col} | {t_profile}")
+            else:
+                print(f"{aid:<28} | {p_name[:22]:<22} | {cvss:<5.1f} | {date_short:<6} | {dwell_str:<10} | {t_profile}")
     else:
         print("    [-] No vulnerability mitigations or upstream fixes published in this window.")
-    print("-" * 115)
+    print("-" * section5_width)
 
     # -------------------------------------------------------------------------
     # 6. WHICH THINGS WERE WITHDRAWN / RETRACTED? (Intel Noise Filter)
@@ -3334,7 +3471,8 @@ def main():
                 start_date=start_window_dt,
                 end_date=end_window_dt,
                 registry_target=registry,
-                manifest_rows=cached_manifest_rows
+                manifest_rows=cached_manifest_rows,
+                priority_sort_active=args.priority_sort
             )
         return
 
