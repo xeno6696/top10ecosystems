@@ -639,21 +639,28 @@ class TestThreatStreamScanner(unittest.TestCase):
         zone_b = stdout_capture[zone_bounds[1]:zone_bounds[2]]
         zone_c = stdout_capture[zone_bounds[2]:zone_bounds[3]]
 
-        # A: flat artifact-name-per-ecosystem list (independent native releases are peers with no
-        # dependency direction, so the useful thing to show is everywhere you'd need to go check,
-        # not one representative pair) -- structural sanity is a real Confidence tier and a
-        # non-empty name list. The >= 2 ecosystems invariant itself is enforced at the data layer
-        # by test_rank_cross_registry_tables_* / test_cross_registry_classification_*, not
-        # re-derivable from this console format (no numeric span field is printed here anymore).
+        # A: status grid, same presence/F-U-? model as C (independent native releases are peers
+        # with no dependency direction, so the useful thing to show is which of this advisory's
+        # ecosystems are still unfixed, not one representative name pair). Every listed advisory
+        # row must carry >= 2 marked columns, matching the >= 2 ecosystems invariant enforced at
+        # the data layer by rank_cross_registry_tables (a row only lands in table_a when it spans
+        # 2+ registries to begin with).
         if "Zero advisories" not in zone_a:
-            for row_match in re.finditer(
-                r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(CONFIRMED|HIGH|MEDIUM|LOW)\s*\|\s*(\S.*)$",
-                zone_a, re.MULTILINE
-            ):
-                self.assertTrue(
-                    row_match.group(3).strip(),
-                    f"[!] REGRESSION: Section VIII-A row '{row_match.group(0).strip()}' is missing its "
-                    f"ecosystems/package-names list."
+            a_grid_lines = zone_a.splitlines()
+            a_header_idx = next((i for i, l in enumerate(a_grid_lines) if "Advisory ID" in l and "Conf" in l), None)
+            self.assertIsNotNone(a_header_idx, "[!] REGRESSION: Section VIII-A grid header not found where expected.")
+            a_expected_pipes = a_grid_lines[a_header_idx].count("|")
+            for line in a_grid_lines[a_header_idx + 2:]:  # skip the header row and its divider
+                stripped = line.strip()
+                if not stripped or stripped.startswith("=") or stripped.startswith("-") or line.count("|") < a_expected_pipes:
+                    break
+                cells = line.split("|")
+                marked_count = sum(1 for c in cells[2:] if c.strip())  # cells[0]=Advisory ID, [1]=Conf
+                self.assertGreaterEqual(
+                    marked_count, 2,
+                    f"[!] REGRESSION: Section VIII-A grid row '{stripped}' has fewer than 2 marked "
+                    f"ecosystem columns -- rank_cross_registry_tables should only ever populate "
+                    f"table_a for advisories spanning >= 2 distinct registries."
                 )
 
         # B: repackaged pairs DO have a dependency direction (downstream waits on upstream), so
@@ -705,20 +712,33 @@ class TestThreatStreamScanner(unittest.TestCase):
                 )
 
     def run_scanner_with_args(self, mock_args):
-        """Helper utility to simulate an authentic CLI execution and capture output."""
+        """Helper utility to simulate an authentic CLI execution and capture output. Mocks
+        requests.get against the frozen local CSV snapshot (self.cached_stream_lines, loaded once
+        in setUpClass) instead of letting main() hit the live OSV modified_id.csv feed over the
+        network -- every caller of this helper was previously making a real HTTP call to Google
+        Cloud Storage on every single test run, which is both why this suite was slow (tens of
+        seconds of network I/O per test) and non-deterministic (assertions could drift with
+        whatever rows the live feed happens to contain that day). test_historical_golden_masters
+        already had to work around this itself with its own requests.get mock; this generalizes
+        that same fix to every other test going through run_scanner_with_args."""
         base_args = ['top10ecosystems.py', '--layer', 'app', '--from', '2020-01-01']
         full_args = base_args + mock_args
         captured_output = io.StringIO()
-        
+
+        mock_response = unittest.mock.MagicMock()
+        mock_response.status_code = 200
+        mock_response.iter_lines.return_value = self.cached_stream_lines
+
         with patch.object(sys, 'argv', full_args), \
              patch('sys.stdout', captured_output), \
              patch('top10ecosystems.build_ghsa_ecosystem_map', return_value=self.ghsa_lookup), \
-             patch('top10ecosystems.build_ghsa_from_db', return_value=self.ghsa_lookup):
+             patch('top10ecosystems.build_ghsa_from_db', return_value=self.ghsa_lookup), \
+             patch('requests.get', return_value=mock_response):
             try:
                 top10ecosystems.main()
             except SystemExit as e:
                 return e.code, captured_output.getvalue()
-                
+
         return 0, captured_output.getvalue()
 
     def test_03_retraction_hunt_parameter_matrix(self):

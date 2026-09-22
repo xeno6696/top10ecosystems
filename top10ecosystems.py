@@ -591,6 +591,61 @@ def _priority_sort_key(entry: dict, id_val: str, priority_sort_active: bool = Fa
     return (kev_hit, -epss, -cvss, -radius, id_val)
 
 
+_absolute_rank_cache = {"ghsa_lookup": None, "priority_sort_active": None, "global_absolute_ranks": None, "eco_absolute_ranks": None}
+
+
+def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_active: bool):
+    """Builds (and single-entry memoizes) the global and per-ecosystem absolute rank maps that
+    Sections V/VI/VII need -- two full O(N log N) sorts over the entire warehouse. ghsa_lookup is
+    never mutated in place anywhere in this module, so the result is a pure function of (the
+    ghsa_lookup object's identity, priority_sort_active); a single cached slot is enough because
+    every real caller (one CLI invocation, or one test class's cached class-level lookup reused
+    across many calls) passes the SAME ghsa_lookup object repeatedly rather than a rotating set of
+    different ones. Holding a strong reference to that object as the cache key (compared via `is`,
+    not id()) is deliberate: an id()-only cache risks a stale hit if that object were ever garbage
+    collected and a new, unrelated dict happened to be allocated at the same address -- holding the
+    reference here means that can't happen for as long as the cached entry is in use.
+    Added because test_historical_golden_masters (and any multi-window/multi-registry caller,
+    e.g. --velocity) was redoing this identical sort from scratch on every iteration despite the
+    warehouse-backed ghsa_lookup never changing within a single process run."""
+    cache = _absolute_rank_cache
+    if cache["ghsa_lookup"] is ghsa_lookup and cache["priority_sort_active"] == priority_sort_active:
+        return cache["global_absolute_ranks"], cache["eco_absolute_ranks"]
+
+    master_tracks = _KNOWN_CONTAINER_ECOSYSTEMS + _KNOWN_REGISTRY_ECOSYSTEMS + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
+
+    sorted_global_heap = sorted(
+        ghsa_lookup.items(),
+        key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active)
+    )
+    global_absolute_ranks = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_global_heap, start=1)}
+
+    ecosystem_archive_buckets = defaultdict(list)
+    for advisory_id, advisory_data in ghsa_lookup.items():
+        for raw_eco in advisory_data.get("ecosystems", []):
+            eco_lower = raw_eco.lower().strip()
+            hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
+            eco_clean = hard_mappings.get(eco_lower, None)
+            if not eco_clean:
+                for track in master_tracks:
+                    if eco_lower in track.lower() or track.lower() in eco_lower:
+                        eco_clean = track
+                        break
+            if not eco_clean: eco_clean = "Android"
+            ecosystem_archive_buckets[eco_clean].append((advisory_id, advisory_data))
+
+    eco_absolute_ranks = {}
+    for eco_name, advisories in ecosystem_archive_buckets.items():
+        sorted_bucket = sorted(advisories, key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active))
+        eco_absolute_ranks[eco_name] = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_bucket, start=1)}
+
+    cache["ghsa_lookup"] = ghsa_lookup
+    cache["priority_sort_active"] = priority_sort_active
+    cache["global_absolute_ranks"] = global_absolute_ranks
+    cache["eco_absolute_ranks"] = eco_absolute_ranks
+    return global_absolute_ranks, eco_absolute_ranks
+
+
 def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_registries: list = None, *, priority_sort: bool = False) -> dict:
     """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map.
 
@@ -1218,15 +1273,17 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
 _CVE_GRID_MAX_COLUMNS = 15
 
 
-def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int = 5, max_columns: int = _CVE_GRID_MAX_COLUMNS) -> list:
-    """Builds the VIII-C ecosystem-status grid as a list of print-ready lines: a fixed-width
-    F/U/? per ecosystem actually touched by these rows (not the full universe of known
-    ecosystems, which would mostly be empty columns), ordered by how many rows touch it so the
-    busiest columns land on the left. Capped at max_columns -- past that point a column-per-
-    ecosystem grid stops being more scannable than prose, so anything beyond the cap is called
-    out by count instead of given its own column. A 'Rec' column carries the raw advisory-record
-    count per CVE (distinct from the ecosystem count implied by the marked columns) since that's
-    where things like Bitnami's one-advisory-per-container-image practice becomes visible.
+def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int = 5, max_columns: int = _CVE_GRID_MAX_COLUMNS,
+                                  id_label: str = "CVE ID", info_label: str = "Rec", info_col_width: int = None) -> list:
+    """Builds an ecosystem-status grid as a list of print-ready lines: a fixed-width F/U/? per
+    ecosystem actually touched by these rows (not the full universe of known ecosystems, which
+    would mostly be empty columns), ordered by how many rows touch it so the busiest columns land
+    on the left. Capped at max_columns -- past that point a column-per-ecosystem grid stops being
+    more scannable than prose, so anything beyond the cap is called out by count instead of given
+    its own column. Shared by VIII-C (row = a CVE correlated across independently-tracked advisory
+    records; info column is 'Rec', the raw advisory-record count -- where things like Bitnami's
+    one-advisory-per-container-image practice becomes visible) and VIII-A (row = one advisory's
+    own cross-registry release; info column is 'Conf', its classification confidence tier).
 
     Presence alone ("does this ecosystem appear at all") isn't actionable -- it tells you how
     many release schedules exist, not which ones still need chasing. Each present cell instead
@@ -1243,17 +1300,26 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
     does NOT mean there's exactly one red column per row: a CVE natively maintained in multiple
     registries (e.g. both a Go module and its Java bindings) legitimately gets multiple red
     cells, each on its own release schedule -- red marks "a plausible fix origin," not "the one
-    true source.\""""
+    true source."
+
+    Each row is (row_id, info_value, ecosystems, fixed_status) -- info_value is whatever the
+    caller's info column holds (a record count, a confidence tier, ...), rendered with str().
+    info_col_width defaults to col_width, but callers whose info values run wider than a status
+    letter (e.g. "CONFIRMED") should pass a wider one explicitly, since the fixed-width status
+    cells must stay narrow for the grid to stay scannable."""
+    if info_col_width is None:
+        info_col_width = col_width
+
     eco_counts = Counter()
-    for _, _, _, ecosystems, _ in rows:
+    for _, _, ecosystems, _ in rows:
         eco_counts.update(ecosystems)
 
     ordered_ecos = [eco for eco, _ in eco_counts.most_common()]
     shown_ecos = ordered_ecos[:max_columns]
     hidden_count = len(ordered_ecos) - len(shown_ecos)
 
-    def cell(text):
-        return f"| {text:<{col_width}} "
+    def cell(text, width=col_width):
+        return f"| {text:<{width}} "
 
     def status_cell(is_present: bool, eco: str, fixed_status: dict):
         # Pad the plain status text to its true visible width FIRST, then wrap in color codes --
@@ -1271,13 +1337,13 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
             padded = f"{RED}{padded}{RESET}"
         return f"| {padded} "
 
-    header = f"{'CVE ID':<{id_width}}" + cell("Rec") + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
+    header = f"{id_label:<{id_width}}" + cell(info_label, info_col_width) + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
     lines = [header, "-" * len(header)]
-    for cve_id, eco_count, record_count, ecosystems, fixed_status in rows:
+    for row_id, info_value, ecosystems, fixed_status in rows:
         eco_set = set(ecosystems)
-        lines.append(f"{cve_id:<{id_width}}" + cell(str(record_count)) + "".join(status_cell(eco in eco_set, eco, fixed_status) for eco in shown_ecos))
+        lines.append(f"{row_id:<{id_width}}" + cell(str(info_value), info_col_width) + "".join(status_cell(eco in eco_set, eco, fixed_status) for eco in shown_ecos))
     if hidden_count > 0:
-        lines.append(f"  (+{hidden_count} additional ecosystem(s) touched by these CVEs, not broken out as separate columns)")
+        lines.append(f"  (+{hidden_count} additional ecosystem(s) touched by these rows, not broken out as separate columns)")
     lines.append("  F = fix shipped for that ecosystem | U = no fix shipped yet | ? = fix status unknown (needs --rebuild)")
     lines.append(f"  {RED}Red{RESET} = language/package registry (a plausible fix origin); plain = OS/container image (always downstream).")
     return lines
@@ -1306,13 +1372,28 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     Previously split across two separately-numbered sections (VIII "cross-registry" and IX
     "cross-ecosystem"); consolidated after the near-synonymous names and separate numbering made
     two views of the same underlying question read as unrelated rankings."""
+    # A's grid: container/OS ecosystems can never appear here (rank_cross_registry_tables only
+    # populates table_a for independent NATIVE releases, and a container image is by definition a
+    # downstream repackage, never a native one) -- so its column count stays small (real language
+    # registries only), unlike C which spans every tracker including containers. Confidence is a
+    # word ("CONFIRMED"), not a digit, so it gets its own wider info column.
+    a_grid_rows = [
+        (v_id, evidence["confidence"].upper(), [eco for eco, names in names_by_eco.items() if names], fixed_by_eco)
+        for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_a
+    ]
+    a_grid_lines = _render_cross_ecosystem_grid(a_grid_rows, id_width=24, id_label="Advisory ID", info_label="Conf", info_col_width=9) if a_grid_rows else []
+
     # The C grid's width depends on how many distinct ecosystems appear across these specific
     # rows (13+ columns is common), which can legitimately exceed the 125 chars that comfortably
-    # fits A/B -- so the box width is computed from whichever is actually wider, the same fix
+    # fits B -- so the box width is computed from whichever is actually wider, the same fix
     # applied to Sections V/VI/VII earlier for the same underlying mistake (a hardcoded border
     # that doesn't match real content width).
-    grid_lines = _render_cross_ecosystem_grid(cve_correlation_rows) if (cve_correlation_available and cve_correlation_rows) else []
-    box_width = max([125] + [_visible_length(l) for l in grid_lines])
+    c_grid_rows = [
+        (cve_id, record_count, ecosystems, fixed_status)
+        for cve_id, eco_count, record_count, ecosystems, fixed_status in cve_correlation_rows
+    ]
+    grid_lines = _render_cross_ecosystem_grid(c_grid_rows) if (cve_correlation_available and cve_correlation_rows) else []
+    box_width = max([125] + [_visible_length(l) for l in grid_lines] + [_visible_length(l) for l in a_grid_lines])
 
     print("\n" + "="*box_width)
     print(f"  {BOLD}VIII. IS THIS THE SAME VULNERABILITY SHOWING UP MORE THAN ONCE?{RESET}")
@@ -1328,22 +1409,20 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     print("  the upstream side's fix to ship before it can be republished -- CONFIRMED = known")
     print("  repackaging convention (e.g. Maven webjars) | MEDIUM = one name wraps the other.")
 
-    # A: independent native releases are peers with no dependency direction between them, so the
-    # single "best pair" that proved the classification isn't the useful thing to show -- the full
-    # set of ecosystems/names is (that's everywhere you'd need to go check), per review feedback
-    # that a flat artifact-name list is more actionable here than a pairwise comparison.
+    # A: independent native releases are peers with no dependency direction between them, so a
+    # single "best pair" isn't the useful thing to show. Originally a flat "ecosystem: name [F/U/?]"
+    # prose list; converted to the same presence grid VIII-C uses (per review feedback that the
+    # prose form still didn't say what to DO) -- a scannable "which of this advisory's ecosystems
+    # are still unfixed" view at a glance, at the cost of not showing the per-ecosystem package
+    # name inline anymore (the advisory ID itself is enough to look that up).
     print("-" * box_width)
     print(f"  {BOLD}VIII-A. TRUE CROSS-COMPILED (same project, independently native-released to multiple registries){RESET}")
     print("-" * box_width)
     if not table_a:
         print("  [+] Zero advisories in this execution frame matched a same-project, multi-registry native-release pattern.")
     else:
-        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Ecosystems / Package Names'}")
-        print("-" * box_width)
-        for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_a:
-            parts = [f"{eco}: {names[0]} [{_fix_status_tag(fixed_by_eco, eco)}]" for eco, names in sorted(names_by_eco.items()) if names]
-            flat = _truncate_with_ellipsis(", ".join(parts), 85)
-            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {flat}")
+        for line in a_grid_lines:
+            print(line)
 
     # B: unlike A, a repackaged pair DOES have a dependency direction -- the downstream side's fix
     # is gated on the upstream side shipping first and someone noticing/republishing. Columns are
@@ -1479,34 +1558,7 @@ def generate_enterprise_threat_leaderboard(
 
     if ghsa_lookup is None: ghsa_lookup = build_ghsa_ecosystem_map()
 
-    # Build True Global Master Rank Map (Across All Rows)
-    sorted_global_heap = sorted(
-        ghsa_lookup.items(),
-        key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active)
-    )
-    global_absolute_ranks = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_global_heap, start=1)}
-
-    # Build Ecosystem-Specific Absolute Rank Map
-    ecosystem_archive_buckets = defaultdict(list)
-    for advisory_id, advisory_data in ghsa_lookup.items():
-        for raw_eco in advisory_data.get("ecosystems", []):
-            eco_lower = raw_eco.lower().strip()
-            hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
-            eco_clean = hard_mappings.get(eco_lower, None)
-            if not eco_clean:
-                for track in master_tracks:
-                    if eco_lower in track.lower() or track.lower() in eco_lower:
-                        eco_clean = track
-                        break
-            if not eco_clean: eco_clean = "Android"
-            ecosystem_archive_buckets[eco_clean].append((advisory_id, advisory_data))
-
-    eco_absolute_ranks = {}
-    for eco_name, advisories in ecosystem_archive_buckets.items():
-        sorted_bucket = sorted(advisories, key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active))
-        eco_absolute_ranks[eco_name] = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_bucket, start=1)}
-
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"   
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     total_raw_rows = 0
     project_intercept_alerts = []
 
@@ -1686,6 +1738,14 @@ def generate_enterprise_threat_leaderboard(
         else: print(f" {GREEN}[+] Clean Bill of Health: Zero active package mutations match your local manifest elements within this timeframe.{RESET}")
         print("="*95 + "\n")
         return
+
+    # Global/per-ecosystem absolute rank maps, needed only by Sections V/VI/VII below (project
+    # mode already returned above, before ever needing them). Memoized in
+    # _get_or_build_absolute_ranks since ghsa_lookup is never mutated in place anywhere in this
+    # module -- repeated calls with the same lookup object (one process's --velocity/--trends
+    # multi-window loop, or a test class's cached class-level lookup reused across many calls)
+    # would otherwise redo this identical pair of O(N log N) sorts from scratch every time.
+    global_absolute_ranks, eco_absolute_ranks = _get_or_build_absolute_ranks(ghsa_lookup, priority_sort_active)
 
     # =========================================================================
     # SERIAL SEQUENTIAL EXECUTION LAYER (CONSOLIDATED ROUTER CALLS)
