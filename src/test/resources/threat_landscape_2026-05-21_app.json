@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-09-19T19:33:43.903580+00:00",
+        "generated_at": "2026-09-26T01:43:34.759199+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-21",
         "target_layer_filter": "app",
@@ -77,17 +77,17 @@
         }
     },
     "malware_vectors": {
-        "Typosquatting / Brand Hijacking": 80,
+        "Typosquatting / Brand Hijacking": 79,
         "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 936,
-        "Persistent Backdoor / Execution Shell": 11,
+        "Persistent Backdoor / Execution Shell": 12,
         "Unclassified Malicious Payload": 801
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 35.93681495809155,
-            "avg_dwell_cve": 80.91134289439374,
-            "avg_blast_radius": 1.9063848144952544,
+            "avg_dwell_mal": 36.21147646679562,
+            "avg_dwell_cve": 80.97001303780965,
+            "avg_blast_radius": 1.915444348576359,
             "avg_backlog_age": 332.8
         },
         "PyPI": {
@@ -98,13 +98,13 @@
         },
         "Go (Golang)": {
             "avg_dwell_mal": 9.0,
-            "avg_dwell_cve": 150.95076400679116,
+            "avg_dwell_cve": 151.43633276740238,
             "avg_blast_radius": 0.5033333333333333,
             "avg_backlog_age": 0.1
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 98.0,
-            "avg_dwell_cve": 125.6875,
+            "avg_dwell_cve": 125.73355263157895,
             "avg_blast_radius": 111.93442622950819,
             "avg_backlog_age": 21.3
         },
@@ -163,6 +163,12 @@
                 29,
                 "Malware (New Entry)",
                 "js-logger-pack",
+                10.0
+            ],
+            "GHSA-wpqr-6v78-jr5g": [
+                21,
+                "Vulnerability Fix (Update)",
+                "google-github-actions/run-gemini-cli",
                 10.0
             ],
             "MAL-2025-49456": [
@@ -439,12 +445,6 @@
                 5,
                 "Malware (New Entry)",
                 "pt-sc-logger",
-                10.0
-            ],
-            "MAL-2026-2588": [
-                5,
-                "Malware (New Entry)",
-                "@lamoda/seller-ui-kit",
                 10.0
             ]
         },
