@@ -345,11 +345,23 @@ def parse_osv_json(vuln_data):
     except ValueError: pass
 
     has_fixes = False
+    cwe_list = extract_cwe_classifications(vuln_data)
     is_malware = v_id.startswith("MAL-")
-    
+
     summary = vuln_data.get("summary", "").lower()
     details = vuln_data.get("details", "").lower()
-    if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: 
+    # FIX: a bare "backdoor"/"typosquat"/"malicious package" substring match false-positives on
+    # real vulnerabilities that merely mention this vocabulary as subject matter rather than
+    # disclosing that the package itself is malicious -- e.g. GHSA-m5p4-gvpx-4mvr (CWE-116, a
+    # terminal-escaping bug IN GuardDog, a malware *scanner*, whose own summary describes
+    # "...injection from malicious package content") and CVE-2026-45043 (CWE-269/284, a
+    # privilege-escalation bug that lets an attacker create "backdoor" service accounts -- the
+    # bug enables backdoors, it isn't one). Real GHSA malicious-package disclosures are tagged
+    # CWE-506 (Embedded Malicious Code) or carry no CWE at all, so only trust the keyword match
+    # when the advisory's own CWEs corroborate it (CWE-506 present, or no CWE assigned) --
+    # defer to the CWE classification when it points somewhere else entirely.
+    keyword_hit = "backdoor" in summary or "typosquat" in summary or "malicious package" in summary
+    if keyword_hit and (not cwe_list or "CWE-506" in cwe_list):
         is_malware = True
 
     m_vector = "Unclassified Malicious Payload"
@@ -457,8 +469,7 @@ def parse_osv_json(vuln_data):
     )
     aliases_json = json.dumps(raw_aliases)
     
-    # Formal CWE Classifications
-    cwe_list = extract_cwe_classifications(vuln_data)
+    # Formal CWE Classifications (extracted earlier, alongside the malware keyword gate above)
     cwe_json = json.dumps(cwe_list)
     
     return (
