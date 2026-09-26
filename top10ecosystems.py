@@ -1562,7 +1562,7 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
 
 def generate_enterprise_threat_leaderboard(
     start_date, end_date, target_layer: str = None, debug_mode: bool = False,
-    custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None,
+    custom_export_arg=None, project_file_path: str = None,
     forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
     manifest_rows: list = None, *, priority_sort_active: bool = False, target_registries: list = None,
     db_path: str = None
@@ -2158,7 +2158,7 @@ def run_velocity_update(args):
 
     for calculated_start, calculated_end in windows:
         snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer, priority_sort_active=args.priority_sort))
-        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
+        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
 
     # RESTORED: stitch the accumulated snapshots into a CSV velocity matrix, with an
     # opt-in terminal (plotext) chart via --terminal-plot -- see generate_velocity_matrix().
@@ -3620,7 +3620,6 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Surface raw noise.")
     parser.add_argument("--export", nargs='?', const=True, default=False, help="Name or auto-generate JSON snapshot payload.")
     parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots.")
-    parser.add_argument("--speedway", action="store_true", help="Analyze traffic velocity distributions.")
     parser.add_argument("--project-file", metavar="PATH", help="Path to manifest or standard SBOM.")
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force manual schema parser selection.")
     parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Direct lockfile ingestion.")
@@ -3817,7 +3816,6 @@ def main():
             target_layer=args.layer,
             debug_mode=args.debug,
             custom_export_arg=args.export,
-            run_speedway=args.speedway,
             project_file_path=args.project_file,
             forced_format=args.project_format,
             audit_mode=args.audit,
