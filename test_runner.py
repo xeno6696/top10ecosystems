@@ -1409,6 +1409,15 @@ class TestThreatStreamScanner(unittest.TestCase):
             top10ecosystems.compare_snapshots(file_base=file_base, file_current=file_current, html_output=None)
         live_output = captured_output.getvalue()
 
+        if UPDATE_GOLDEN_MASTERS:
+            # Unlike every other golden-master fixture, this one had no --update branch of its
+            # own -- re-minting it meant manually capturing compare_snapshots()'s output and
+            # overwriting the file by hand (encoding matters: it's UTF-16 with a BOM, not UTF-8).
+            print(f"[+] --update active: Auto-minting frozen baseline asset -> {good_baseline_path}")
+            with open(good_baseline_path, "w", encoding="utf-16") as f:
+                f.write(live_output)
+            return
+
         try:
             with open(good_baseline_path, "r", encoding="utf-8") as f:
                 expected_output = f.read()

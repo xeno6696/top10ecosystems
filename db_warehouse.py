@@ -345,11 +345,23 @@ def parse_osv_json(vuln_data):
     except ValueError: pass
 
     has_fixes = False
+    cwe_list = extract_cwe_classifications(vuln_data)
     is_malware = v_id.startswith("MAL-")
-    
+
     summary = vuln_data.get("summary", "").lower()
     details = vuln_data.get("details", "").lower()
-    if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: 
+    # FIX: a bare "backdoor"/"typosquat"/"malicious package" substring match false-positives on
+    # real vulnerabilities that merely mention this vocabulary as subject matter rather than
+    # disclosing that the package itself is malicious -- e.g. GHSA-m5p4-gvpx-4mvr (CWE-116, a
+    # terminal-escaping bug IN GuardDog, a malware *scanner*, whose own summary describes
+    # "...injection from malicious package content") and CVE-2026-45043 (CWE-269/284, a
+    # privilege-escalation bug that lets an attacker create "backdoor" service accounts -- the
+    # bug enables backdoors, it isn't one). Real GHSA malicious-package disclosures are tagged
+    # CWE-506 (Embedded Malicious Code) or carry no CWE at all, so only trust the keyword match
+    # when the advisory's own CWEs corroborate it (CWE-506 present, or no CWE assigned) --
+    # defer to the CWE classification when it points somewhere else entirely.
+    keyword_hit = "backdoor" in summary or "typosquat" in summary or "malicious package" in summary
+    if keyword_hit and (not cwe_list or "CWE-506" in cwe_list):
         is_malware = True
 
     m_vector = "Unclassified Malicious Payload"
@@ -457,8 +469,7 @@ def parse_osv_json(vuln_data):
     )
     aliases_json = json.dumps(raw_aliases)
     
-    # Formal CWE Classifications
-    cwe_list = extract_cwe_classifications(vuln_data)
+    # Formal CWE Classifications (extracted earlier, alongside the malware keyword gate above)
     cwe_json = json.dumps(cwe_list)
     
     return (
@@ -885,9 +896,22 @@ if __name__ == "__main__":
     parser.add_argument("--skip-kev", action="store_true", help="Skip the CISA KEV catalog refresh pipeline for this run.")
     args = parser.parse_args()
 
-    if args.rebuild and os.path.exists(DB_PATH):
-        print(f"{YELLOW}[!] --rebuild flag passed. Removing existing database at: {DB_PATH}{RESET}")
-        os.remove(DB_PATH)
+    if args.rebuild:
+        # --rebuild means "download the whole thing fresh": wipe every cached artifact up
+        # front so that's true just by reading this block, rather than relying on each
+        # downstream pipeline's own force-refresh plumbing to invalidate its cache correctly.
+        # Before this, --rebuild only deleted the DB -- bootstrap_warehouse_from_zip() only
+        # re-downloads the master archive when LOCAL_ZIP_PATH is missing, so a --rebuild would
+        # silently re-seed from whatever stale ZIP happened to still be sitting in ./cache
+        # (EPSS/KEV were already correctly forced via force=args.rebuild below; the master
+        # archive was the one gap).
+        if os.path.exists(DB_PATH):
+            print(f"{YELLOW}[!] --rebuild flag passed. Removing existing database at: {DB_PATH}{RESET}")
+            os.remove(DB_PATH)
+        for cached_path in (LOCAL_ZIP_PATH, EPSS_GZ_PATH, KEV_JSON_PATH):
+            if os.path.exists(cached_path):
+                print(f"{YELLOW}[!] --rebuild flag passed. Removing cached artifact: {cached_path}{RESET}")
+                os.remove(cached_path)
 
     print("=== OSV RELATIONAL DATA WAREHOUSE ===")
     connection = init_database()

@@ -94,6 +94,44 @@ def extract_cvss_score(vuln_data):
     return 0.0
 
 
+def extract_cwe_classifications(vuln_data):
+    """Extracts and normalizes all CWE identifiers across disparate upstream OSV sources. Mirrors
+    db_warehouse.py's own copy of this helper (the two modules don't import each other, matching
+    the existing extract_cvss_score / extract_production_cvss split), used by the malware-keyword
+    corroboration check below for the ZIP-fallback ingestion path in build_ghsa_ecosystem_map()."""
+    cwes = set()
+
+    db_spec = vuln_data.get("database_specific", {})
+    if isinstance(db_spec, dict):
+        for item in db_spec.get("cwe_ids", []):
+            if isinstance(item, str) and item.strip():
+                match = re.search(r"CWE-\d+", item, re.IGNORECASE)
+                if match:
+                    cwes.add(match.group(0).upper())
+
+        for item in db_spec.get("cwes", []):
+            if isinstance(item, str):
+                match = re.search(r"CWE-\d+", item, re.IGNORECASE)
+                if match:
+                    cwes.add(match.group(0).upper())
+            elif isinstance(item, dict):
+                cwe_raw = item.get("cwe_id") or item.get("id") or ""
+                match = re.search(r"CWE-\d+", str(cwe_raw), re.IGNORECASE)
+                if match:
+                    cwes.add(match.group(0).upper())
+
+    for affected in vuln_data.get("affected", []):
+        aff_spec = affected.get("database_specific", {})
+        if isinstance(aff_spec, dict):
+            for item in aff_spec.get("cwe_ids", []):
+                if isinstance(item, str) and item.strip():
+                    match = re.search(r"CWE-\d+", item, re.IGNORECASE)
+                    if match:
+                        cwes.add(match.group(0).upper())
+
+    return sorted(list(cwes))
+
+
 # Cross-registry product-identity signal: matches "github.com/OWNER/REPO" wherever it shows up,
 # either in an advisory's own reference links or embedded directly in a Go-ecosystem purl
 # (pkg:golang/github.com/OWNER/REPO...). Mirrors db_warehouse.py's own copy of this constant/
@@ -479,7 +517,18 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
                             if vuln_id.startswith("MAL-") or "malicious" in file_name.lower(): is_malware = True
                             summary = vuln_data.get("summary", "").lower()
                             details = vuln_data.get("details", "").lower()
-                            if "backdoor" in summary or "typosquat" in summary or "malicious package" in summary: is_malware = True
+                            # FIX: see db_warehouse.py's parse_osv_json for the full rationale --
+                            # a bare keyword substring match false-positives on real vulnerabilities
+                            # that merely mention this vocabulary as subject matter (e.g. a malware
+                            # *scanner*'s own bug, or a privilege-escalation bug that enables
+                            # "backdoor" accounts). Only trust the keyword match when the
+                            # advisory's own CWEs corroborate it (CWE-506 Embedded Malicious Code,
+                            # or no CWE assigned at all).
+                            keyword_hit = "backdoor" in summary or "typosquat" in summary or "malicious package" in summary
+                            if keyword_hit:
+                                cwe_list_check = extract_cwe_classifications(vuln_data)
+                                if not cwe_list_check or "CWE-506" in cwe_list_check:
+                                    is_malware = True
 
                             max_versions_found = 0
                             names_by_eco = {}
@@ -1513,7 +1562,7 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
 
 def generate_enterprise_threat_leaderboard(
     start_date, end_date, target_layer: str = None, debug_mode: bool = False,
-    custom_export_arg=None, run_speedway: bool = False, project_file_path: str = None,
+    custom_export_arg=None, project_file_path: str = None,
     forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
     manifest_rows: list = None, *, priority_sort_active: bool = False, target_registries: list = None,
     db_path: str = None
@@ -2109,7 +2158,7 @@ def run_velocity_update(args):
 
     for calculated_start, calculated_end in windows:
         snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer, priority_sort_active=args.priority_sort))
-        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, run_speedway=args.speedway, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
+        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
 
     # RESTORED: stitch the accumulated snapshots into a CSV velocity matrix, with an
     # opt-in terminal (plotext) chart via --terminal-plot -- see generate_velocity_matrix().
@@ -3571,7 +3620,6 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Surface raw noise.")
     parser.add_argument("--export", nargs='?', const=True, default=False, help="Name or auto-generate JSON snapshot payload.")
     parser.add_argument("--compare", nargs=2, metavar=('BASE_JSON', 'CURRENT_JSON'), help="Compare two snapshots.")
-    parser.add_argument("--speedway", action="store_true", help="Analyze traffic velocity distributions.")
     parser.add_argument("--project-file", metavar="PATH", help="Path to manifest or standard SBOM.")
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force manual schema parser selection.")
     parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Direct lockfile ingestion.")
@@ -3768,7 +3816,6 @@ def main():
             target_layer=args.layer,
             debug_mode=args.debug,
             custom_export_arg=args.export,
-            run_speedway=args.speedway,
             project_file_path=args.project_file,
             forced_format=args.project_format,
             audit_mode=args.audit,
