@@ -1,6 +1,6 @@
 {
     "metadata": {
-        "generated_at": "2026-09-19T19:33:00.898987+00:00",
+        "generated_at": "2026-09-26T01:43:01.609587+00:00",
         "interval_from": "2026-04-18",
         "interval_to": "2026-05-19",
         "target_layer_filter": "app",
@@ -71,17 +71,17 @@
         }
     },
     "malware_vectors": {
-        "Typosquatting / Brand Hijacking": 79,
+        "Typosquatting / Brand Hijacking": 78,
         "Dependency Confusion Campaign": 11,
         "Data Exfiltration / Credential Stealer": 904,
-        "Persistent Backdoor / Execution Shell": 11,
+        "Persistent Backdoor / Execution Shell": 12,
         "Unclassified Malicious Payload": 786
     },
     "profile_matrix": {
         "npm": {
-            "avg_dwell_mal": 36.00264200792602,
-            "avg_dwell_cve": 79.9873949579832,
-            "avg_blast_radius": 1.947935368043088,
+            "avg_dwell_mal": 36.204755614266844,
+            "avg_dwell_cve": 80.05042016806723,
+            "avg_blast_radius": 1.9573608617594256,
             "avg_backlog_age": 331.2
         },
         "PyPI": {
@@ -92,13 +92,13 @@
         },
         "Go (Golang)": {
             "avg_dwell_mal": 9.0,
-            "avg_dwell_cve": 134.16849015317285,
+            "avg_dwell_cve": 134.7308533916849,
             "avg_blast_radius": 0.32264957264957267,
             "avg_backlog_age": 0.0
         },
         "Packagist (PHP)": {
             "avg_dwell_mal": 98.0,
-            "avg_dwell_cve": 122.66545454545455,
+            "avg_dwell_cve": 122.71636363636364,
             "avg_blast_radius": 111.34057971014492,
             "avg_backlog_age": 20.7
         },
@@ -157,6 +157,12 @@
                 29,
                 "Malware (New Entry)",
                 "js-logger-pack",
+                10.0
+            ],
+            "GHSA-wpqr-6v78-jr5g": [
+                21,
+                "Vulnerability Fix (Update)",
+                "google-github-actions/run-gemini-cli",
                 10.0
             ],
             "MAL-2025-49456": [
@@ -433,12 +439,6 @@
                 5,
                 "Malware (New Entry)",
                 "@tochka-ui/foundation",
-                10.0
-            ],
-            "MAL-2026-3202": [
-                5,
-                "Malware (New Entry)",
-                "eslint-plugin-skyscanner-dates",
                 10.0
             ]
         },
