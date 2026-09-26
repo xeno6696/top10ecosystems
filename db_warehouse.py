@@ -896,9 +896,22 @@ if __name__ == "__main__":
     parser.add_argument("--skip-kev", action="store_true", help="Skip the CISA KEV catalog refresh pipeline for this run.")
     args = parser.parse_args()
 
-    if args.rebuild and os.path.exists(DB_PATH):
-        print(f"{YELLOW}[!] --rebuild flag passed. Removing existing database at: {DB_PATH}{RESET}")
-        os.remove(DB_PATH)
+    if args.rebuild:
+        # --rebuild means "download the whole thing fresh": wipe every cached artifact up
+        # front so that's true just by reading this block, rather than relying on each
+        # downstream pipeline's own force-refresh plumbing to invalidate its cache correctly.
+        # Before this, --rebuild only deleted the DB -- bootstrap_warehouse_from_zip() only
+        # re-downloads the master archive when LOCAL_ZIP_PATH is missing, so a --rebuild would
+        # silently re-seed from whatever stale ZIP happened to still be sitting in ./cache
+        # (EPSS/KEV were already correctly forced via force=args.rebuild below; the master
+        # archive was the one gap).
+        if os.path.exists(DB_PATH):
+            print(f"{YELLOW}[!] --rebuild flag passed. Removing existing database at: {DB_PATH}{RESET}")
+            os.remove(DB_PATH)
+        for cached_path in (LOCAL_ZIP_PATH, EPSS_GZ_PATH, KEV_JSON_PATH):
+            if os.path.exists(cached_path):
+                print(f"{YELLOW}[!] --rebuild flag passed. Removing cached artifact: {cached_path}{RESET}")
+                os.remove(cached_path)
 
     print("=== OSV RELATIONAL DATA WAREHOUSE ===")
     connection = init_database()
