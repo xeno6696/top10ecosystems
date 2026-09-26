@@ -1830,18 +1830,35 @@ def generate_html_report(snapshots: list, html_output: str):
         for cat in threat_categories:
             threat_profile_trends[cat].append(tprof.get(cat, 0))
 
+    # Every snapshot's leaderboard/threat_profile total is cumulative from a fixed window start
+    # (interval_from), so plotting the raw values just draws an ever-climbing line -- a burst
+    # only shows up as a subtle slope kink, not a spike. Day-over-day deltas between consecutive
+    # snapshots turn that back into an actual daily-activity view. Needs >= 2 snapshots; the
+    # first snapshot has no prior point to diff against, so it's dropped along with its date.
+    delta_dates = dates[1:]
+    has_deltas = len(dates) >= 2
+
+    def _deltas(series):
+        return [b - a for a, b in zip(series, series[1:])]
+
     try:
-        # Chart 1: Ecosystem Volume Trajectory Over Time
+        # Chart 1: Ecosystem Daily Velocity (day-over-day delta)
         fig1, ax1 = mplplt.subplots(figsize=(12, 6))
         fig1.patch.set_facecolor('#1e1e1e')
         ax1.set_facecolor('#1e1e1e')
-        
-        for eco in target_ecos:
-            if sum(ecosystem_trends[eco]) > 0:  
-                ax1.plot(dates, ecosystem_trends[eco], marker='o', linewidth=2, label=eco)
-        
-        ax1.set_title("Ecosystem Cumulative Vulnerability Velocity Over Time", color='#ffffff', fontsize=14, pad=15)
-        ax1.set_ylabel("Accumulated Stream Volume", color='#bbbbbb')
+
+        if has_deltas:
+            for eco in target_ecos:
+                series = _deltas(ecosystem_trends[eco])
+                if sum(series) > 0:
+                    ax1.plot(delta_dates, series, marker='o', linewidth=2, label=eco)
+        else:
+            for eco in target_ecos:
+                if sum(ecosystem_trends[eco]) > 0:
+                    ax1.plot(dates, ecosystem_trends[eco], marker='o', linewidth=2, label=eco)
+
+        ax1.set_title("Ecosystem Daily Vulnerability Velocity (day-over-day delta)", color='#ffffff', fontsize=14, pad=15)
+        ax1.set_ylabel("Daily Stream Volume Delta", color='#bbbbbb')
         ax1.set_xlabel("Snapshot Boundary Timeline", color='#bbbbbb')
         ax1.tick_params(colors='#bbbbbb', labelsize=10)
         ax1.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
@@ -1855,17 +1872,23 @@ def generate_html_report(snapshots: list, html_output: str):
         img_str_ecos = base64.b64encode(buf1.read()).decode('utf-8')
         mplplt.close(fig1)
 
-        # Chart 2: Threat Profile Evolutionary Breakdown
+        # Chart 2: Threat Profile Daily Breakdown (day-over-day delta)
         fig2, ax2 = mplplt.subplots(figsize=(12, 5))
         fig2.patch.set_facecolor('#1e1e1e')
         ax2.set_facecolor('#1e1e1e')
-        
-        for cat in threat_categories:
-            if sum(threat_profile_trends[cat]) > 0:
-                ax2.plot(dates, threat_profile_trends[cat], linestyle='--', marker='s', linewidth=2, label=cat)
 
-        ax2.set_title("Threat Behavior Profile Structural Evolution", color='#ffffff', fontsize=14, pad=15)
-        ax2.set_ylabel("Mutation Volume", color='#bbbbbb')
+        if has_deltas:
+            for cat in threat_categories:
+                series = _deltas(threat_profile_trends[cat])
+                if sum(series) > 0:
+                    ax2.plot(delta_dates, series, linestyle='--', marker='s', linewidth=2, label=cat)
+        else:
+            for cat in threat_categories:
+                if sum(threat_profile_trends[cat]) > 0:
+                    ax2.plot(dates, threat_profile_trends[cat], linestyle='--', marker='s', linewidth=2, label=cat)
+
+        ax2.set_title("Threat Behavior Profile Daily Delta", color='#ffffff', fontsize=14, pad=15)
+        ax2.set_ylabel("Daily Mutation Volume Delta", color='#bbbbbb')
         ax2.set_xlabel("Snapshot Boundary Timeline", color='#bbbbbb')
         ax2.tick_params(colors='#bbbbbb', labelsize=10)
         ax2.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
@@ -1904,14 +1927,14 @@ def generate_html_report(snapshots: list, html_output: str):
             <p><strong>Dashboard Engine:</strong> AppSec Center of Excellence (COE) Analytics Warehouse v1.7</p>
         </div>
         
-        <h2>I. Ecosystem Volume Trajectory over Time</h2>
-        <p>Tracks the cumulative volume trajectory and discovery velocity across major software registry targets.</p>
+        <h2>I. Ecosystem Daily Volume Delta</h2>
+        <p>Tracks day-over-day discovery velocity (new activity per snapshot interval, not the running total) across major software registry targets, so bursty days stand out as spikes instead of subtle slope changes.</p>
         <div class="chart">
             <img src="data:image/png;base64,{img_str_ecos}" alt="Ecosystem Time Series Chart" />
         </div>
-        
-        <h2>II. Threat Behavior Profile Structural Evolution</h2>
-        <p>Monitors how the composition of inbound mutations fluctuates over time between active malware injections, standard software security patches, and database metadata adjustments.</p>
+
+        <h2>II. Threat Behavior Profile Daily Delta</h2>
+        <p>Monitors day-over-day composition of inbound mutations between active malware injections, standard software security patches, and database metadata adjustments.</p>
         <div class="chart">
             <img src="data:image/png;base64,{img_str_threats}" alt="Threat Mutation Breakdown Chart" />
         </div>
@@ -3589,6 +3612,38 @@ def main():
         
     if args.html and not args.velocity and not args.compare:
         snapshots = load_snapshots_from_dir("./output")
+
+        # HARDENING: generate_html_report blends every snapshot it's given into one set of
+        # named series (ecosystem_trends[eco], threat_profile_trends[cat]) with no awareness of
+        # which --layer produced it. load_snapshots_from_dir's own dedup only collapses entries
+        # that share BOTH (interval_to, layer) -- so a stray off-scope snapshot (e.g. a one-off
+        # --registry run exported without --layer, landing as target_layer_filter="all") whose
+        # interval_to happens to collide with a real daily "app" archive survives dedup as a
+        # second, incompatible data point for that same date. Since its ecosystem counts are
+        # zeroed/foreign to the "app" registry series, it silently plots as a valley-then-cliff
+        # in the delta chart that looks exactly like a real burst but isn't one. Restricting to
+        # one layer up front (defaulting to "app", the convention every daily archive file
+        # uses) makes that class of collision structurally impossible rather than relying on
+        # every snapshot in ./output staying well-formed.
+        report_layer = args.layer or "app"
+        snapshots = [s for s in snapshots if s.get("metadata", {}).get("target_layer_filter") == report_layer]
+
+        # --html previously loaded every snapshot in ./output unconditionally, silently ignoring
+        # any --from/--to the user passed alongside it. Filter on each snapshot's own
+        # interval_to (ISO YYYY-MM-DD, lexicographically comparable) when either bound is given.
+        if args.from_date or args.to:
+            range_to = None
+            if args.to:
+                for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                    try:
+                        range_to = datetime.datetime.strptime(args.to[0], fmt).date().isoformat()
+                        break
+                    except ValueError: continue
+            snapshots = [
+                s for s in snapshots
+                if (not args.from_date or s["metadata"]["interval_to"] >= args.from_date)
+                and (not range_to or s["metadata"]["interval_to"] <= range_to)
+            ]
         generate_html_report(snapshots, args.html)
         return
 
