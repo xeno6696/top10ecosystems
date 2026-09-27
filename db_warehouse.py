@@ -92,7 +92,14 @@ def _ecosystem_tag_matches_track(eco_lower: str, track_lower: str) -> bool:
 # either in an advisory's own reference links or embedded directly in a Go-ecosystem purl
 # (pkg:golang/github.com/OWNER/REPO...). Used by extract_repo_anchor() below.
 GITHUB_REPO_URL_REGEX = re.compile(r'github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)', re.IGNORECASE)
-_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github"}
+# "cvelistv5" is the CVE Project's own record-mirror repo (cveproject/cvelistv5) -- many
+# advisories (Chainguard's CGA-* entries especially) cite it as their only reference link instead
+# of, or alongside, the actual vulnerable project's repo. Left unskipped, it silently becomes the
+# single most common repo_anchor value in the warehouse (53.6% of all non-null anchors, verified
+# live) and degrades every one of those advisories to the weaker name-matching heuristic tiers
+# with no visible signal that the "HIGH confidence, shared-upstream-repo" signal never had a
+# chance to fire.
+_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github", "cvelistv5"}
 
 
 def extract_repo_anchor(vuln_data):
