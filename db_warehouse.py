@@ -64,11 +64,42 @@ KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux"
 KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 MASTER_TRACKS = KNOWN_CONTAINERS + KNOWN_REGISTRIES + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
 
+
+def _ecosystem_tag_matches_track(eco_lower: str, track_lower: str) -> bool:
+    """Whether a raw OSV ecosystem tag (e.g. "Debian:11") should bucket into a known track,
+    without a short track name (e.g. "Pub", "GIT", "Hex") accidentally matching as a substring
+    embedded inside an unrelated longer word. Mirrors top10ecosystems.py's own copy of this
+    helper (the two modules don't import each other). FIX: a plain `eco_lower in track_lower or
+    track_lower in eco_lower` check let "pub" (the Dart/Flutter registry track) match inside
+    "SUSE:Linux Enterprise Module for Public Cloud 12" purely because "pub" is a substring of
+    "Public" -- silently bucketing unrelated SUSE Linux packages (python-pip, python-ply, ...)
+    into the Pub/Android tracks, which then fed Section VIII's cross-registry classifier a
+    spurious "same package released to two registries" false positive (verified: 1,183 such
+    pairs in the live warehouse, all Android<->Pub, all traced back to this exact collision).
+    Requires the shorter string to appear at a token boundary in the longer one -- flanked by
+    start/end of string or a non-alphanumeric character -- rather than embedded inside a longer
+    alphanumeric word. "debian:11" still matches "debian" (boundary is the colon); "public cloud"
+    no longer matches "pub" (boundary would have to fall mid-word, on the "l" of "public")."""
+    def _boundary_match(needle, haystack):
+        if not needle:
+            return False
+        pattern = r'(?<![a-z0-9])' + re.escape(needle) + r'(?![a-z0-9])'
+        return re.search(pattern, haystack) is not None
+    return _boundary_match(eco_lower, track_lower) or _boundary_match(track_lower, eco_lower)
+
+
 # Cross-registry product-identity signal: matches "github.com/OWNER/REPO" wherever it shows up,
 # either in an advisory's own reference links or embedded directly in a Go-ecosystem purl
 # (pkg:golang/github.com/OWNER/REPO...). Used by extract_repo_anchor() below.
 GITHUB_REPO_URL_REGEX = re.compile(r'github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)', re.IGNORECASE)
-_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github"}
+# "cvelistv5" is the CVE Project's own record-mirror repo (cveproject/cvelistv5) -- many
+# advisories (Chainguard's CGA-* entries especially) cite it as their only reference link instead
+# of, or alongside, the actual vulnerable project's repo. Left unskipped, it silently becomes the
+# single most common repo_anchor value in the warehouse (53.6% of all non-null anchors, verified
+# live) and degrades every one of those advisories to the weaker name-matching heuristic tiers
+# with no visible signal that the "HIGH confidence, shared-upstream-repo" signal never had a
+# chance to fire.
+_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github", "cvelistv5"}
 
 
 def extract_repo_anchor(vuln_data):
@@ -415,7 +446,7 @@ def parse_osv_json(vuln_data):
             eco_clean = hard_mappings.get(eco_lower, None)
             if not eco_clean:
                 for track in MASTER_TRACKS:
-                    if eco_lower in track.lower() or track.lower() in eco_lower:
+                    if _ecosystem_tag_matches_track(eco_lower, track.lower()):
                         eco_clean = track
                         break
             if not eco_clean: eco_clean = "Android"
