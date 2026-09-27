@@ -156,6 +156,28 @@ _KNOWN_CONTAINER_ECOSYSTEMS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Al
 _KNOWN_REGISTRY_ECOSYSTEMS = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 
 
+def _ecosystem_tag_matches_track(eco_lower: str, track_lower: str) -> bool:
+    """Whether a raw OSV ecosystem tag (e.g. "Debian:11") should bucket into a known track,
+    without a short track name (e.g. "Pub", "GIT", "Hex") accidentally matching as a substring
+    embedded inside an unrelated longer word. FIX: a plain `eco_lower in track_lower or
+    track_lower in eco_lower` check let "pub" (the Dart/Flutter registry track) match inside
+    "SUSE:Linux Enterprise Module for Public Cloud 12" purely because "pub" is a substring of
+    "Public" -- silently bucketing unrelated SUSE Linux packages (python-pip, python-ply, ...)
+    into the Pub/Android tracks, which then fed Section VIII's cross-registry classifier a
+    spurious "same package released to two registries" false positive (verified: 1,183 such
+    pairs in the live warehouse, all Android<->Pub, all traced back to this exact collision).
+    Requires the shorter string to appear at a token boundary in the longer one -- flanked by
+    start/end of string or a non-alphanumeric character -- rather than embedded inside a longer
+    alphanumeric word. "debian:11" still matches "debian" (boundary is the colon); "public cloud"
+    no longer matches "pub" (boundary would have to fall mid-word, on the "l" of "public")."""
+    def _boundary_match(needle, haystack):
+        if not needle:
+            return False
+        pattern = r'(?<![a-z0-9])' + re.escape(needle) + r'(?![a-z0-9])'
+        return re.search(pattern, haystack) is not None
+    return _boundary_match(eco_lower, track_lower) or _boundary_match(track_lower, eco_lower)
+
+
 def extract_repo_anchor(vuln_data):
     """Derives a canonical 'owner/repo' identity string for an advisory (see db_warehouse.py's
     identical helper for the full rationale). Used by the Section VIII cross-registry
@@ -311,6 +333,18 @@ def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, 
     for i in range(len(ecosystems)):
         for j in range(i + 1, len(ecosystems)):
             eco_a, eco_b = ecosystems[i], ecosystems[j]
+            # FIX: "cross_compiled" specifically means an independent NATIVE release to each
+            # registry -- a container/OS image is by definition always a downstream repackage,
+            # never a native one (this was already the VIII-A render site's stated assumption,
+            # but nothing here actually enforced it: this loop matched names/purls across ANY
+            # ecosystem pair with no registry/container awareness at all). Verified live: 1,183
+            # spurious pairs currently exist where a SUSE Linux package got mistagged into the
+            # Android/Pub buckets via the ecosystem-tag substring bug (see
+            # _ecosystem_tag_matches_track) and then matched itself across those two bogus
+            # buckets as an "exact name match" cross_compiled release. "repackaged" is left
+            # unrestricted -- a registry-vs-container pair (Debian repackaging an npm library) is
+            # exactly VIII-B's documented RHEL/Debian-style use case, not a bug to filter out.
+            both_registries = eco_a in _KNOWN_REGISTRY_ECOSYSTEMS and eco_b in _KNOWN_REGISTRY_ECOSYSTEMS
             names_a = package_names_by_ecosystem.get(eco_a) or []
             names_b = package_names_by_ecosystem.get(eco_b) or []
             purls_a = (purls_by_ecosystem or {}).get(eco_a) or []
@@ -321,6 +355,8 @@ def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, 
                     pb = purls_b[0] if purls_b else ""
                     verdict, confidence, signal, wrapper_side = _classify_cross_registry_pair_detailed(na, pa, nb, pb, repo_anchor)
                     if verdict is None:
+                        continue
+                    if verdict == "cross_compiled" and not both_registries:
                         continue
                     entry = {"eco_a": eco_a, "eco_b": eco_b, "name_a": na, "name_b": nb,
                               "confidence": confidence, "signal": signal, "wrapper_side": wrapper_side}
@@ -677,7 +713,7 @@ def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_active: bool):
             eco_clean = hard_mappings.get(eco_lower, None)
             if not eco_clean:
                 for track in master_tracks:
-                    if eco_lower in track.lower() or track.lower() in eco_lower:
+                    if _ecosystem_tag_matches_track(eco_lower, track.lower()):
                         eco_clean = track
                         break
             if not eco_clean: eco_clean = "Android"
@@ -1706,7 +1742,7 @@ def generate_enterprise_threat_leaderboard(
                 eco_clean = hard_mappings.get(eco_lower, None)
                 if not eco_clean:
                     for track in master_tracks:
-                        if eco_lower in track.lower() or track.lower() in eco_lower:
+                        if _ecosystem_tag_matches_track(eco_lower, track.lower()):
                             eco_clean = track
                             break
                 if not eco_clean: eco_clean = "Android"
