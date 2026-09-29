@@ -699,39 +699,53 @@ def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int
     return id_to_meta
 
 
-def _priority_sort_key(entry: dict, id_val: str, priority_sort_active: bool = False):
+def _priority_sort_key(entry: dict, id_val: str, priority_sort_mode="default"):
     """
     Shared sort key used everywhere a vulnerability list gets ranked: the
     global/per-ecosystem rank maps, and the Section V/VI/VII top-N picks.
 
-    When priority_sort_active is False, this is exactly the original
-    (-cvss_score, -blast_radius, id) tuple -- unchanged sort order, so
-    default (--priority-sort omitted) output and golden masters are
-    unaffected byte-for-byte.
-
-    When True, ranking becomes KEV catalog hit (desc) -> EPSS score (desc)
-    -> CVSS (desc) -> blast radius (desc) -> id (asc), matching the same
-    KEV -> EPSS -> OSV/CVSS priority already used by --crosscheck.
+    priority_sort_mode is one of three strings (also accepts the legacy bool
+    for backward compatibility -- True maps to "kev", False to "default"):
+      "default" -- exactly the original (-cvss_score, -blast_radius, id)
+                   tuple -- unchanged sort order, so --priority-sort omitted
+                   output and golden masters are unaffected byte-for-byte.
+      "kev"     -- KEV catalog hit (desc) -> EPSS score (desc) -> CVSS (desc)
+                   -> blast radius (desc) -> id (asc), matching the same
+                   KEV -> EPSS -> OSV/CVSS priority already used by
+                   --crosscheck.
+      "epss"    -- EPSS score (desc) -> CVSS (desc) -> blast radius (desc) ->
+                   id (asc), ignoring KEV entirely -- for the case where you
+                   want exploitation-probability-first ranking without KEV's
+                   binary in/out gate dominating the order (added alongside
+                   the emergency fix that made --priority-sort render the
+                   default and KEV views side by side instead of replacing
+                   the default one -- see generate_enterprise_threat_leaderboard).
     """
+    if priority_sort_mode is True: priority_sort_mode = "kev"
+    elif priority_sort_mode is False: priority_sort_mode = "default"
+
     cvss = entry.get("cvss_score", 0.0) or 0.0
     radius = entry.get("blast_radius", 0) or 0
 
-    if not priority_sort_active:
+    if priority_sort_mode == "default":
         return (-cvss, -radius, id_val)
 
-    kev_hit = 0 if entry.get("kev_date_added") else 1
     epss = entry.get("epss_score") or 0.0
+    if priority_sort_mode == "epss":
+        return (-epss, -cvss, -radius, id_val)
+
+    kev_hit = 0 if entry.get("kev_date_added") else 1
     return (kev_hit, -epss, -cvss, -radius, id_val)
 
 
-_absolute_rank_cache = {"ghsa_lookup": None, "priority_sort_active": None, "global_absolute_ranks": None, "eco_absolute_ranks": None}
+_absolute_rank_cache = {"ghsa_lookup": None, "priority_sort_mode": None, "global_absolute_ranks": None, "eco_absolute_ranks": None}
 
 
-def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_active: bool):
+def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_mode="default"):
     """Builds (and single-entry memoizes) the global and per-ecosystem absolute rank maps that
     Sections V/VI/VII need -- two full O(N log N) sorts over the entire warehouse. ghsa_lookup is
     never mutated in place anywhere in this module, so the result is a pure function of (the
-    ghsa_lookup object's identity, priority_sort_active); a single cached slot is enough because
+    ghsa_lookup object's identity, priority_sort_mode); a single cached slot is enough because
     every real caller (one CLI invocation, or one test class's cached class-level lookup reused
     across many calls) passes the SAME ghsa_lookup object repeatedly rather than a rotating set of
     different ones. Holding a strong reference to that object as the cache key (compared via `is`,
@@ -740,14 +754,21 @@ def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_active: bool):
     reference here means that can't happen for as long as the cached entry is in use.
     Added because test_historical_golden_masters (and any multi-window/multi-registry caller,
     e.g. --velocity) was redoing this identical sort from scratch on every iteration despite the
-    warehouse-backed ghsa_lookup never changing within a single process run."""
+    warehouse-backed ghsa_lookup never changing within a single process run.
+
+    NOTE: since generate_enterprise_threat_leaderboard now renders Sections V/VI/VII once per mode
+    when --priority-sort is active (default + kev + epss, back to back -- see that function), this
+    single-slot cache gets evicted and rebuilt on every mode switch within one report run rather
+    than actually saving work there; it still pays off across separate report/window calls that
+    repeat the same mode (e.g. --velocity's multi-window loop). Not worth a multi-slot cache for
+    what's a one-off O(N log N) sort per call."""
     cache = _absolute_rank_cache
-    if cache["ghsa_lookup"] is ghsa_lookup and cache["priority_sort_active"] == priority_sort_active:
+    if cache["ghsa_lookup"] is ghsa_lookup and cache["priority_sort_mode"] == priority_sort_mode:
         return cache["global_absolute_ranks"], cache["eco_absolute_ranks"]
 
     sorted_global_heap = sorted(
         ghsa_lookup.items(),
-        key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active)
+        key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_mode)
     )
     global_absolute_ranks = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_global_heap, start=1)}
 
@@ -759,11 +780,11 @@ def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_active: bool):
 
     eco_absolute_ranks = {}
     for eco_name, advisories in ecosystem_archive_buckets.items():
-        sorted_bucket = sorted(advisories, key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_active))
+        sorted_bucket = sorted(advisories, key=lambda x: _priority_sort_key(x[1], x[0], priority_sort_mode))
         eco_absolute_ranks[eco_name] = {advisory_id: rank for rank, (advisory_id, _) in enumerate(sorted_bucket, start=1)}
 
     cache["ghsa_lookup"] = ghsa_lookup
-    cache["priority_sort_active"] = priority_sort_active
+    cache["priority_sort_mode"] = priority_sort_mode
     cache["global_absolute_ranks"] = global_absolute_ranks
     cache["eco_absolute_ranks"] = eco_absolute_ranks
     return global_absolute_ranks, eco_absolute_ranks
@@ -990,6 +1011,19 @@ def _visible_length(text: str) -> int:
     return len(_ANSI_ESCAPE_RE.sub('', text))
 
 
+def _pad_visible(text: str, width: int) -> str:
+    """Right-pads `text` to `width` VISIBLE columns, ignoring ANSI escape bytes. FIX: Sections
+    VI/VII's severity/status cells (e.g. a RED-wrapped "CRITICAL (CVSS 9.0)") were padded with a
+    plain f"{text:<28}", which counts the invisible ANSI bytes as string length and under-pads a
+    colored cell relative to an uncolored one of the same visible length -- drifting the EPSS/KEV
+    column (and the divider under it) out of alignment for every CRITICAL/high-severity row.
+    Verified live: a CRITICAL row's "|" landed several columns left of a HIGH row's in the same
+    table (--priority-sort epss mode, Section VI, npm new arrivals). Same bug class already fixed
+    for the VIII-C grid and _format_epss_kev_column; this is its counterpart for a plain colored
+    text cell rather than the two-part EPSS/KEV cell those handle."""
+    return text + " " * max(0, width - _visible_length(text))
+
+
 def _format_epss_kev_column(epss_score, kev_date_added, width: int = 28) -> str:
     """Fixed-width 'EPSS / KEV' cell for --priority-sort-enriched tables. Pads to `width` based
     on the TRUE visible text BEFORE the KEV portion is colored, not after -- coloring first would
@@ -1049,14 +1083,21 @@ def _abbreviate_ecosystem_label(name: str, width: int = 5) -> str:
     return re.sub(r'[^A-Za-z0-9]', '', name).upper()[:width]
 
 
-def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_pools, eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests, *, priority_sort_active: bool = False):
+_PRIORITY_MODE_BANNER = {
+    "kev": "Ranked KEV -> EPSS -> CVSS/Blast Radius",
+    "epss": "Ranked EPSS -> CVSS/Blast Radius (KEV ignored)",
+}
+
+
+def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_pools, eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests, *, priority_sort_mode="default"):
     """Renders Section V: Critical Outlier Attack Surface Radius Pools."""
+    is_priority = priority_sort_mode != "default"
     print("\n" + "="*115)
     print(f"  {BOLD}V. CRITICAL OUTLIER ATTACK SURFACE RADIUS POOLS{RESET}")
-    if priority_sort_active:
-        print(f"  {YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
+    if is_priority:
+        print(f"  {YELLOW}[--priority-sort: {priority_sort_mode}] {_PRIORITY_MODE_BANNER[priority_sort_mode]}{RESET}")
     print("="*115)
-    
+
     for eco in active_matrix_ecosystems:
         pool = ecosystem_outlier_pools.get(eco, {})
         if pool:
@@ -1068,17 +1109,17 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
             # bolts an EPSS/KEV column onto the end without ever widening this divider to match, so
             # the column (and most data rows) print past the right edge of the box -- widen it to
             # actually cover every column + separator once that column exists.
-            if priority_sort_active:
+            if is_priority:
                 total_line_len = w_rank + w_id + w_name + w_cvss + w_radius + w_type + w_epss_kev + 3 * 6
             else:
                 total_line_len = w_rank + w_id + w_name + w_cvss + w_radius + 16
 
-            if priority_sort_active:
+            if is_priority:
                 print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile':<{w_type}} | {'EPSS / KEV':<{w_epss_kev}}")
             else:
                 print(f"    {'Rank':<{w_rank}} | {'Advisory ID / Rank Tracking Matrix':<{w_id}} | {'Artifact Name':<{w_name}} | {'CVSS':<{w_cvss}} | {'Impact Blast Radius':<{w_radius}} | {'Threat Profile'}")
             print(f"    {'-' * total_line_len}")
-            
+
             flat_pool = [{
                 "id": r_id, "radius": item[0], "type": item[1], "name": item[2],
                 "cvss": item[3] if len(item) > 3 else 0.0,
@@ -1089,67 +1130,66 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
                 flat_pool,
                 key=lambda x: _priority_sort_key(
                     {"cvss_score": x["cvss"], "blast_radius": x["radius"], "epss_score": x["epss"], "kev_date_added": x["kev"]},
-                    x["id"], priority_sort_active
+                    x["id"], priority_sort_mode
                 )
             )
-            if priority_sort_active:
+            if is_priority:
                 export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"], item["epss"], item["kev"]] for item in full_sorted_pool[:50]}
             else:
                 export_outlier_manifests[eco] = {item["id"]: [item["radius"], item["type"], item["name"], item["cvss"]] for item in full_sorted_pool[:50]}
-            
+
             for rank, item in enumerate(full_sorted_pool[:10], start=1):
                 local_eco_map = eco_absolute_ranks.get(eco, {})
                 abs_eco_rank = local_eco_map.get(item['id'], "N/A")
                 rank_val_str = f"{abs_eco_rank:,}" if isinstance(abs_eco_rank, int) else str(abs_eco_rank)
-                
+
                 true_global_rank = global_absolute_ranks.get(item['id'], "N/A")
                 global_rank_str = f"{true_global_rank:,}" if isinstance(true_global_rank, int) else str(true_global_rank)
-                
+
                 overall_token = f"(#{rank_val_str} local / #{global_rank_str} overall)"
-                
+
                 rank_str = f"#{rank}"
                 id_column_display = f"{item['id']} {overall_token}"
                 artifact_str = item['name'][:19] + "..." if len(item['name']) > 22 else item['name']
                 cvss_str = f"{item['cvss']:.1f}"
                 radius_str = f"{item['radius']:,} Vers"
 
-                if priority_sort_active:
+                if is_priority:
                     type_str = (item['type'][:w_type-1] + "\u2026") if len(item['type']) > w_type else item['type']
-                    epss_str = f"{item['epss']*100:.1f}%" if item['epss'] is not None else "N/A"
-                    kev_str = f"{RED}KEV: {item['kev']}{RESET}" if item['kev'] else "-"
-                    epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str:<{w_epss_kev}}")
+                    epss_kev_str = _format_epss_kev_column(item['epss'], item['kev'], w_epss_kev)
+                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str}")
                 else:
                     print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
 
 
-def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arrivals, ghsa_lookup, global_absolute_ranks, *, priority_sort_active: bool = False):
+def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arrivals, ghsa_lookup, global_absolute_ranks, *, priority_sort_mode="default"):
     """Renders Section VI: New Arrivals & Campaign Discoveries Within Timeframe."""
+    is_priority = priority_sort_mode != "default"
     print(f"\n{BOLD}VI. NEW ARRIVALS & CAMPAIGN DISCOVERIES WITHIN TIMEFRAME{RESET}")
-    if priority_sort_active:
-        print(f"{YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
+    if is_priority:
+        print(f"{YELLOW}[--priority-sort: {priority_sort_mode}] {_PRIORITY_MODE_BANNER[priority_sort_mode]}{RESET}")
     print("=" * 115)
-    
+
     # Priority-sort mode bolts an EPSS/KEV column onto a box sized for the three original columns
     # (52 + 30 + 28 wide); without widening the divider to match, the new column and most rows
     # print past the right edge of the box. Padding the cell itself to a fixed width (below) keeps
     # every row's right edge in the same place the divider now expects.
     w_epss_kev = 28
-    divider_width = (52 + 3 + 30 + 3 + 28 + 3 + w_epss_kev) if priority_sort_active else 115
+    divider_width = (52 + 3 + 30 + 3 + 28 + 3 + w_epss_kev) if is_priority else 115
 
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry New Entries: {eco}{RESET}")
         print("-" * divider_width)
-        if priority_sort_active:
+        if is_priority:
             print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact':<28} | {'EPSS / KEV':<{w_epss_kev}}")
         else:
             print(f"{'New Threat Arrival Matrix':<52} | {'Artifact Name':<30} | {'Discovery Impact'}")
         print("-" * divider_width)
-        
+
         new_window_records = []
         active_new_ids = live_window_new_arrivals.get(eco, set())
-        
+
         for v_id in active_new_ids:
             if v_id in ghsa_lookup:
                 meta = ghsa_lookup[v_id]
@@ -1165,31 +1205,27 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
                 })
 
         top_new_arrivals = sorted(
-            new_window_records, 
-            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_active)
+            new_window_records,
+            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_mode)
         )[:10]
-        
+
         if top_new_arrivals:
             for rank, vuln in enumerate(top_new_arrivals, start=1):
                 v_id = vuln['injected_id']
                 p_name = vuln.get('package_name', 'Unknown')
                 cvss = vuln.get('cvss_score', 0.0)
-                
+
                 abs_global_rank = global_absolute_ranks.get(v_id, "N/A")
                 global_rank_str = f"{abs_global_rank:,}" if isinstance(abs_global_rank, int) else str(abs_global_rank)
-                
+
                 overall_token = f"({global_rank_str} overall)"
                 id_column_display = f"#{rank:<2} {v_id} {overall_token}"
-                
+
                 severity_display = f"{RED}CRITICAL (CVSS {cvss:.1f}){RESET}" if cvss >= 9.0 else f"HIGH (CVSS {cvss:.1f})"
 
-                if priority_sort_active:
-                    epss_score = vuln.get('epss_score')
-                    epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
-                    kev_due = vuln.get('kev_date_added')
-                    kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
-                    epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {severity_display:<28} | {epss_kev_str:<{w_epss_kev}}")
+                if is_priority:
+                    epss_kev_str = _format_epss_kev_column(vuln.get('epss_score'), vuln.get('kev_date_added'), w_epss_kev)
+                    print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {_pad_visible(severity_display, 28)} | {epss_kev_str}")
                 else:
                     print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {severity_display}")
         else:
@@ -1197,26 +1233,27 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
         print("-" * divider_width)
 
 
-def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date, *, priority_sort_active: bool = False):
+def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date, *, priority_sort_mode="default"):
     """Renders Section VII: Systemic Risk Vs. Active Exposure (The Attention Deficit)."""
+    is_priority = priority_sort_mode != "default"
     print(f"\n{BOLD}VII. SYSTEMIC RISK VS. ACTIVE EXPOSURE (THE ATTENTION DEFICIT){RESET}")
-    if priority_sort_active:
-        print(f"{YELLOW}[--priority-sort active] Ranked KEV -> EPSS -> CVSS/Blast Radius{RESET}")
+    if is_priority:
+        print(f"{YELLOW}[--priority-sort: {priority_sort_mode}] {_PRIORITY_MODE_BANNER[priority_sort_mode]}{RESET}")
     print("=" * 115)
     # Same fix as Section VI: --priority-sort adds an EPSS/KEV column to a box drawn for the three
     # original columns, so the divider needs widening (and the new cell fixed-width-padded) to
     # actually contain it instead of trailing off mid-row.
     w_epss_kev = 28
-    divider_width = (52 + 3 + 30 + 3 + 28 + 3 + w_epss_kev) if priority_sort_active else 115
+    divider_width = (52 + 3 + 30 + 3 + 28 + 3 + w_epss_kev) if is_priority else 115
     for eco in active_matrix_ecosystems:
         print(f"\n{BOLD}[+] Ecosystem/Registry Hierarchy: {eco}{RESET}")
         print("-" * divider_width)
-        if priority_sort_active:
+        if is_priority:
             print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active':<28} | {'EPSS / KEV':<{w_epss_kev}}")
         else:
             print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active'}")
         print("-" * divider_width)
-        
+
         valid_eco_records = []
         eco_lower_def = eco.lower()
         for vuln_id, meta in ghsa_lookup.items():
@@ -1226,10 +1263,10 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
                 valid_eco_records.append(meta_with_id)
 
         static_top_10 = sorted(
-            valid_eco_records, 
-            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_active)
+            valid_eco_records,
+            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_mode)
         )[:10]
-        
+
         for rank, vuln in enumerate(static_top_10, start=1):
             v_id = vuln['injected_id']
             p_name = vuln.get('package_name', 'Unknown')
@@ -1241,20 +1278,16 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
                 elif days_dormant <= 60: status_display = f"{YELLOW}{last_mod_str} ({days_dormant}d ago){RESET}"
                 else: status_display = f"{RED}{last_mod_str} ({days_dormant}d ago){RESET}"
             except ValueError: status_display = f"{RED}Invalid Date{RESET}"
-            
+
             abs_global_rank = global_absolute_ranks.get(v_id, "N/A")
             global_rank_str = f"{abs_global_rank:,}" if isinstance(abs_global_rank, int) else str(abs_global_rank)
-            
+
             overall_token = f"({global_rank_str} overall)"
             id_column_display = f"#{rank:<2} {v_id} {overall_token}"
 
-            if priority_sort_active:
-                epss_score = vuln.get('epss_score')
-                epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
-                kev_due = vuln.get('kev_date_added')
-                kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
-                epss_kev_str = f"{epss_str} / {kev_str}"
-                print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {status_display:<28} | {epss_kev_str:<{w_epss_kev}}")
+            if is_priority:
+                epss_kev_str = _format_epss_kev_column(vuln.get('epss_score'), vuln.get('kev_date_added'), w_epss_kev)
+                print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {_pad_visible(status_display, 28)} | {epss_kev_str}")
             else:
                 print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {status_display}")
         print("-" * divider_width)
@@ -1855,14 +1888,6 @@ def generate_enterprise_threat_leaderboard(
         print("="*95 + "\n")
         return
 
-    # Global/per-ecosystem absolute rank maps, needed only by Sections V/VI/VII below (project
-    # mode already returned above, before ever needing them). Memoized in
-    # _get_or_build_absolute_ranks since ghsa_lookup is never mutated in place anywhere in this
-    # module -- repeated calls with the same lookup object (one process's --velocity/--trends
-    # multi-window loop, or a test class's cached class-level lookup reused across many calls)
-    # would otherwise redo this identical pair of O(N log N) sorts from scratch every time.
-    global_absolute_ranks, eco_absolute_ranks = _get_or_build_absolute_ranks(ghsa_lookup, priority_sort_active)
-
     # =========================================================================
     # SERIAL SEQUENTIAL EXECUTION LAYER (CONSOLIDATED ROUTER CALLS)
     # =========================================================================
@@ -1874,28 +1899,57 @@ def generate_enterprise_threat_leaderboard(
     print_section_i_leaderboard(filtered_results, total_raw_rows)
     print_section_ii_layer_matrix(layer_bucket_counts)
     print_section_iii_malware_vectors(malware_vector_counts)
-    
+
     print_section_iv_threat_metabolism(
-        active_matrix_ecosystems, spatial_dwell_malware, spatial_dwell_cve, 
+        active_matrix_ecosystems, spatial_dwell_malware, spatial_dwell_cve,
         spatial_blast_radius, ghsa_lookup, end_date, export_profile_matrix
     )
-    
-    print_section_v_outlier_pools(
-        active_matrix_ecosystems, ecosystem_outlier_pools, 
-        eco_absolute_ranks, global_absolute_ranks, export_outlier_manifests,
-        priority_sort_active=priority_sort_active
-    )
-    
-    print_section_vi_new_arrivals(
-        active_matrix_ecosystems, live_window_new_arrivals, 
-        ghsa_lookup, global_absolute_ranks, priority_sort_active=priority_sort_active
-    )
-    
-    print_section_vii_attention_deficit(
-        active_matrix_ecosystems, ghsa_lookup, global_absolute_ranks, end_date,
-        priority_sort_active=priority_sort_active
-    )
-    
+
+    # EMERGENCY FIX: --priority-sort used to REPLACE the default CVSS/blast-radius ranking in
+    # Sections V/VI/VII with the KEV-first one -- so a briefing built from a --priority-sort run
+    # only ever showed the KEV-weighted top-10, never the plain one, with no way to see both
+    # without running the whole tool twice. Whenever KEV data is in play at all, the default view
+    # needs to be right there alongside it, not replaced by it -- and an EPSS-only view (ranked by
+    # exploitation probability alone, ignoring KEV's binary in/out gate) is useful for the same
+    # reason. --priority-sort omitted still renders exactly once, in "default" mode only --
+    # byte-for-byte the same as before this change, so existing golden masters are unaffected.
+    priority_render_modes = ["default", "kev", "epss"] if priority_sort_active else ["default"]
+    # Only the mode matching the top-level --priority-sort flag's existing semantics (kev when the
+    # flag is set, default when it's not) writes into the real export dict -- the extra comparison
+    # views render to the console but don't change the JSON snapshot format.
+    canonical_mode = "kev" if priority_sort_active else "default"
+
+    for render_mode in priority_render_modes:
+        # Global/per-ecosystem absolute rank maps, needed only by Sections V/VI/VII. Memoized in
+        # _get_or_build_absolute_ranks since ghsa_lookup is never mutated in place anywhere in this
+        # module -- repeated calls with the same (lookup, mode) pair (one process's --velocity/
+        # --trends multi-window loop, or a test class's cached class-level lookup reused across
+        # many calls) would otherwise redo this identical pair of O(N log N) sorts from scratch
+        # every time. Rendering 3 modes back to back means this cache gets evicted and rebuilt on
+        # every mode switch within a single report -- see that function's own note on the tradeoff.
+        mode_global_ranks, mode_eco_ranks = _get_or_build_absolute_ranks(ghsa_lookup, render_mode)
+        mode_export_manifests = export_outlier_manifests if render_mode == canonical_mode else {}
+
+        if len(priority_render_modes) > 1:
+            mode_titles = {"default": "DEFAULT (CVSS / Blast Radius)", "kev": "KEV-PRIORITIZED (KEV -> EPSS -> CVSS)", "epss": "EPSS-ONLY (EPSS -> CVSS, KEV ignored)"}
+            print(f"\n{BOLD}{'#'*115}\n# SECTIONS V-VII -- {mode_titles[render_mode]} RANKING\n{'#'*115}{RESET}")
+
+        print_section_v_outlier_pools(
+            active_matrix_ecosystems, ecosystem_outlier_pools,
+            mode_eco_ranks, mode_global_ranks, mode_export_manifests,
+            priority_sort_mode=render_mode
+        )
+
+        print_section_vi_new_arrivals(
+            active_matrix_ecosystems, live_window_new_arrivals,
+            ghsa_lookup, mode_global_ranks, priority_sort_mode=render_mode
+        )
+
+        print_section_vii_attention_deficit(
+            active_matrix_ecosystems, ghsa_lookup, mode_global_ranks, end_date,
+            priority_sort_mode=render_mode
+        )
+
     table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids)
 
     # Sub-table C needs a table-wide GROUP BY over the whole `vulnerabilities` table, which only
