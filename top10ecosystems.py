@@ -1426,6 +1426,101 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
     return len(qualifying), qualifying[:top_n]
 
 
+def _compute_kev_lead_time_stats(db_path: str, session_advisory_ids: set) -> dict:
+    """
+    For advisories in session_advisory_ids that are confirmed CISA KEV-catalog entries, computes
+    the lead time (days) between the CVE's earliest known OSV published_date (across all of its
+    constituent advisory records in scope, not just one) and kev_catalog.date_added -- "how much
+    warning did we actually have before this became actively exploited." CVE resolution reuses
+    the same approach as --crosscheck: cve_alias, falling back to a CVE pattern embedded in
+    advisory_id for ROOT-APP-* synthetic entries that carry no cve_alias.
+
+    Rows with a missing/sentinel published_date are excluded -- both OSV's own "1970-01-01"
+    default for absent data, and the literal "0001-01-01" placeholder some Debian-sourced records
+    carry upstream -- since including them would swamp the mean with multi-decade "lead times"
+    that are really just missing data, not real advance warning. Negative lead times (KEV added
+    before our earliest published_date, which can happen for a record OSV has since rewritten)
+    are excluded for the same reason: they don't represent a real lookback distance.
+
+    Returns None if there's no KEV overlap in scope (including if db_path is falsy/missing --
+    this is DB-only, same constraint as Section VIII-C), else {"mean_days", "median_days",
+    "sample_count"}.
+    """
+    if not session_advisory_ids or not db_path or not os.path.exists(db_path):
+        return None
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cve_pattern = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
+    junk_dates = {"1970-01-01", "0001-01-01", None, ""}
+
+    try:
+        id_list = list(session_advisory_ids)
+        chunk_size = 500
+
+        earliest_published = {}
+        for i in range(0, len(id_list), chunk_size):
+            chunk = id_list[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            cursor.execute(
+                f"SELECT advisory_id, cve_alias, published_date FROM vulnerabilities WHERE advisory_id IN ({placeholders})",
+                chunk
+            )
+            for advisory_id, cve_alias, published_date in cursor.fetchall():
+                cve_id = cve_alias
+                if not cve_id:
+                    match = cve_pattern.search(advisory_id or "")
+                    if match:
+                        cve_id = match.group(0).upper()
+                if not cve_id or published_date in junk_dates:
+                    continue
+                p_clean = published_date[:10]
+                if cve_id not in earliest_published or p_clean < earliest_published[cve_id]:
+                    earliest_published[cve_id] = p_clean
+
+        if not earliest_published:
+            return None
+
+        cve_ids = list(earliest_published.keys())
+        kev_dates = {}
+        for i in range(0, len(cve_ids), chunk_size):
+            chunk = cve_ids[i:i + chunk_size]
+            placeholders = ",".join("?" * len(chunk))
+            cursor.execute(f"SELECT cve_id, date_added FROM kev_catalog WHERE cve_id IN ({placeholders})", chunk)
+            for cve_id, date_added in cursor.fetchall():
+                if date_added:
+                    kev_dates[cve_id] = date_added
+    finally:
+        conn.close()
+
+    lead_days = []
+    for cve_id, p_clean in earliest_published.items():
+        date_added = kev_dates.get(cve_id)
+        if not date_added:
+            continue
+        try:
+            p_dt = datetime.date.fromisoformat(p_clean)
+            k_dt = datetime.date.fromisoformat(date_added[:10])
+        except ValueError:
+            continue
+        delta = (k_dt - p_dt).days
+        if delta >= 0:
+            lead_days.append(delta)
+
+    if not lead_days:
+        return None
+
+    lead_days.sort()
+    n = len(lead_days)
+    mid = n // 2
+    median = lead_days[mid] if n % 2 else (lead_days[mid - 1] + lead_days[mid]) / 2
+    return {
+        "mean_days": round(sum(lead_days) / n, 1),
+        "median_days": round(median, 1),
+        "sample_count": n
+    }
+
+
 _CVE_GRID_MAX_COLUMNS = 15
 
 
@@ -1626,7 +1721,7 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     print("="*box_width + "\n")
 
 
-def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False):
+def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
         return
@@ -1652,12 +1747,14 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
                     "priority_sort_active": priority_sort_active
                 },
                 "leaderboard": {eco: count for eco, count, _ in filtered_results},
+                "leaderboard_blast_radius": {eco: sum(vals) for eco, vals in (spatial_blast_radius or {}).items() if sum(vals) > 0},
                 "threat_profile": dict(bucket_counts),
                 "layer_profile_matrix": {l: dict(c) for l, c in layer_bucket_counts.items()},
                 "intel_architecture_matrix": {e: dict(c) for e, c in intel_feed_matrix.items()},
                 "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                 "profile_matrix": export_profile_matrix,
-                "outliers_leaderboards": export_outlier_manifests
+                "outliers_leaderboards": export_outlier_manifests,
+                "kev_lead_time": kev_lead_time
             }, ef, indent=4)
         print(f"[Static Snapshot Saved]: {export_path}")
     except Exception as e: 
@@ -1961,12 +2058,16 @@ def generate_enterprise_threat_leaderboard(
     else:
         print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, False, 0, [])
 
-    # Save Snapshot Disk Serialization Routine
+    # Save Snapshot Disk Serialization Routine. KEV lead-time is only computed when an export is
+    # actually happening -- it's an extra warehouse query, no point paying for it on every
+    # console-only run.
     serialize_snapshot_payload(
         custom_export_arg, now, start_date, end_date, target_layer,
         filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix,
         malware_vector_counts, export_profile_matrix, export_outlier_manifests,
-        priority_sort_active=priority_sort_active
+        priority_sort_active=priority_sort_active,
+        spatial_blast_radius=spatial_blast_radius,
+        kev_lead_time=_compute_kev_lead_time_stats(db_path, session_advisory_ids) if (db_path and custom_export_arg) else None
     )
 
 def generate_html_report(snapshots: list, html_output: str):
@@ -2072,6 +2173,59 @@ def generate_html_report(snapshots: list, html_output: str):
         img_str_threats = base64.b64encode(buf2.read()).decode('utf-8')
         mplplt.close(fig2)
 
+        # Chart 3: KEV Lead Time Trend -- NOT a delta chart like the other two. kev_lead_time
+        # is already a point-in-time distribution stat (as of that day's data: the mean days
+        # between a KEV-flagged CVE's earliest known publish and its KEV addition), so plotting
+        # it raw is correct -- diffing it day-over-day would just be noise on top of noise. Only
+        # snapshots actually carrying the field (requires --database and --export together, and
+        # postdate this chart being added) contribute a point; older snapshots are skipped, not
+        # zeroed, since 0 would misleadingly read as "instant lead time" rather than "no data."
+        kev_lead_points = [
+            (snap.get("metadata", {}).get("interval_to"), snap["kev_lead_time"]["mean_days"], snap["kev_lead_time"]["sample_count"])
+            for snap in snapshots
+            if snap.get("kev_lead_time")
+        ]
+
+        img_str_kev_lead = None
+        kev_lead_caption = ""
+        if kev_lead_points:
+            kev_dates_x = [p[0] for p in kev_lead_points]
+            kev_means_y = [p[1] for p in kev_lead_points]
+            sample_counts = [p[2] for p in kev_lead_points]
+            kev_lead_caption = f" (sample size ranged {min(sample_counts)}-{max(sample_counts)} KEV-confirmed CVEs across the window)"
+
+            fig3, ax3 = mplplt.subplots(figsize=(12, 5))
+            fig3.patch.set_facecolor('#1e1e1e')
+            ax3.set_facecolor('#1e1e1e')
+
+            ax3.plot(kev_dates_x, kev_means_y, marker='o', linewidth=2, color='#ff5555', label="Mean KEV Lead Time")
+
+            ax3.set_title("KEV Lead Time Trend (mean days: publish -> KEV addition)", color='#ffffff', fontsize=14, pad=15)
+            ax3.set_ylabel("Mean Lead Time (Days)", color='#bbbbbb')
+            ax3.set_xlabel("Snapshot Boundary Timeline", color='#bbbbbb')
+            ax3.tick_params(colors='#bbbbbb', labelsize=10)
+            ax3.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
+            ax3.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff')
+            mplplt.xticks(rotation=30, ha='right')
+            mplplt.tight_layout()
+
+            buf3 = io.BytesIO()
+            fig3.savefig(buf3, format='png', bbox_inches='tight', facecolor=fig3.get_facecolor())
+            buf3.seek(0)
+            img_str_kev_lead = base64.b64encode(buf3.read()).decode('utf-8')
+            mplplt.close(fig3)
+
+        # Conditional -- an older snapshot directory, or a window with zero KEV overlap, simply
+        # doesn't get the section, rather than rendering an empty/misleading one.
+        kev_lead_section = ""
+        if img_str_kev_lead:
+            kev_lead_section = f"""
+        <h2>III. KEV Lead Time Trend</h2>
+        <p>For advisories that later get confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition{kev_lead_caption} -- how much runway prioritization work actually had before each one became urgent.</p>
+        <div class="chart">
+            <img src="data:image/png;base64,{img_str_kev_lead}" alt="KEV Lead Time Trend Chart" />
+        </div>"""
+
         # Construct Unified Dashboard Payload Doc
         html_report = f"""<!DOCTYPE html>
 <html>
@@ -2108,6 +2262,7 @@ def generate_html_report(snapshots: list, html_output: str):
         <div class="chart">
             <img src="data:image/png;base64,{img_str_threats}" alt="Threat Mutation Breakdown Chart" />
         </div>
+{kev_lead_section}
     </div>
 </body>
 </html>"""
@@ -3496,10 +3651,20 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
     and explicit registry set, producing the prioritized "act on this now"
     dispatch list for operational developer teams.
 
-    Deliberate sort priority (highest to lowest):
+    Console output always prints the "kev" ranking mode (highest to lowest):
         1. KEV catalog hit          -> confirmed active exploitation in the wild
         2. EPSS score, descending   -> probability of exploitation in next 30 days
         3. CVSS / blast radius      -> raw theoretical severity, as tiebreaker only
+
+    export_path, when set, writes THREE files (same rows, three rank orders,
+    via the shared _priority_sort_key modes) rather than one -- "default"
+    (CVSS/blast-radius only, the pre-KEV baseline), "epss"
+    (exploitation-probability-first, no KEV gate), and "kev" (the ranking
+    above). Each is a complete, self-describing dispatch list with its own
+    "rank" field per row, so a consumer picks exactly one file/mode instead
+    of reconciling three numbers themselves -- deliberately not one combined
+    file, since the near-term consumption model is "a dev picks a ranking
+    mode" and the longer-term one is a static URL per mode.
 
     CVE resolution fallback: some advisory rows (notably ROOT-APP-* synthetic
     entries from direct-dependency lockfile audits) carry no cve_alias even
@@ -3611,14 +3776,12 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
 
     # Sort in Python (KEV hit desc, EPSS desc, CVSS desc, blast_radius desc,
     # advisory_id asc) -- can no longer be a pure SQL ORDER BY now that CVE
-    # resolution includes the id-pattern fallback.
-    enriched.sort(key=lambda r: (
-        0 if r["kev_date_added"] else 1,
-        -(r["epss_score"] or 0.0),
-        -(r["cvss_score"] or 0.0),
-        -(r["blast_radius"] or 0.0),
-        r["advisory_id"] or "",
-    ))
+    # resolution includes the id-pattern fallback. Console always shows the
+    # "kev" ranking mode (the operational act-on-this-now dispatch order);
+    # the export below additionally produces the "default" and "epss" modes
+    # so devs can pick the ranking that matches what they're evaluating,
+    # reusing the exact same sort key as --priority-sort's dashboard modes.
+    enriched.sort(key=lambda r: _priority_sort_key(r, r["advisory_id"] or "", "kev"))
 
     total_rows = len(enriched)
     kev_hits = sum(1 for r in enriched if r["kev_date_added"])
@@ -3690,43 +3853,61 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
         if not isinstance(export_path, str):
             output_dir = "output"
             os.makedirs(output_dir, exist_ok=True)
-            export_path = os.path.join(output_dir, f"supply_chain_crosscheck_{end_date.strftime('%Y-%m-%d')}.json")
+            base_path = os.path.join(output_dir, f"supply_chain_crosscheck_{end_date.strftime('%Y-%m-%d')}.json")
+        else:
+            base_path = export_path
 
-        export_records = []
-        for rec in enriched:
-            export_records.append({
-                "advisory_id": rec["advisory_id"],
-                "cve_id": rec["cve_id"] or "N/A",
-                "cve_id_source": rec["cve_source"],
-                "cwe_ids": json.loads(rec["cwe_json"]) if rec["cwe_json"] else [],
-                "package_name": rec["package_name"],
-                "ecosystems": json.loads(rec["ecosystems_json"]) if rec["ecosystems_json"] else [],
-                "cvss_score": rec["cvss_score"],
-                "blast_radius": rec["blast_radius"],
-                "epss_score": rec["epss_score"],
-                "epss_percentile": rec["epss_percentile"],
-                "kev_date_added": rec["kev_date_added"],
-                "kev_due_date": rec["kev_due_date"],
-                "kev_known_ransomware_use": rec["kev_known_ransomware_use"]
-            })
+        base_root, base_ext = os.path.splitext(base_path)
+        base_ext = base_ext or ".json"
 
-        payload = {
-            "metadata": {
-                "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "interval_from": start_str,
-                "interval_to": end_str,
-                "registries": registries,
-                "total_advisories": total_rows,
-                "kev_confirmed_count": kev_hits,
-                "cve_resolved_from_id_pattern_count": id_pattern_resolved,
-                "console_limit_applied": console_limit if console_limit and console_limit > 0 else None
-            },
-            "dispatch_list": export_records
-        }
+        # One file per ranking mode -- default (CVSS/blast-radius only, the
+        # pre-KEV baseline), epss (exploitation-probability-first, no KEV
+        # gate), and kev (today's KEV -> EPSS -> CVSS operational order).
+        # Each file is independently a complete, self-describing dispatch
+        # list rather than one combined file with per-row ranks: the goal
+        # is that a dev (or a future static URL) picks exactly one ranking
+        # mode and gets back just that answer, not three numbers to reconcile.
+        for mode in ("default", "epss", "kev"):
+            mode_sorted = sorted(enriched, key=lambda r: _priority_sort_key(r, r["advisory_id"] or "", mode))
 
-        with open(export_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"{GREEN}[+] Cross-check dispatch list exported to: {export_path} ({total_rows:,} rows, uncapped){RESET}")
+            export_records = []
+            for rank, rec in enumerate(mode_sorted, start=1):
+                export_records.append({
+                    "rank": rank,
+                    "advisory_id": rec["advisory_id"],
+                    "cve_id": rec["cve_id"] or "N/A",
+                    "cve_id_source": rec["cve_source"],
+                    "cwe_ids": json.loads(rec["cwe_json"]) if rec["cwe_json"] else [],
+                    "package_name": rec["package_name"],
+                    "ecosystems": json.loads(rec["ecosystems_json"]) if rec["ecosystems_json"] else [],
+                    "cvss_score": rec["cvss_score"],
+                    "blast_radius": rec["blast_radius"],
+                    "epss_score": rec["epss_score"],
+                    "epss_percentile": rec["epss_percentile"],
+                    "kev_date_added": rec["kev_date_added"],
+                    "kev_due_date": rec["kev_due_date"],
+                    "kev_known_ransomware_use": rec["kev_known_ransomware_use"]
+                })
+
+            payload = {
+                "metadata": {
+                    "ranking_mode": mode,
+                    "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "interval_from": start_str,
+                    "interval_to": end_str,
+                    "registries": registries,
+                    "total_advisories": total_rows,
+                    "kev_confirmed_count": kev_hits,
+                    "cve_resolved_from_id_pattern_count": id_pattern_resolved,
+                    "console_limit_applied": console_limit if console_limit and console_limit > 0 else None
+                },
+                "dispatch_list": export_records
+            }
+
+            mode_path = f"{base_root}_{mode}{base_ext}"
+            with open(mode_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            print(f"{GREEN}[+] Cross-check dispatch list ({mode}) exported to: {mode_path} ({total_rows:,} rows, uncapped){RESET}")
 
 # =====================================================================
 # CORE ENGINE COMMAND ORCHESTRATION LAYER
@@ -3753,7 +3934,7 @@ def main():
     parser.add_argument("--trends", action="store_true", help="Activate chronological trend and mutation velocity analysis.")
     parser.add_argument("--window-days", type=int, default=30, help="Telescoping trend evaluation window constraint (Defaults to 30 days).")
     parser.add_argument("--crosscheck", action="store_true", help="Generate the KEV -> EPSS -> OSV/CVSS prioritized developer dispatch list.")
-    parser.add_argument("--crosscheck-export", nargs='?', const=True, default=False, metavar="PATH", help="Export the cross-check dispatch list as JSON (optionally provide a path). Always exports the FULL list, uncapped.")
+    parser.add_argument("--crosscheck-export", nargs='?', const=True, default=False, metavar="PATH", help="Export the cross-check dispatch list as 3 JSON files, one per ranking mode: default/epss/kev (optionally provide a base path). Always exports the FULL list, uncapped.")
     parser.add_argument("--crosscheck-limit", type=int, default=100, metavar="N", help="Cap console output to the top N rows (default 100). Use 0 for no cap. Never affects --crosscheck-export.")
     parser.add_argument("--priority-sort", action="store_true", help="Rank Sections I/V/VI/VII by KEV -> EPSS -> CVSS/blast-radius instead of CVSS/blast-radius alone. Default (omitted) behavior is completely unchanged.")
     args = parser.parse_args()
