@@ -117,12 +117,17 @@ Pass `--priority-sort` to re-rank Sections I/V/VI/VII by KEV presence → EPSS s
 
 ## 🎯 KEV/EPSS Prioritized Dispatch List (`--crosscheck`)
 
-Cross-checks the CISA KEV catalog, FIRST's EPSS exploitation-probability score, and raw OSV/CVSS severity against the vulnerability catalog for a given window, producing a single prioritized "what should a developer actually work on first" list — sorted KEV (known to be actively exploited) first, then by descending EPSS probability, then by CVSS/blast-radius. Requires `--database` and an explicit `--registry` filter:
+Cross-checks the CISA KEV catalog, FIRST's EPSS exploitation-probability score, and raw OSV/CVSS severity against the vulnerability catalog for a given window. The console table always shows the "what should a developer actually work on first" ranking — KEV (known to be actively exploited) first, then by descending EPSS probability, then by CVSS/blast-radius. Requires `--database` and an explicit `--registry` filter:
 ```bash
 python top10ecosystems.py --database --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17
 ```
 - `--crosscheck-limit N` caps the console table to the top N rows (default 100; `0` for uncapped).
-- `--crosscheck-export [PATH]` exports the full, uncapped list as JSON regardless of the console cap.
+- `--crosscheck-export [PATH]` exports the full, uncapped list as **three** JSON files — one per ranking mode, same underlying rows, different sort/rank — so a consumer picks exactly the ranking they mean instead of reconciling multiple numbers themselves:
+  - `<PATH>_default.json` — CVSS/blast-radius only (the pre-KEV baseline)
+  - `<PATH>_epss.json` — EPSS probability first, no KEV gate
+  - `<PATH>_kev.json` — KEV → EPSS → CVSS/blast-radius (matches the console table)
+
+  (omit `PATH` and it defaults to `output/supply_chain_crosscheck_<end-date>_<mode>.json`). Each file's `dispatch_list` rows carry an explicit `rank` field for that mode.
 
 ---
 
@@ -150,7 +155,10 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 Two related but separate tools for looking at churn over time instead of a single window:
 
 - **`--velocity [DIR]`** stitches a directory of previously-exported JSON snapshots (default `./output`) into a single time-series CSV matrix (`velocity_matrix.csv`), with an optional inline terminal chart via `--terminal-plot`.
-- **`--html OUTPUT_FILE`** builds a two-chart HTML dashboard from the same snapshot directory: ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope). Respects `--from`/`--to` to scope the date range, and `--layer` to restrict which layer's archive to aggregate (defaults to `app`, matching the daily archive convention below — mixing snapshots from different layers or scopes in one chart produces meaningless collisions, so it won't do that unless you explicitly ask for a different layer).
+- **`--html OUTPUT_FILE`** builds an HTML dashboard from the same snapshot directory. Two charts always render — ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope) — plus a third that renders automatically whenever the loaded snapshots carry the data for it (older snapshots, or a window with zero KEV overlap, just skip the section rather than rendering something empty):
+  - **III. KEV Lead Time Trend** — for advisories later confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition, as of each snapshot. Unlike the other two charts this one plots the raw value, not a delta — it's already a point-in-time distribution stat, not a running total.
+
+  Respects `--from`/`--to` to scope the date range, and `--layer` to restrict which layer's archive to aggregate (defaults to `app`, matching the daily archive convention below — mixing snapshots from different layers or scopes in one chart produces meaningless collisions, so it won't do that unless you explicitly ask for a different layer).
 
 ```bash
 # Build/refresh the daily archive one day at a time (or as a comma-separated batch in one run
