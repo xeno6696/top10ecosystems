@@ -1011,6 +1011,19 @@ def _visible_length(text: str) -> int:
     return len(_ANSI_ESCAPE_RE.sub('', text))
 
 
+def _pad_visible(text: str, width: int) -> str:
+    """Right-pads `text` to `width` VISIBLE columns, ignoring ANSI escape bytes. FIX: Sections
+    VI/VII's severity/status cells (e.g. a RED-wrapped "CRITICAL (CVSS 9.0)") were padded with a
+    plain f"{text:<28}", which counts the invisible ANSI bytes as string length and under-pads a
+    colored cell relative to an uncolored one of the same visible length -- drifting the EPSS/KEV
+    column (and the divider under it) out of alignment for every CRITICAL/high-severity row.
+    Verified live: a CRITICAL row's "|" landed several columns left of a HIGH row's in the same
+    table (--priority-sort epss mode, Section VI, npm new arrivals). Same bug class already fixed
+    for the VIII-C grid and _format_epss_kev_column; this is its counterpart for a plain colored
+    text cell rather than the two-part EPSS/KEV cell those handle."""
+    return text + " " * max(0, width - _visible_length(text))
+
+
 def _format_epss_kev_column(epss_score, kev_date_added, width: int = 28) -> str:
     """Fixed-width 'EPSS / KEV' cell for --priority-sort-enriched tables. Pads to `width` based
     on the TRUE visible text BEFORE the KEV portion is colored, not after -- coloring first would
@@ -1143,10 +1156,8 @@ def print_section_v_outlier_pools(active_matrix_ecosystems, ecosystem_outlier_po
 
                 if is_priority:
                     type_str = (item['type'][:w_type-1] + "\u2026") if len(item['type']) > w_type else item['type']
-                    epss_str = f"{item['epss']*100:.1f}%" if item['epss'] is not None else "N/A"
-                    kev_str = f"{RED}KEV: {item['kev']}{RESET}" if item['kev'] else "-"
-                    epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str:<{w_epss_kev}}")
+                    epss_kev_str = _format_epss_kev_column(item['epss'], item['kev'], w_epss_kev)
+                    print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {type_str:<{w_type}} | {epss_kev_str}")
                 else:
                     print(f"    {rank_str:<{w_rank}} | {id_column_display:<{w_id}} | {artifact_str:<{w_name}} | {cvss_str:<{w_cvss}} | {radius_str:<{w_radius}} | {item['type']}")
         else: export_outlier_manifests[eco] = {}
@@ -1213,12 +1224,8 @@ def print_section_vi_new_arrivals(active_matrix_ecosystems, live_window_new_arri
                 severity_display = f"{RED}CRITICAL (CVSS {cvss:.1f}){RESET}" if cvss >= 9.0 else f"HIGH (CVSS {cvss:.1f})"
 
                 if is_priority:
-                    epss_score = vuln.get('epss_score')
-                    epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
-                    kev_due = vuln.get('kev_date_added')
-                    kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
-                    epss_kev_str = f"{epss_str} / {kev_str}"
-                    print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {severity_display:<28} | {epss_kev_str:<{w_epss_kev}}")
+                    epss_kev_str = _format_epss_kev_column(vuln.get('epss_score'), vuln.get('kev_date_added'), w_epss_kev)
+                    print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {_pad_visible(severity_display, 28)} | {epss_kev_str}")
                 else:
                     print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {severity_display}")
         else:
@@ -1279,12 +1286,8 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
             id_column_display = f"#{rank:<2} {v_id} {overall_token}"
 
             if is_priority:
-                epss_score = vuln.get('epss_score')
-                epss_str = f"{epss_score*100:.1f}%" if epss_score is not None else "N/A"
-                kev_due = vuln.get('kev_date_added')
-                kev_str = f"{RED}KEV: {kev_due}{RESET}" if kev_due else "-"
-                epss_kev_str = f"{epss_str} / {kev_str}"
-                print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {status_display:<28} | {epss_kev_str:<{w_epss_kev}}")
+                epss_kev_str = _format_epss_kev_column(vuln.get('epss_score'), vuln.get('kev_date_added'), w_epss_kev)
+                print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {_pad_visible(status_display, 28)} | {epss_kev_str}")
             else:
                 print(f"{id_column_display:<52} | {_truncate_with_ellipsis(p_name, 27):<30} | {status_display}")
         print("-" * divider_width)
