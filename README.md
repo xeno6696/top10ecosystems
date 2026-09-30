@@ -150,13 +150,14 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 
 ---
 
-## 📊 Historical Trend Charting (`--velocity` / `--html`)
+## 📊 Historical Trend Charting (`--velocity` / `--report`)
 
 Two related but separate tools for looking at churn over time instead of a single window:
 
 - **`--velocity [DIR]`** stitches a directory of previously-exported JSON snapshots (default `./output`) into a single time-series CSV matrix (`velocity_matrix.csv`), with an optional inline terminal chart via `--terminal-plot`.
-- **`--html OUTPUT_FILE`** builds an HTML dashboard from the same snapshot directory. Two charts always render — ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope) — plus a third that renders automatically whenever the loaded snapshots carry the data for it (older snapshots, or a window with zero KEV overlap, just skip the section rather than rendering something empty):
-  - **III. KEV Lead Time Trend** — for advisories later confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition, as of each snapshot. Unlike the other two charts this one plots the raw value, not a delta — it's already a point-in-time distribution stat, not a running total.
+- **`--report OUTPUT_FILE`** builds an HTML dashboard from the same snapshot directory. Two charts always render — ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope) — plus two more that render automatically whenever the loaded snapshots carry the data for them (older snapshots, or a window with zero overlap, just skip that section rather than rendering something empty):
+  - **III. KEV Lead Time Trend** — for advisories later confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition, as of each snapshot. Unlike the other charts this one plots the raw value, not a delta — it's already a point-in-time distribution stat, not a running total.
+  - **IV. CVE Active TTR Distribution** — a box plot of days-since-last-modified for active CVE advisories, one box per ecosystem, from the *latest* snapshot in the loaded window only (a distribution's shape isn't something that gains meaning from being diffed across days). Shows both median (box) and mean (diamond marker) together, since Section IV's console table only ever printed the mean — which can badly misrepresent the typical case under a long right skew (e.g. npm's Active TTR (CVE) has run as much as 23x higher on mean than median, driven by a handful of ancient stragglers a mean-only number hides completely).
 
   Respects `--from`/`--to` to scope the date range, and `--layer` to restrict which layer's archive to aggregate (defaults to `app`, matching the daily archive convention below — mixing snapshots from different layers or scopes in one chart produces meaningless collisions, so it won't do that unless you explicitly ask for a different layer).
 
@@ -166,7 +167,7 @@ Two related but separate tools for looking at churn over time instead of a singl
 python top10ecosystems.py --database --layer app --to 2026-09-18,2026-09-19,2026-09-20 --export
 
 # Then chart it:
-python top10ecosystems.py --html output/threat_landscape_report.html --from 2026-08-01 --to 2026-09-20
+python top10ecosystems.py --report output/threat_landscape_report.html --from 2026-08-01 --to 2026-09-20
 ```
 Bare `--export` (no filename) auto-names each window's file `threat_landscape_<end-date>_<layer>.json` in `./output` — this is the convention the daily-archive/trend-charting workflow above expects.
 
@@ -190,7 +191,7 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 
 ## 📤 Snapshot Export & Comparison
 
-`--export [PATH]` writes the current run's results to a JSON snapshot (auto-named into `./output` if no path is given). `--compare BASE.json CURRENT.json [--html OUT.html]` diffs two snapshots' leaderboards, threat profiles, and outlier pools without needing `--database` at all — pure file-to-file comparison.
+`--export [PATH]` writes the current run's results to a JSON snapshot (auto-named into `./output` if no path is given). `--compare BASE.json CURRENT.json [--report OUT.html]` diffs two snapshots' leaderboards, threat profiles, and outlier pools without needing `--database` at all — pure file-to-file comparison.
 
 ---
 
@@ -198,4 +199,4 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 
 - Python 3.9 or newer recommended.
 - Network access to OSV-hosted data, the FIRST EPSS feed, and the CISA KEV catalog (for archive bootstrapping, incremental sync windows, and the KEV/EPSS enrichment pipelines).
-- Python libraries (see `requirements.txt`): `requests`, `cvss`, `matplotlib` (for `--html` charts), `plotext` (for `--terminal-plot`).
+- Python libraries (see `requirements.txt`): `requests`, `cvss`, `matplotlib` (for `--report` charts), `plotext` (for `--terminal-plot`).
