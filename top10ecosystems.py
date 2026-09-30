@@ -32,6 +32,7 @@ import json
 import os
 import re
 import sqlite3
+import statistics
 import sys
 import time
 import zipfile
@@ -1721,7 +1722,39 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     print("="*box_width + "\n")
 
 
-def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None):
+def _compute_dwell_distribution_stats(spatial_dwell: dict) -> dict:
+    """
+    Reduces each ecosystem's raw per-advisory dwell-day list (already computed in memory by
+    generate_enterprise_threat_leaderboard -- the same data Section IV's console table
+    collapses to a single average) into a five-number summary: min/q1/median/q3/max, plus mean
+    and sample_count. Kept alongside the mean deliberately -- Section IV's console table shows
+    only the mean, which can badly misrepresent the typical case under a long right-skew (e.g.
+    npm's Active TTR (CVE): mean ~141 days vs median ~6 days across the Aug-Sep window, a 23x
+    gap driven by a handful of ancient stragglers). The --report box-plot chart renders both so
+    that skew is visible instead of hidden behind one number.
+
+    Ecosystems with an empty list are omitted entirely (nothing to summarize).
+    """
+    stats = {}
+    for eco, values in (spatial_dwell or {}).items():
+        if not values:
+            continue
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        quartiles = statistics.quantiles(sorted_vals, n=4) if n >= 2 else [sorted_vals[0]] * 3
+        stats[eco] = {
+            "min": sorted_vals[0],
+            "q1": quartiles[0],
+            "median": statistics.median(sorted_vals),
+            "q3": quartiles[2],
+            "max": sorted_vals[-1],
+            "mean": round(statistics.mean(sorted_vals), 1),
+            "sample_count": n
+        }
+    return stats
+
+
+def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None, spatial_dwell_cve: dict = None):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
         return
@@ -1754,7 +1787,8 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
                 "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                 "profile_matrix": export_profile_matrix,
                 "outliers_leaderboards": export_outlier_manifests,
-                "kev_lead_time": kev_lead_time
+                "kev_lead_time": kev_lead_time,
+                "dwell_cve_distribution": _compute_dwell_distribution_stats(spatial_dwell_cve)
             }, ef, indent=4)
         print(f"[Static Snapshot Saved]: {export_path}")
     except Exception as e: 
@@ -2067,7 +2101,8 @@ def generate_enterprise_threat_leaderboard(
         malware_vector_counts, export_profile_matrix, export_outlier_manifests,
         priority_sort_active=priority_sort_active,
         spatial_blast_radius=spatial_blast_radius,
-        kev_lead_time=_compute_kev_lead_time_stats(db_path, session_advisory_ids) if (db_path and custom_export_arg) else None
+        kev_lead_time=_compute_kev_lead_time_stats(db_path, session_advisory_ids) if (db_path and custom_export_arg) else None,
+        spatial_dwell_cve=spatial_dwell_cve
     )
 
 def generate_html_report(snapshots: list, html_output: str):
@@ -2226,6 +2261,83 @@ def generate_html_report(snapshots: list, html_output: str):
             <img src="data:image/png;base64,{img_str_kev_lead}" alt="KEV Lead Time Trend Chart" />
         </div>"""
 
+        # Chart 4: CVE Active TTR Distribution (box plot, latest snapshot only). Distribution
+        # shape is a point-in-time property, not something that gains meaning from being diffed
+        # across many days the way charts 1/2 do -- so this renders from just the most recent
+        # snapshot in the loaded window, the same "as of now" nature as the console's Section IV
+        # table. The whole point is showing BOTH median (box) and mean (diamond marker via
+        # showmeans=True) together: Section IV's console table only ever printed the mean, which
+        # can badly misrepresent the typical case under a long right skew (e.g. npm's Active TTR
+        # (CVE): mean ~141 days vs median ~6 days across the Aug-Sep window -- a 23x gap driven
+        # by a handful of ancient stragglers a mean-only number hides completely). Uses
+        # matplotlib's bxp() with the precomputed five-number summary from the export schema
+        # rather than raw data, since only that summary is persisted, not every advisory's
+        # individual dwell day.
+        latest_snapshot = snapshots[-1] if snapshots else None
+        dwell_dist = (latest_snapshot or {}).get("dwell_cve_distribution", {}) or {}
+        dwell_ecos = [eco for eco in target_ecos if eco in dwell_dist]
+
+        img_str_dwell = None
+        dwell_caption = ""
+        if dwell_ecos:
+            box_stats = [
+                {
+                    "label": eco,
+                    "whislo": dwell_dist[eco]["min"],
+                    "q1": dwell_dist[eco]["q1"],
+                    "med": dwell_dist[eco]["median"],
+                    "q3": dwell_dist[eco]["q3"],
+                    "whishi": dwell_dist[eco]["max"],
+                    "mean": dwell_dist[eco]["mean"],
+                    "fliers": [],
+                }
+                for eco in dwell_ecos
+            ]
+            sample_counts = [dwell_dist[eco]["sample_count"] for eco in dwell_ecos]
+            dwell_caption = f" (as of {latest_snapshot['metadata']['interval_to']}; sample sizes {min(sample_counts)}-{max(sample_counts)} advisories per ecosystem)"
+
+            fig4, ax4 = mplplt.subplots(figsize=(12, 6))
+            fig4.patch.set_facecolor('#1e1e1e')
+            ax4.set_facecolor('#1e1e1e')
+
+            ax4.bxp(
+                box_stats, showmeans=True, meanline=False, patch_artist=True,
+                boxprops=dict(facecolor='#2a3f5f', edgecolor='#8aa9d6'),
+                medianprops=dict(color='#00e5ff', linewidth=2),
+                whiskerprops=dict(color='#8aa9d6'),
+                capprops=dict(color='#8aa9d6'),
+                meanprops=dict(marker='D', markerfacecolor='#ff5555', markeredgecolor='#ff5555', markersize=7),
+            )
+
+            ax4.set_title("CVE Active TTR Distribution by Ecosystem (median box, mean diamond)", color='#ffffff', fontsize=14, pad=15)
+            ax4.set_ylabel("Days Since Last Modified (Dwell)", color='#bbbbbb')
+            ax4.set_xlabel("Ecosystem", color='#bbbbbb')
+            ax4.tick_params(colors='#bbbbbb', labelsize=10)
+            ax4.grid(True, axis='y', linestyle='--', alpha=0.15, color='#ffffff')
+            mplplt.xticks(rotation=20, ha='right')
+            mplplt.tight_layout()
+
+            buf4 = io.BytesIO()
+            fig4.savefig(buf4, format='png', bbox_inches='tight', facecolor=fig4.get_facecolor())
+            buf4.seek(0)
+            img_str_dwell = base64.b64encode(buf4.read()).decode('utf-8')
+            mplplt.close(fig4)
+
+        dwell_section = ""
+        if img_str_dwell:
+            dwell_section = f"""
+        <h2>IV. CVE Active TTR Distribution</h2>
+        <p>Per-ecosystem spread of days-since-last-modified for active CVE advisories{dwell_caption}, one box per ecosystem. How to read it:</p>
+        <ul>
+            <li><strong>Box</strong> — the middle 50% of that ecosystem's advisories (the interquartile range). This is what "normal" actually looks like for that ecosystem.</li>
+            <li><strong>Cyan line</strong> — the median: the single most representative, typical advisory.</li>
+            <li><strong>Red diamond</strong> — the mean. The bigger the gap between the diamond and the cyan line, the more a handful of old stragglers are dragging the average away from what's actually typical.</li>
+            <li><strong>Whisker caps (the T-shaped ends)</strong> — the true minimum and maximum across every advisory tracked, <em>not</em> a statistical outlier cutoff. This chart stores only a five-number summary per ecosystem, not every individual advisory, so nothing past the whiskers is being flagged as unusual — the top whisker is simply "the single oldest advisory this ecosystem still has open."</li>
+        </ul>
+        <div class="chart">
+            <img src="data:image/png;base64,{img_str_dwell}" alt="CVE Active TTR Distribution Chart" />
+        </div>"""
+
         # Construct Unified Dashboard Payload Doc
         html_report = f"""<!DOCTYPE html>
 <html>
@@ -2237,6 +2349,9 @@ def generate_html_report(snapshots: list, html_output: str):
         h1 {{ color: #ffffff; border-bottom: 2px solid #333; padding-bottom: 15px; font-size: 28px; margin-top: 0; }}
         h2 {{ color: #007bff; margin-top: 40px; font-weight: 400; font-size: 20px; border-left: 4px solid #007bff; padding-left: 10px; }}
         p {{ color: #aaaaaa; font-size: 14px; line-height: 1.6; }}
+        ul {{ color: #aaaaaa; font-size: 14px; line-height: 1.6; padding-left: 20px; margin-top: 8px; }}
+        li {{ margin-bottom: 6px; }}
+        li strong {{ color: #cccccc; }}
         .meta-box {{ background: #151515; padding: 15px 20px; border-radius: 6px; border: 1px solid #252525; margin-bottom: 30px; }}
         .chart {{ text-align: center; margin-top: 25px; background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
         .chart img {{ max-width: 100%; height: auto; border-radius: 4px; }}
@@ -2262,7 +2377,7 @@ def generate_html_report(snapshots: list, html_output: str):
         <div class="chart">
             <img src="data:image/png;base64,{img_str_threats}" alt="Threat Mutation Breakdown Chart" />
         </div>
-{kev_lead_section}
+{kev_lead_section}{dwell_section}
     </div>
 </body>
 </html>"""
@@ -2274,7 +2389,11 @@ def generate_html_report(snapshots: list, html_output: str):
     except Exception as e:
         print(f"\n{RED}[!] Critical Failure generating timeline HTML asset: {e}{RESET}")
 
-def load_snapshots_from_dir(target_dir: str):
+def _load_raw_snapshots_from_dir(target_dir: str):
+    """Walks target_dir for well-formed snapshot JSON files, no dedup applied. Shared by
+    load_snapshots_from_dir() and load_html_snapshots_for_range(), which each apply their own
+    dedup on top -- see load_html_snapshots_for_range() for why a single shared dedup policy
+    isn't safe to reuse as-is."""
     snapshots = []
     if not os.path.isdir(target_dir): return snapshots
     for filename in os.listdir(target_dir):
@@ -2284,6 +2403,11 @@ def load_snapshots_from_dir(target_dir: str):
                 data = json.load(f)
                 if "metadata" in data and "interval_to" in data["metadata"]: snapshots.append(data)
         except Exception: pass
+    return snapshots
+
+
+def load_snapshots_from_dir(target_dir: str):
+    snapshots = _load_raw_snapshots_from_dir(target_dir)
 
     # De-duplicate same day/layer snapshots: a --priority-sort run and a default run for the
     # same date/layer carry identical leaderboard/threat_profile totals (priority-sort only
@@ -2293,6 +2417,91 @@ def load_snapshots_from_dir(target_dir: str):
     deduped = {}
     for s in snapshots:
         key = (s["metadata"]["interval_to"], s["metadata"].get("target_layer_filter", "all"))
+        existing = deduped.get(key)
+        if existing is None or (existing["metadata"].get("priority_sort_active") and not s["metadata"].get("priority_sort_active")):
+            deduped[key] = s
+
+    return sorted(deduped.values(), key=lambda x: x["metadata"]["interval_to"])
+
+
+def load_html_snapshots_for_range(target_dir: str, layer: str, from_date: str, to_arg):
+    """
+    Loads and filters snapshots from target_dir for --report rendering: restricted to one layer
+    (defaulting to "app", the daily-archive convention), to the requested --from/--to date
+    range, and to one consistent interval_from basis (see the COLLISION GUARD below). Factored
+    out as the single shared implementation for BOTH --report entry points -- the standalone
+    branch and --velocity's combined one -- after a bug where --velocity --report silently
+    ignored --from/--to entirely: this filtering used to live only in the standalone branch, so
+    run_velocity_update's own html tail just blended in every snapshot ever written to the
+    directory (the whole historical archive) regardless of what range was requested.
+
+    Deliberately does NOT call load_snapshots_from_dir() -- that function's dedup key is
+    (interval_to, layer) only, which already discards the losing candidate before this function
+    would ever see it. The COLLISION GUARD below needs to see every same-interval_to candidate
+    BEFORE any dedup collapses them, so it walks the raw file list itself via
+    _load_raw_snapshots_from_dir() and applies its own dedup after the guard runs.
+
+    HARDENING (layer): generate_html_report blends every snapshot it's given into one set of
+    named series (ecosystem_trends[eco], threat_profile_trends[cat]) with no awareness of which
+    --layer produced it -- a stray off-scope snapshot (e.g. a one-off --registry run exported
+    without --layer, landing as target_layer_filter="all") whose interval_to happens to collide
+    with a real daily "app" archive entry would otherwise survive as a second, incompatible
+    data point for that date. Restricting to one layer up front makes that structurally
+    impossible.
+
+    COLLISION GUARD (interval_from): a snapshot's leaderboard/threat_profile totals are only
+    meaningfully diffable day-over-day when every snapshot shares the SAME interval_from -- the
+    daily archive's convention is a fixed epoch (e.g. 2026-04-18, see README), so each day's
+    totals are cumulative from that same starting point. A one-off `--velocity --from X --report`
+    run writes its OWN bounded-window snapshot (interval_from=X) into this same directory; if
+    its interval_to happens to land on a date the daily archive already covers, the two
+    represent totally different counting bases (a 40-day window's total vs a 160-day cumulative
+    total) despite sharing a date and layer. Picking the wrong one for that date produces an
+    impossible day-over-day cliff-then-spike that looks exactly like a burst but isn't one --
+    exactly what surfaced in practice: a stray `12-08-26_to_25-09-26_app.json` (interval_from
+    2026-08-12, npm=5999) colliding with the real daily archive's 2026-09-25 entry
+    (interval_from 2026-04-18, npm=14717). Resolved by majority vote: keep only snapshots
+    matching whichever interval_from is most common across the candidate pool -- the real daily
+    archive will always outnumber a single stray one-off file.
+    """
+    if not os.path.isdir(target_dir):
+        return []
+
+    report_layer = layer or "app"
+    candidates = [s for s in _load_raw_snapshots_from_dir(target_dir) if s.get("metadata", {}).get("target_layer_filter") == report_layer]
+
+    if from_date or to_arg:
+        range_to = None
+        if to_arg:
+            for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
+                try:
+                    range_to = datetime.datetime.strptime(to_arg[0], fmt).date().isoformat()
+                    break
+                except ValueError: continue
+        candidates = [
+            s for s in candidates
+            if (not from_date or s["metadata"]["interval_to"] >= from_date)
+            and (not range_to or s["metadata"]["interval_to"] <= range_to)
+        ]
+
+    if not candidates:
+        return []
+
+    interval_from_counts = Counter(s["metadata"].get("interval_from") for s in candidates)
+    canonical_interval_from, _ = interval_from_counts.most_common(1)[0]
+    mismatched = [s for s in candidates if s["metadata"].get("interval_from") != canonical_interval_from]
+    if mismatched:
+        mismatched_dates = ", ".join(sorted(s["metadata"]["interval_to"] for s in mismatched))
+        print(f"{YELLOW}[!] Excluded {len(mismatched)} snapshot(s) with a mismatched interval_from "
+              f"(expected {canonical_interval_from}) from --report rendering -- likely a one-off "
+              f"--velocity/--from run sharing this directory: {mismatched_dates}{RESET}")
+    candidates = [s for s in candidates if s["metadata"].get("interval_from") == canonical_interval_from]
+
+    # Same-day dedup, now safe to key on interval_to alone since layer and interval_from are
+    # both already fixed above -- prefer the default (non-priority-sort) file when both exist.
+    deduped = {}
+    for s in candidates:
+        key = s["metadata"]["interval_to"]
         existing = deduped.get(key)
         if existing is None or (existing["metadata"].get("priority_sort_active") and not s["metadata"].get("priority_sort_active")):
             deduped[key] = s
@@ -2440,15 +2649,21 @@ def run_velocity_update(args):
     # opt-in terminal (plotext) chart via --terminal-plot -- see generate_velocity_matrix().
     generate_velocity_matrix(target_dir=snapshot_dir, output_path=os.path.join(snapshot_dir, "velocity_matrix.csv"), render_terminal_plot=args.terminal_plot)
 
-    # RESTORED: --velocity combined with --html is meant to produce the historical trend
-    # briefing directly (main()'s standalone --html branch is unreachable here because it
+    # RESTORED: --velocity combined with --report is meant to produce the historical trend
+    # briefing directly (main()'s standalone --report branch is unreachable here because it
     # explicitly excludes args.velocity, and this function used to return before ever
-    # generating the report). Without this, --html was silently ignored whenever it was
+    # generating the report). Without this, --report was silently ignored whenever it was
     # combined with --velocity.
-    if args.html:
-        snapshots = load_snapshots_from_dir(snapshot_dir)
+    #
+    # FIX: this used to call load_snapshots_from_dir() directly, with no layer or --from/--to
+    # filtering at all -- meaning --velocity --report silently blended in EVERY snapshot ever
+    # written to snapshot_dir (the whole historical archive) instead of just the window the
+    # user asked for. Now shares the exact same filtering as the standalone --report branch --
+    # see load_html_snapshots_for_range().
+    if args.report:
+        snapshots = load_html_snapshots_for_range(snapshot_dir, args.layer, args.from_date, args.to)
         if snapshots:
-            generate_html_report(snapshots, args.html)
+            generate_html_report(snapshots, args.report)
 
 
 def compare_snapshots(file_base: str, file_current: str, html_output: str = None):
@@ -3926,7 +4141,7 @@ def main():
     parser.add_argument("--project-format", choices=list(MANIFEST_PARSER_REGISTRY.keys()), help="Force manual schema parser selection.")
     parser.add_argument("--audit", metavar="MANIFEST_PATH", help="Direct lockfile ingestion.")
     parser.add_argument("--velocity", nargs="?", const="./output", metavar="DIR_PATH", help="Stitch snapshots into historical matrix.")
-    parser.add_argument("--html", metavar="OUTPUT_FILE", help="Override briefing report output path.")
+    parser.add_argument("--report", metavar="OUTPUT_FILE", help="Override briefing report output path.")
     parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
     parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
     parser.add_argument("--registry", type=str, help='Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry "npm,PyPI,Maven (Java)").')
@@ -3957,44 +4172,12 @@ def main():
         return
         
     if args.compare:
-        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.html)
+        compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.report)
         return
         
-    if args.html and not args.velocity and not args.compare:
-        snapshots = load_snapshots_from_dir("./output")
-
-        # HARDENING: generate_html_report blends every snapshot it's given into one set of
-        # named series (ecosystem_trends[eco], threat_profile_trends[cat]) with no awareness of
-        # which --layer produced it. load_snapshots_from_dir's own dedup only collapses entries
-        # that share BOTH (interval_to, layer) -- so a stray off-scope snapshot (e.g. a one-off
-        # --registry run exported without --layer, landing as target_layer_filter="all") whose
-        # interval_to happens to collide with a real daily "app" archive survives dedup as a
-        # second, incompatible data point for that same date. Since its ecosystem counts are
-        # zeroed/foreign to the "app" registry series, it silently plots as a valley-then-cliff
-        # in the delta chart that looks exactly like a real burst but isn't one. Restricting to
-        # one layer up front (defaulting to "app", the convention every daily archive file
-        # uses) makes that class of collision structurally impossible rather than relying on
-        # every snapshot in ./output staying well-formed.
-        report_layer = args.layer or "app"
-        snapshots = [s for s in snapshots if s.get("metadata", {}).get("target_layer_filter") == report_layer]
-
-        # --html previously loaded every snapshot in ./output unconditionally, silently ignoring
-        # any --from/--to the user passed alongside it. Filter on each snapshot's own
-        # interval_to (ISO YYYY-MM-DD, lexicographically comparable) when either bound is given.
-        if args.from_date or args.to:
-            range_to = None
-            if args.to:
-                for fmt in ("%Y-%m-%d", "%m-%d-%Y", "%d-%m-%Y"):
-                    try:
-                        range_to = datetime.datetime.strptime(args.to[0], fmt).date().isoformat()
-                        break
-                    except ValueError: continue
-            snapshots = [
-                s for s in snapshots
-                if (not args.from_date or s["metadata"]["interval_to"] >= args.from_date)
-                and (not range_to or s["metadata"]["interval_to"] <= range_to)
-            ]
-        generate_html_report(snapshots, args.html)
+    if args.report and not args.velocity and not args.compare:
+        snapshots = load_html_snapshots_for_range("./output", args.layer, args.from_date, args.to)
+        generate_html_report(snapshots, args.report)
         return
 
     # Uniform environmental allocation
