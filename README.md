@@ -31,6 +31,7 @@ python db_warehouse.py
 | `--bootstrap` | Force the bulk ZIP seed step even if the table already has rows (skipped by default once populated). |
 | `--sync` | Run only the incremental modified-stream sync (skip the bulk bootstrap). |
 | `--rebuild` | **Full fresh rebuild.** Deletes the local database file *and* every cached artifact (the ~1GB master ZIP, the EPSS feed, the KEV catalog), so the next run downloads everything from scratch rather than silently reusing whatever happens to be sitting in `./cache`. Use this when you want a guaranteed-clean rebuild, not a quick refresh — expect it to take several minutes even with a fast connection, since it re-parses the full upstream advisory corpus. |
+| `--verify` | **Read-only audit** against the live OSV modification feed. Reports advisories the feed lists that the warehouse is missing, and ones whose stored `last_modified` day is older than the feed's. Changes inside the last hour before the sync high-water mark are reported as *pending* rather than failures (the next sync re-fetches that window on purpose; the upstream index and API can lag a few minutes). Exits non-zero on any missing/stale advisory. Takes ~15s. |
 | `--skip-kev` | Skip the CISA KEV catalog refresh pipeline for this run. |
 
 ### 3. Run the Verification Suite
@@ -41,7 +42,7 @@ The suite needs the warehouse from step 2 and takes a few minutes, mostly spent 
 
 - **Ingest fixtures** — small hand-built OSV records run through `db_warehouse.parse_osv_json` with exact expected output: threat classification, ecosystem bucketing, repo anchors, dwell, blast radius, advisory-ID handling. Each case is a real bug that was found in this tool, pinned so it can't return.
 - **Warehouse health invariants** — read-only checks that hold after *any* refresh: no mangled advisory IDs, no polluted repo anchors, well-formed columns, and a sync high-water mark that is consistent with the data actually stored. These never need re-minting. A failure means the warehouse itself needs attention, usually `python db_warehouse.py --rebuild`.
-- **Sync behavior** — faked-network tests of the incremental sync: baseline selection, failure accounting, and the atomic master-archive download.
+- **Sync behavior** — faked-network tests of the incremental sync: baseline selection, failure accounting, the atomic master-archive download, and the `--verify` audit.
 - **Report logic** — dashboards, exports, trend and cross-check rendering.
 - **The `--compare` text baseline** — `src/test/resources/comparison_console_output.txt` pins the console formatting of `--compare` for two fixed snapshot files. It is deterministic and independent of the warehouse. If you change that output's format on purpose, re-mint it with `python test_runner.py --update` (the file is UTF-16 encoded).
 
@@ -69,6 +70,17 @@ python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28 --hunt-r
 # Standalone Comparison (pure file-diffing, no warehouse needed)
 python top10ecosystems.py --compare snapshot_a.json snapshot_b.json
 ```
+
+---
+
+## 🔁 Daily Operation (Runbook)
+
+1. **Sync the warehouse.** `python db_warehouse.py` resumes from the warehouse's own recorded high-water mark, so a missed day just means a bigger catch-up. EPSS and KEV refresh automatically once their caches are 24h old.
+2. **Archive each new *complete* UTC day.** `python top10ecosystems.py --layer app --to YYYY-MM-DD --export`. Several days can go in one run (`--to 2026-10-05,2026-10-06`). Never snapshot the current, still-partial day. Snapshots are cumulative from the archive's start date, so each new file is its own day's totals and the charts diff consecutive days.
+3. **Check the warehouse.** `python db_warehouse.py --verify` (about 15s) for a live audit against upstream, and `python test_runner.py` for the health invariants and logic tests.
+4. **Build a briefing.** `python top10ecosystems.py --layer app --from X --to Y --report output/briefing.html`.
+
+**When to rebuild:** if `--verify` keeps reporting stale or missing advisories after a `--sync`, if a warehouse health test fails, or after pulling code that changes ingest/parsing. Run `python db_warehouse.py --rebuild`. The warehouse is disposable by design and archiving it first isn't needed. A rebuild also re-fetches the master archive, so expect several minutes.
 
 ---
 

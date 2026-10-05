@@ -183,6 +183,9 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_sync_manifest_path_id_extraction_preserves_colons_in_advisory_ids",
             "test_sync_baseline_uses_high_water_mark_not_cache_zip_mtime",
             "test_sync_baseline_legacy_anchor_falls_back_only_to_a_valid_zip",
+            "test_modification_feed_keeps_newest_timestamp_per_id_and_honours_since",
+            "test_verify_flags_missing_and_stale_but_not_changes_inside_the_resync_window",
+            "test_feed_cache_expiry_is_not_reported_as_a_forced_refresh",
             "test_master_archive_download_never_leaves_a_truncated_zip_at_the_cache_path",
             "test_incremental_sync_requests_true_colon_ids_and_holds_high_water_for_failures",
             "test_stream_path_parser_keeps_colons_inside_advisory_ids",
@@ -1532,6 +1535,99 @@ class TestThreatStreamScanner(unittest.TestCase):
                 start, source = db_warehouse.resolve_sync_baseline(conn.cursor())
             self.assertEqual(start, datetime.datetime(2026, 9, 20, 11, 0, tzinfo=utc))
             self.assertIn("legacy fallback", source)
+
+    def test_modification_feed_keeps_newest_timestamp_per_id_and_honours_since(self):
+        """
+        An advisory listed under several ecosystems collapses to one ID with its newest timestamp;
+        `since` is inclusive; colon IDs survive; malformed rows are skipped, not fatal.
+        """
+        utc = datetime.timezone.utc
+        rows = [
+            ["2026-10-01T00:00:00Z", "npm/GHSA-aaaa"],
+            ["2026-10-03T00:00:00Z", "PyPI/GHSA-aaaa"],
+            ["2026-10-02T00:00:00Z", "Red Hat/RHSA-2026:1234"],
+            ["not a date", "npm/GHSA-bad"],
+            [],
+        ]
+        everything = db_warehouse.parse_modification_feed(rows)
+        self.assertEqual(everything, {
+            "GHSA-aaaa": datetime.datetime(2026, 10, 3, tzinfo=utc),
+            "RHSA-2026:1234": datetime.datetime(2026, 10, 2, tzinfo=utc),
+        })
+        recent = db_warehouse.parse_modification_feed(rows, since=datetime.datetime(2026, 10, 2, tzinfo=utc))
+        self.assertEqual(set(recent), {"GHSA-aaaa", "RHSA-2026:1234"})
+        later = db_warehouse.parse_modification_feed(rows, since=datetime.datetime(2026, 10, 2, 0, 0, 1, tzinfo=utc))
+        self.assertEqual(set(later), {"GHSA-aaaa"})
+
+    def test_verify_flags_missing_and_stale_but_not_changes_inside_the_resync_window(self):
+        """
+        `db_warehouse.py --verify` must (a) report advisories the feed lists that the warehouse lacks,
+        (b) report ones whose stored last_modified day is older than the feed's, and (c) NOT report
+        changes inside the SYNC_OVERLAP window before the high-water mark, which the next sync
+        re-fetches by design (the upstream index/API lag it). It must never write.
+        """
+        import contextlib
+        conn = self._make_snapshots_conn(["2026-10-05T00:00:00+00:00"])
+        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, last_modified TEXT)")
+        conn.executemany("INSERT INTO vulnerabilities VALUES (?, ?)", [
+            ("GHSA-current", "2026-10-02"),
+            ("GHSA-stale", "2026-10-01"),
+            ("GHSA-lagging", "2026-10-04"),
+            ("RHSA-2026:1234", "2026-10-02"),
+            ("GHSA-gone-from-feed", "2020-01-01"),
+        ])
+        feed = "\n".join([
+            "2026-10-02T08:00:00Z,npm/GHSA-current",
+            "2026-10-03T08:00:00Z,npm/GHSA-stale",
+            "2026-10-04T23:30:00Z,npm/GHSA-lagging",
+            "2026-10-02T09:00:00Z,Red Hat/RHSA-2026:1234",
+            "2026-10-02T10:00:00Z,npm/GHSA-missing",
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ok = db_warehouse.verify_warehouse(conn, feed_text=feed)
+        text = out.getvalue()
+        self.assertFalse(ok)
+        self.assertIn("1 advisories MISSING from warehouse; e.g. GHSA-missing", text)
+        self.assertIn("1 advisories STALE in warehouse; e.g. GHSA-stale", text)
+        flagged = "".join(line for line in text.splitlines() if "MISSING" in line or "STALE" in line)
+        self.assertNotIn("GHSA-lagging", flagged, "[!] A change inside the re-sync window was reported as a failure.")
+        self.assertIn("Pending next sync: 1", text)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM vulnerabilities").fetchone()[0], 5, "[!] --verify wrote to the warehouse.")
+
+        conn.execute("DELETE FROM vulnerabilities WHERE advisory_id = 'GHSA-stale'")
+        conn.execute("INSERT INTO vulnerabilities VALUES ('GHSA-stale', '2026-10-03')")
+        conn.execute("INSERT INTO vulnerabilities VALUES ('GHSA-missing', '2026-10-02')")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(db_warehouse.verify_warehouse(conn, feed_text=feed), "[!] A repaired warehouse should verify clean.")
+
+    def test_feed_cache_expiry_is_not_reported_as_a_forced_refresh(self):
+        """
+        [REGRESSION] EPSS/KEV pipelines passed force=(force or is_too_old) down to the downloader, so a
+        merely expired cache logged "[Reason: Forced]". Only an explicit force may be forced.
+        """
+        import contextlib, tempfile, time
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL, percentile REAL, model_date TEXT)")
+        conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO epss_scores VALUES ('CVE-1', 0.1, 0.1, '2026-10-01')")
+        conn.execute("INSERT INTO kev_catalog VALUES ('CVE-1')")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            epss_path, kev_path = os.path.join(tmp, "epss.gz"), os.path.join(tmp, "kev.json")
+            old = time.time() - 48 * 3600
+            for path in (epss_path, kev_path):
+                with open(path, "wb") as f:
+                    f.write(b"x")
+                os.utime(path, (old, old))
+            seen = {}
+            with patch.object(db_warehouse, "EPSS_GZ_PATH", epss_path), patch.object(db_warehouse, "KEV_JSON_PATH", kev_path), \
+                 patch.object(db_warehouse, "download_epss_feed", lambda force=False: seen.__setitem__("epss", force) or False), \
+                 patch.object(db_warehouse, "download_kev_feed", lambda force=False: seen.__setitem__("kev", force) or False), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                db_warehouse.run_epss_pipeline(conn)
+                db_warehouse.run_kev_pipeline(conn)
+        self.assertEqual(seen, {"epss": False, "kev": False})
 
     def test_master_archive_download_never_leaves_a_truncated_zip_at_the_cache_path(self):
         """

@@ -651,6 +651,87 @@ def resolve_sync_baseline(cursor):
     return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1), "24-hour fallback (no usable high-water mark or valid cache zip)"
 
 
+def parse_modification_feed(rows, since=None):
+    """Collapses modified_id.csv rows (`timestamp, Ecosystem/ID`) into {advisory_id: latest
+    modification time}, optionally keeping only rows at or after `since`. An ID listed under
+    several ecosystems keeps its newest timestamp."""
+    latest = {}
+    for row in rows:
+        if not row: continue
+        mod_time_str, path = row[0], row[1]
+        try:
+            mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
+        except ValueError: continue
+
+        if since is None or mod_time >= since:
+            v_id = advisory_id_from_manifest_path(path)
+            if v_id and v_id != "N/A":
+                previous = latest.get(v_id)
+                if previous is None or mod_time > previous:
+                    latest[v_id] = mod_time
+    return latest
+
+
+def verify_warehouse(conn, feed_text=None) -> bool:
+    """Audits the warehouse against the live upstream modification feed without changing anything.
+    Returns True when nothing is missing or stale.
+
+    - MISSING: the feed lists an advisory the warehouse has no row for.
+    - STALE: the feed's modification DAY is later than the stored last_modified day, for a change
+      that the sync high-water mark says should already have been ingested. (last_modified is
+      stored at day granularity, so a second edit on the same day as the stored one is
+      undetectable here.)
+    - PENDING: changed within SYNC_OVERLAP of the high-water mark or later. The next sync re-fetches
+      this window by design (the upstream index and API can lag a few minutes behind real
+      modification times), so these are not failures. Anything OLDER that is still missing or
+      stale was genuinely lost.
+    Warehouse rows absent from the feed are only counted: the feed lists latest state, so
+    withdrawn/aged records can legitimately be missing from it."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*), MAX(last_modified) FROM vulnerabilities")
+    db_count, db_newest = cursor.fetchone()
+    start, baseline_source = resolve_sync_baseline(cursor)
+    high_water = start + SYNC_OVERLAP
+
+    print(f"\n[*] Verifying warehouse against the live OSV modification feed.")
+    print(f"    -> Warehouse: {db_count:,} advisories, newest last_modified {db_newest}")
+    print(f"    -> High-water mark: {high_water.strftime('%Y-%m-%d %H:%M:%S')} UTC ({baseline_source})")
+
+    try:
+        if feed_text is None:
+            response = requests.get(MANIFEST_URL, timeout=120)
+            response.raise_for_status()
+            feed_text = response.text
+    except Exception as e:
+        print(f"{RED}[- ] Failed to fetch the modification feed: {e}{RESET}")
+        return False
+
+    feed = parse_modification_feed(csv.reader(io.StringIO(feed_text)))
+    stored = dict(cursor.execute("SELECT advisory_id, last_modified FROM vulnerabilities"))
+
+    missing, stale, pending = [], [], []
+    for advisory_id, mod_time in feed.items():
+        if mod_time >= start:
+            pending.append(advisory_id)
+        elif advisory_id not in stored:
+            missing.append(advisory_id)
+        elif (stored[advisory_id] or "") < mod_time.date().isoformat():
+            stale.append(advisory_id)
+    not_in_feed = sum(1 for advisory_id in stored if advisory_id not in feed)
+
+    print(f"    -> Feed lists {len(feed):,} distinct advisories; {not_in_feed:,} warehouse rows are not in the feed (informational)")
+    print(f"    -> Pending next sync: {len(pending):,}")
+    ok = not missing and not stale
+    for label, ids in (("MISSING from warehouse", missing), ("STALE in warehouse", stale)):
+        if ids:
+            print(f"{RED}[- ] {len(ids):,} advisories {label}; e.g. {', '.join(sorted(ids)[:5])}{RESET}")
+    if ok:
+        print(f"{GREEN}[+] Warehouse verified: no missing or stale advisories.{RESET}")
+    else:
+        print(f"{YELLOW}[!] Run `python db_warehouse.py --sync` to repair; if it persists, `--rebuild`.{RESET}")
+    return ok
+
+
 def sync_incremental_window(conn):
     """Pulls every advisory the upstream modification feed lists as changed since the warehouse's
     recorded high-water mark and upserts it, with retries and explicit failure accounting."""
@@ -673,20 +754,7 @@ def sync_incremental_window(conn):
         print(f"{RED}[- ] Failed to fetch streaming modification index: {e}{RESET}")
         return
 
-    target_mod_times = {}
-    for row in reader:
-        if not row: continue
-        mod_time_str, path = row[0], row[1]
-        try:
-            mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
-        except ValueError: continue
-
-        if mod_time >= start_date:
-            v_id = advisory_id_from_manifest_path(path)
-            if v_id and v_id != "N/A":
-                previous = target_mod_times.get(v_id)
-                if previous is None or mod_time > previous:
-                    target_mod_times[v_id] = mod_time
+    target_mod_times = parse_modification_feed(reader, since=start_date)
 
     if not target_mod_times:
         print(f"{GREEN}[+] Zero late mutations detected upstream since last compilation. Warehouse completely current.{RESET}")
@@ -823,7 +891,7 @@ def run_epss_pipeline(conn, force: bool = False):
         print(f"[+] EPSS database records verified current ({existing_count:,} records, Cache Age: {file_age_hours:.1f}h). Skipping reload.")
         return
 
-    if not download_epss_feed(force=force or is_too_old):
+    if not download_epss_feed(force=force):
         print(f"{RED}[-] EPSS pipeline aborted: Unable to obtain valid feed archive.{RESET}")
         return
 
@@ -936,7 +1004,7 @@ def run_kev_pipeline(conn, force: bool = False):
         print(f"[+] KEV catalog records verified current ({existing_count:,} records, Cache Age: {file_age_hours:.1f}h). Skipping reload.")
         return
 
-    if not download_kev_feed(force=force or is_too_old):
+    if not download_kev_feed(force=force):
         print(f"{RED}[-] KEV pipeline aborted: Unable to obtain valid catalog file.{RESET}")
         return
 
@@ -1002,8 +1070,18 @@ if __name__ == "__main__":
     parser.add_argument("--bootstrap", action="store_true", help="Force bulk bootstrap seed from OSV ZIP.")
     parser.add_argument("--sync", action="store_true", help="Execute incremental API modification sync.")
     parser.add_argument("--rebuild", action="store_true", help="Drop and completely rebuild warehouse database from scratch.")
+    parser.add_argument("--verify", action="store_true", help="Audit the warehouse against the live OSV feed (read-only); exits non-zero if advisories are missing or stale.")
     parser.add_argument("--skip-kev", action="store_true", help="Skip the CISA KEV catalog refresh pipeline for this run.")
     args = parser.parse_args()
+
+    if args.verify:
+        if not os.path.exists(DB_PATH):
+            sys.exit(f"No warehouse at {DB_PATH}; run `python db_warehouse.py` first.")
+        verify_conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        try:
+            sys.exit(0 if verify_warehouse(verify_conn) else 1)
+        finally:
+            verify_conn.close()
 
     if args.rebuild:
         # --rebuild means "download the whole thing fresh": wipe every cached artifact up
