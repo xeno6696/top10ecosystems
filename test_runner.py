@@ -17,6 +17,8 @@ import sqlite3
 
 # Import your command line application module
 import top10ecosystems
+import db_warehouse
+import json
 
 # -----------------------------------------------------------------------------
 # 1. INTERCEPT CUSTOM CLI FLAGS BEFORE PASSING CONTROL TO UNITTEST
@@ -26,11 +28,6 @@ if "--update" in sys.argv:
     UPDATE_GOLDEN_MASTERS = True
     sys.argv.remove("--update")  # Stripped so unittest engine doesn't choke
 
-USE_DATABASE_WAREHOUSE = False
-if "--database" in sys.argv:
-    USE_DATABASE_WAREHOUSE = True
-    sys.argv.remove("--database")  # Stripped to protect unittest setup execution
-    
 SKIP_EPSS = False
 if "--skip-epss" in sys.argv:
     SKIP_EPSS = True
@@ -50,18 +47,8 @@ class TestThreatStreamScanner(unittest.TestCase):
     def setUpClass(cls):
         """Executes once before the suite starts. Clean binary operational fork."""
         print("[*] Initializing Global Testing Harness...")
-        cls.cache_dir = "cache/"
-        cls.cache_filepath = "cache/osv_master_all.zip"
-        
-        #   ZERO CROSS-TALK: Absolute mutual exclusivity enforcement
-        if USE_DATABASE_WAREHOUSE:
-            print("[*] Mode Flag Active: Forcing test execution 100% against SQLite warehouse index.")
-            cls.ghsa_lookup = top10ecosystems.build_ghsa_from_db()
-        else:
-            print("[*] Mode Flag Idle: Executing test engine 100% against legacy master ZIP archive.")
-            if not os.path.exists(cls.cache_filepath):
-                raise FileNotFoundError(f"[!] Missing file: {cls.cache_filepath}")
-            cls.ghsa_lookup = top10ecosystems.build_ghsa_ecosystem_map(cls.cache_dir)
+        print("[*] Executing test engine against the SQLite warehouse index.")
+        cls.ghsa_lookup = top10ecosystems.build_ghsa_from_db()
         
         if not cls.ghsa_lookup:
             raise ValueError("[!] CRITICAL: Global advisory index mapping initialized completely empty.")
@@ -159,12 +146,8 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_cyclonedx_breach_intercept",
             "test_cyclonedx_empty_version_block",
             "test_maven_real_world_cli_noise",
-            "test_extract_cvss_score_malware_override",
-            "test_extract_cvss_score_v3_parsing",
-            "test_extract_cvss_score_empty_severity",
             "test_get_artifact_layer_routing",
             "test_generate_leaderboard_stream_aggregation",
-            "test_historical_golden_masters",
             "test_global_advisory_index_volume_baseline",
             "test_compare_snapshots_golden_master_deltas",
             "test_compare_snapshots_strict_text_alignment_good_match",
@@ -186,7 +169,6 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_velocity_filename_no_clobber_between_default_and_priority_sort",
             "test_registry_filter_applies_to_raw_leaderboard_counting_pass",
             "test_priority_sort_flag_wired_to_main_execution_path",
-            "test_000_a_anti_hallucination_guard_for_repo_anchor_extractor",
             "test_000_a_anti_hallucination_guard_for_cross_registry_pair_classifier",
             "test_000_a_anti_hallucination_guard_for_cross_registry_advisory_classifier",
             "test_000_a_anti_hallucination_guard_for_cross_registry_ranker",
@@ -197,7 +179,36 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_cross_registry_unrelated_names_return_none",
             "test_cross_registry_advisory_can_land_in_both_tables",
             "test_rank_cross_registry_tables_filters_single_ecosystem_advisories",
-            "test_rank_cross_registry_tables_ranks_by_ecosystem_span_then_cvss"
+            "test_rank_cross_registry_tables_ranks_by_ecosystem_span_then_cvss",
+            "test_sync_manifest_path_id_extraction_preserves_colons_in_advisory_ids",
+            "test_sync_baseline_uses_high_water_mark_not_cache_zip_mtime",
+            "test_sync_baseline_legacy_anchor_falls_back_only_to_a_valid_zip",
+            "test_master_archive_download_never_leaves_a_truncated_zip_at_the_cache_path",
+            "test_incremental_sync_requests_true_colon_ids_and_holds_high_water_for_failures",
+            "test_stream_path_parser_keeps_colons_inside_advisory_ids",
+            "test_stream_colon_id_rows_are_classified_from_the_lookup_not_the_fallback",
+            "test_ecosystem_tag_bucketing_has_one_shared_memoized_implementation",
+            "test_top_records_for_ecosystem_matches_the_naive_full_sort",
+            "test_lookup_loads_light_fields_up_front_and_hydrates_heavy_details_on_demand",
+            "test_project_alert_order_is_deterministic",
+            "test_scatter_pair_export_is_deterministic_and_capped",
+            "test_ingest_cvss_malware_override",
+            "test_ingest_cvss_v3_vector_scores_via_first_library",
+            "test_ingest_cvss_empty_severity_is_zero",
+            "test_ingest_advisory_id_with_colon_is_preserved",
+            "test_ingest_malware_classifier_trusts_keywords_only_when_cwes_corroborate",
+            "test_ingest_suse_public_cloud_does_not_become_the_pub_ecosystem",
+            "test_ingest_cve_mirror_reference_is_not_a_repo_anchor",
+            "test_ingest_republished_record_is_new_entry_and_aged_record_is_update",
+            "test_ingest_withdrawn_record_is_classified_withdrawn",
+            "test_ingest_blast_radius_is_enumerated_version_count_and_zero_for_range_only_records",
+            "test_missing_warehouse_is_a_hard_error_not_a_silent_zip_fallback",
+            "test_db_health_no_advisory_ids_contain_a_slash",
+            "test_db_health_repo_anchor_is_not_polluted_by_the_cve_mirror",
+            "test_db_health_no_suse_advisory_is_tagged_pub",
+            "test_db_health_classification_columns_are_well_formed",
+            "test_db_health_no_record_is_modified_in_the_future",
+            "test_db_health_sync_high_water_mark_is_consistent_with_the_data"
         }
         
         actual_test_methods = {
@@ -564,9 +575,6 @@ class TestThreatStreamScanner(unittest.TestCase):
             '--to', '2026-05-19',
             '--export', temp_export_path
         ]
-        if USE_DATABASE_WAREHOUSE:
-            mock_flags.append('--database')
-
         exit_code, stdout_capture = self.run_scanner_with_args(mock_flags)
         self.assertEqual(exit_code, 0, f"Execution failed under parity compilation: {stdout_capture}")
         
@@ -684,7 +692,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         # to be >= 2 (e.g. a single GHSA record that itself lists 5 ecosystems is 1 record spanning
         # 5 ecosystems). Rows are distinguished from footnote/legend lines by pipe count rather
         # than specific wording, so this doesn't need updating every time a new note is added.
-        if "0 CVEs confirmed" not in zone_c and "Requires --database" not in zone_c:
+        if "0 CVEs confirmed" not in zone_c:
             grid_lines = zone_c.splitlines()
             header_idx = next((i for i, l in enumerate(grid_lines) if "CVE ID" in l and "Rec" in l), None)
             self.assertIsNotNone(header_idx, "[!] REGRESSION: Section VIII-C grid header not found where expected.")
@@ -731,7 +739,6 @@ class TestThreatStreamScanner(unittest.TestCase):
 
         with patch.object(sys, 'argv', full_args), \
              patch('sys.stdout', captured_output), \
-             patch('top10ecosystems.build_ghsa_ecosystem_map', return_value=self.ghsa_lookup), \
              patch('top10ecosystems.build_ghsa_from_db', return_value=self.ghsa_lookup), \
              patch('requests.get', return_value=mock_response):
             try:
@@ -791,9 +798,6 @@ class TestThreatStreamScanner(unittest.TestCase):
             '--to', '2026-05-19',
             '--export', target_export_path
         ]
-        if USE_DATABASE_WAREHOUSE:
-            mock_flags.append('--database')
-            
         self.addCleanup(lambda: os.remove(target_export_path) if os.path.exists(target_export_path) else None)
         exit_code, output = self.run_scanner_with_args(mock_flags)
         
@@ -886,38 +890,12 @@ class TestThreatStreamScanner(unittest.TestCase):
     # -------------------------------------------------------------------------
     # UNIT TESTS: CVSS EXTRACTOR ENGINE
     # -------------------------------------------------------------------------
-    def test_extract_cvss_score_malware_override(self):
-        """Verifies that explicitly malicious payloads automatically max out at 10.0."""
-        vuln_data_mal_id = {"id": "MAL-2026-9999"}
-        vuln_data_mal_keyword = {"id": "GHSA-xxxx", "summary": "This is a malware package"}
-        self.assertEqual(top10ecosystems.extract_cvss_score(vuln_data_mal_id), 10.0)
-        self.assertEqual(top10ecosystems.extract_cvss_score(vuln_data_mal_keyword), 10.0)
-
-    def test_extract_cvss_score_v3_parsing(self):
-        """Verifies CVSSv3 vectors are correctly parsed by the FIRST library."""
-        vuln_data = {
-            "id": "GHSA-xxxx",
-            "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]
-        }
-        score = top10ecosystems.extract_cvss_score(vuln_data)
-        self.assertEqual(score, 9.8)
-
-    def test_extract_cvss_score_empty_severity(self):
-        """Ensures missing severity structures safely return 0.0 without crashing."""
-        vuln_data = {"id": "CVE-2026-0000", "severity": []}
-        score = top10ecosystems.extract_cvss_score(vuln_data)
-        self.assertEqual(score, 0.0)
-
     # -------------------------------------------------------------------------
     # UNIT TESTS: SECTION VIII CROSS-REGISTRY CLASSIFICATION
     # (replaces the old "HARDWARE ARCHITECTURE COMPILATION CROSS-POLLINATION MATRIX" -- see
     # rank_cross_registry_tables / classify_advisory_cross_registry / classify_cross_registry_pair
-    # / extract_repo_anchor in top10ecosystems.py)
+    # )
     # -------------------------------------------------------------------------
-    def test_000_a_anti_hallucination_guard_for_repo_anchor_extractor(self):
-        """[INTEGRITY] Guards against the deletion of the cross-registry repo-identity extractor."""
-        self.verify_production_target_signature("extract_repo_anchor", expected_args_count=1)
-
     def test_000_a_anti_hallucination_guard_for_cross_registry_pair_classifier(self):
         """[INTEGRITY] Guards against the deletion of the pairwise cross-registry classifier."""
         self.verify_production_target_signature("classify_cross_registry_pair", expected_args_count=5)
@@ -1063,9 +1041,9 @@ class TestThreatStreamScanner(unittest.TestCase):
         mock_response = unittest.mock.MagicMock()
         mock_response.status_code = 200
         mock_csv_lines = [
-            b"2026-04-20T10:00:00Z,GHSA-mock-1111:npm",
-            b"2026-04-20T11:00:00Z,CVE-mock-2222:Debian",
-            b"2026-04-20T11:30:00Z,CVE-mock-3333:Debian",
+            b"2026-04-20T10:00:00Z,npm/GHSA-mock-1111.json",
+            b"2026-04-20T11:00:00Z,Debian/CVE-mock-2222.json",
+            b"2026-04-20T11:30:00Z,Debian/CVE-mock-3333.json",
             b"2026-04-20T12:00:00Z,npm/MAL-mock-4444.json" 
         ]
         mock_response.iter_lines.return_value = mock_csv_lines
@@ -1086,6 +1064,59 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertRegex(output, r"Debian\s+\|\s+2")
         self.assertRegex(output, r"npm\s+\|\s+2")
         self.assertIn("Raw Entry Stream Items:    4", output)
+
+    def test_stream_path_parser_keeps_colons_inside_advisory_ids(self):
+        """
+        [REGRESSION] Real Red Hat/SUSE/openSUSE/Rocky advisory IDs contain colons. The dashboard
+        used to treat any path containing a colon as a legacy "ID:ecosystem" form, turning
+        "Red Hat/RHSA-2026:1234" into the advisory "Red Hat/RHSA-2026" and a bogus ecosystem
+        "1234" -- ~74K feed rows and ~29K distinct garbage ecosystem tags. Only "/" separates the
+        ecosystem from the ID.
+        """
+        cases = {
+            "Red Hat/RHSA-2026:1234": ("RHSA-2026:1234", "Red Hat"),
+            "openSUSE/openSUSE-SU-2026:11976-1": ("openSUSE-SU-2026:11976-1", "openSUSE"),
+            "SUSE/SUSE-SU-2025:3305-1": ("SUSE-SU-2025:3305-1", "SUSE"),
+            "npm/MAL-2026-1234.json": ("MAL-2026-1234", "npm"),
+            "Debian/DEBIAN-CVE-2026-71891": ("DEBIAN-CVE-2026-71891", "Debian"),
+            "GHSA-abcd-efgh-ijkl": ("GHSA-abcd-efgh-ijkl", None),
+            "root/GHSA-abcd-efgh-ijkl": ("GHSA-abcd-efgh-ijkl", None),
+        }
+        for path, expected in cases.items():
+            self.assertEqual(top10ecosystems.parse_stream_path(path), expected, f"[!] Wrong parse of stream path {path!r}.")
+
+    def test_stream_colon_id_rows_are_classified_from_the_lookup_not_the_fallback(self):
+        """
+        [REGRESSION] A colon-bearing advisory's stream row must resolve to its TRUE advisory ID,
+        so its classification comes from the warehouse. The old parser produced a garbage ID that
+        was never in the lookup, so every such row was counted as the "Vulnerability Fix (Update)"
+        fallback regardless of what it really was.
+        """
+        chosen = next(((k, v) for k, v in self.ghsa_lookup.items()
+                       if ":" in k and k.startswith("SUSE-SU-") and v["type"] != "Vulnerability Fix (Update)"), None)
+        if chosen is None:
+            self.skipTest("[!] No SUSE advisory with a non-fallback classification in this warehouse to discriminate with.")
+        advisory_id, meta = chosen
+
+        export_path = os.path.join("output", "colon_id_regression_export.json")
+        self.addCleanup(lambda: os.path.exists(export_path) and os.remove(export_path))
+        with patch('sys.stdout', io.StringIO()):
+            top10ecosystems.generate_enterprise_threat_leaderboard(
+                start_date=datetime.datetime(2026, 4, 18, tzinfo=datetime.timezone.utc),
+                end_date=datetime.datetime(2026, 4, 25, tzinfo=datetime.timezone.utc),
+                target_layer=None, debug_mode=False, custom_export_arg=export_path,
+                ghsa_lookup={advisory_id: meta},   # one real entry: keeps this test from ranking/looping over all 2M
+                manifest_rows=[["2026-04-20T10:00:00Z", f"SUSE/{advisory_id}"]],
+            )
+        with open(export_path, "r", encoding="utf-8") as f:
+            exported = json.load(f)
+
+        self.assertEqual(exported["threat_profile"].get(meta["type"]), 1,
+                         f"[!] {advisory_id} was not classified from the lookup as {meta['type']!r}: {exported['threat_profile']}")
+        self.assertEqual(sum(exported["threat_profile"].values()), 1)
+        import re as _re
+        garbage = [k for k in exported["leaderboard"] if _re.fullmatch(r"[\d\-]+", k)]
+        self.assertEqual(garbage, [], f"[!] Version-number fragments leaked into the ecosystem leaderboard: {garbage}")
 
     @patch('requests.get')
     def test_registry_filter_applies_to_raw_leaderboard_counting_pass(self, mock_requests_get):
@@ -1169,72 +1200,6 @@ class TestThreatStreamScanner(unittest.TestCase):
             "target_registries=target_registries", call_block,
             "[!] --registry is no longer wired into main()'s primary execution path."
         )
-
-    @patch('requests.get')
-    def test_historical_golden_masters(self, mock_requests_get):
-        """Iterates over verified historical baseline snapshot payloads to prevent delta regressions."""
-        import json
-        if not self.cached_stream_lines:
-            self.skipTest(f"Frozen CSV stream not found at {self.frozen_csv_path}.")
-
-        mock_response = unittest.mock.MagicMock()
-        mock_response.status_code = 200
-        mock_response.iter_lines.return_value = self.cached_stream_lines
-        mock_requests_get.return_value = mock_response
-
-        golden_files = [
-            ("2026-04-18", "2026-05-18", "threat_landscape_2026-05-18_app.json"),
-            ("2026-04-18", "2026-05-19", "threat_landscape_2026-05-19_app.json"),
-            ("2026-04-18", "2026-05-20", "threat_landscape_2026-05-20_app.json"),
-            ("2026-04-18", "2026-05-21", "threat_landscape_2026-05-21_app.json"),
-        ]
-
-        print(f"\n[*] Validating engine parity against Golden Master files using frozen state...")
-
-        for start_str, end_str, filename in golden_files:
-            with self.subTest(file=filename):
-                golden_path = os.path.join("src", "test", "resources", filename)
-                if not os.path.exists(golden_path):
-                    self.skipTest(f"Golden master {filename} not found in {golden_path}")
-
-                temp_export_path = f"./output/temp_{filename}"
-                mock_flags = [
-                    '--layer', 'app', '--from', start_str, '--to', end_str, '--export', temp_export_path
-                ]
-                if USE_DATABASE_WAREHOUSE:
-                    mock_flags.append('--database')
-                
-                exit_code, _ = self.run_scanner_with_args(mock_flags)
-                self.assertEqual(exit_code, 0, f"Script execution failed for window {end_str}")
-                
-                with open(temp_export_path, 'r', encoding='utf-8') as f_temp:
-                    temp_data = json.load(f_temp)
-                    
-                if UPDATE_GOLDEN_MASTERS:
-                    print(f"[+] --update active: Auto-minting frozen baseline asset -> {filename}")
-                    with open(golden_path, 'w', encoding='utf-8') as gf:
-                        json.dump(temp_data, gf, indent=4)
-                    continue
-
-                with open(golden_path, 'r', encoding='utf-8') as gf:
-                    golden_data = json.load(gf)
-
-                failure_runbook = (
-                    f"\n\n{'='*80}\n"
-                    f"❌ GOLDEN MASTER REGRESSION OR METADATA DRIFT DETECTED\n"
-                    f"{'='*80}\n"
-                    f"File: {filename}\n\n"
-                    f"👉 Remediation Command: python .\\test_runner.py "
-                    f"{'--database ' if USE_DATABASE_WAREHOUSE else ''}--update\n"
-                    f"{'='*80}\n"
-                )
-
-                self.assertDictEqual(temp_data.get("leaderboard", {}), golden_data.get("leaderboard", {}), msg=f"Leaderboard data mismatch.{failure_runbook}")
-                self.assertDictEqual(temp_data.get("threat_profile", {}), golden_data.get("threat_profile", {}), msg=f"Threat profile classification mismatch.{failure_runbook}")
-                self.assertDictEqual(temp_data.get("malware_vectors", {}), golden_data.get("malware_vectors", {}), msg=f"Malware vector mismatch detected in {filename}")
-                
-                if os.path.exists(temp_export_path):
-                    os.remove(temp_export_path)   
 
     def test_global_advisory_index_volume_baseline(self):
         """Validates that the parsed global memory index does not suffer silent truncation regressions."""
@@ -1470,6 +1435,583 @@ class TestThreatStreamScanner(unittest.TestCase):
                 f"The test engine failed to detect structural inequality against a contaminated file!\n"
                 f"{'='*80}\n"
             )
+
+    # -------------------------------------------------------------------------
+    # DB WAREHOUSE SYNC REGRESSIONS
+    # Each of these reproduces a failure that actually happened: colon-bearing advisory IDs
+    # collapsing into garbage, a truncated zip's mtime moving the sync baseline forward past three
+    # days of upstream changes, and fetch failures being silently dropped.
+    # -------------------------------------------------------------------------
+    def test_sync_manifest_path_id_extraction_preserves_colons_in_advisory_ids(self):
+        """
+        [REGRESSION] Real Red Hat/SUSE/openSUSE/Rocky advisory IDs contain colons. The sync used
+        to split the manifest path on ':', collapsing ~74K feed rows into ~185 garbage "IDs" like
+        "Red Hat/RHSA-2026" that 404 on the API -- so no incremental sync ever refreshed any of them.
+        """
+        cases = {
+            "Red Hat/RHSA-2026:1234": "RHSA-2026:1234",
+            "openSUSE/openSUSE-SU-2026:11976-1": "openSUSE-SU-2026:11976-1",
+            "SUSE/SUSE-SU-2025:3305-1": "SUSE-SU-2025:3305-1",
+            "Rocky Linux/RLSA-2026:0042": "RLSA-2026:0042",
+            "Debian/DEBIAN-CVE-2026-71891": "DEBIAN-CVE-2026-71891",
+            "npm/GHSA-abcd-efgh-ijkl.json": "GHSA-abcd-efgh-ijkl",
+            "MAL-2026-1": "MAL-2026-1",
+        }
+        for path, expected in cases.items():
+            extracted = db_warehouse.advisory_id_from_manifest_path(path)
+            self.assertEqual(extracted, expected, f"[!] Wrong advisory ID extracted from manifest path {path!r}.")
+            self.assertNotIn("/", extracted, f"[!] Ecosystem prefix leaked into the advisory ID for {path!r}.")
+
+    def _make_snapshots_conn(self, interval_tos):
+        conn = sqlite3.connect(":memory:")
+        self.addCleanup(conn.close)
+        conn.execute(
+            "CREATE TABLE snapshots (snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT, generated_at TEXT NOT NULL, "
+            "interval_from TEXT NOT NULL, interval_to TEXT NOT NULL UNIQUE, target_layer TEXT NOT NULL)"
+        )
+        for value in interval_tos:
+            conn.execute("INSERT INTO snapshots (generated_at, interval_from, interval_to, target_layer) VALUES (?, ?, ?, ?)",
+                         ("x", "1970-01-01", value, "all"))
+        return conn
+
+    def test_sync_baseline_uses_high_water_mark_not_cache_zip_mtime(self):
+        """
+        [REGRESSION] A truncated/re-downloaded cache zip carries a fresh mtime without the database
+        gaining anything. The baseline used to take max(zip mtime, high-water), so a partial
+        download on Sep 29 pushed the sync past everything modified Sep 26-29 -- those advisories
+        were never ingested. The baseline must follow the database's own recorded high-water mark.
+        """
+        import tempfile
+        utc = datetime.timezone.utc
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            zip_path = os.path.join(tmp, "osv_master_all.zip")
+            with open(zip_path, "wb") as f:
+                f.write(b"truncated partial download")
+            later = datetime.datetime(2026, 9, 29, 20, 54, tzinfo=utc).timestamp()
+            os.utime(zip_path, (later, later))
+
+            conn = self._make_snapshots_conn(["2026-04-18", "2026-09-26T21:17:35+00:00"])
+            with patch.object(db_warehouse, "LOCAL_ZIP_PATH", zip_path):
+                start, source = db_warehouse.resolve_sync_baseline(conn.cursor())
+            self.assertEqual(start, datetime.datetime(2026, 9, 26, 20, 17, 35, tzinfo=utc),
+                             "[!] Sync baseline followed the cache zip's mtime instead of the recorded high-water mark.")
+            self.assertIn("high-water", source)
+
+            conn = self._make_snapshots_conn(["2026-09-26T21:17:35+00:00", "2026-10-03T21:15:51+00:00", "2026-04-18"])
+            with patch.object(db_warehouse, "LOCAL_ZIP_PATH", zip_path):
+                start, _ = db_warehouse.resolve_sync_baseline(conn.cursor())
+            self.assertEqual(start, datetime.datetime(2026, 10, 3, 20, 15, 51, tzinfo=utc),
+                             "[!] Sync baseline did not pick the NEWEST high-water mark across snapshot rows.")
+
+    def test_sync_baseline_legacy_anchor_falls_back_only_to_a_valid_zip(self):
+        """
+        [REGRESSION] Older full builds recorded the literal interval_to "2026-04-18" regardless of
+        when they ran. That placeholder is ignored; such a database falls back to its cache zip's
+        mtime only if the zip is actually valid, otherwise to 24 hours -- never to a corrupt file's mtime.
+        """
+        import tempfile, zipfile
+        utc = datetime.timezone.utc
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            zip_path = os.path.join(tmp, "osv_master_all.zip")
+
+            with open(zip_path, "wb") as f:
+                f.write(b"not a zip")
+            conn = self._make_snapshots_conn(["2026-04-18"])
+            with patch.object(db_warehouse, "LOCAL_ZIP_PATH", zip_path):
+                start, source = db_warehouse.resolve_sync_baseline(conn.cursor())
+            expected = datetime.datetime.now(utc) - datetime.timedelta(days=1)
+            self.assertLess(abs((start - expected).total_seconds()), 120, "[!] Corrupt zip's mtime was trusted as a baseline.")
+            self.assertIn("24-hour", source)
+
+            os.remove(zip_path)
+            with zipfile.ZipFile(zip_path, "w") as z:
+                z.writestr("a.json", "{}")
+            stamp = datetime.datetime(2026, 9, 20, 12, 0, tzinfo=utc).timestamp()
+            os.utime(zip_path, (stamp, stamp))
+            with patch.object(db_warehouse, "LOCAL_ZIP_PATH", zip_path):
+                start, source = db_warehouse.resolve_sync_baseline(conn.cursor())
+            self.assertEqual(start, datetime.datetime(2026, 9, 20, 11, 0, tzinfo=utc))
+            self.assertIn("legacy fallback", source)
+
+    def test_master_archive_download_never_leaves_a_truncated_zip_at_the_cache_path(self):
+        """
+        [REGRESSION] The download used to stream straight to the cache path, so an interrupted run
+        left an unreadable zip there with a fresh mtime. It must now only ever rename a fully
+        received, valid zip into place, and leave nothing behind on failure.
+        """
+        import tempfile, zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("a.json", "{}" * 500)
+        good = buf.getvalue()
+
+        class FakeResponse:
+            def __init__(self, payload, claimed_length):
+                self.payload = payload
+                self.headers = {"Content-Length": str(claimed_length)}
+            def raise_for_status(self): pass
+            def iter_content(self, chunk_size=1):
+                yield self.payload
+
+        scenarios = [
+            ("truncated body", FakeResponse(good[:-20], len(good)), False),
+            ("full length but not a zip", FakeResponse(b"x" * len(good), len(good)), False),
+            ("complete valid zip", FakeResponse(good, len(good)), True),
+        ]
+        for label, response, should_succeed in scenarios:
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                zip_path = os.path.join(tmp, "osv_master_all.zip")
+                with patch.object(db_warehouse, "CACHE_DIR", tmp), \
+                     patch.object(db_warehouse, "LOCAL_ZIP_PATH", zip_path), \
+                     patch.object(db_warehouse.requests, "get", return_value=response), \
+                     patch('sys.stdout', io.StringIO()):
+                    db_warehouse.download_master_archive()
+                self.assertEqual(os.path.exists(zip_path), should_succeed, f"[!] Wrong cache-path outcome for scenario: {label}.")
+                self.assertFalse(os.path.exists(zip_path + ".part"), f"[!] Stray .part file left behind for scenario: {label}.")
+                if should_succeed:
+                    self.assertTrue(zipfile.is_zipfile(zip_path))
+
+    def test_incremental_sync_requests_true_colon_ids_and_holds_high_water_for_failures(self):
+        """
+        [REGRESSION] End-to-end against a faked feed and API: colon-bearing IDs must be requested
+        under their TRUE IDs, entries older than the baseline must not be requested, a 404 must
+        not block progress, and a persistent fetch failure must hold the high-water mark just
+        before it (so the next sync retries it) instead of silently advancing past it.
+        """
+        import tempfile
+        utc = datetime.timezone.utc
+        requested = []
+        flaky_recovers = {"value": False}
+
+        class FakeApiResponse:
+            def __init__(self, status, vid=None):
+                self.status_code = status
+                self._vid = vid
+            def json(self):
+                return {"id": self._vid, "published": "2024-05-01T00:00:00Z", "modified": "2024-05-02T10:00:00Z",
+                        "affected": [{"package": {"ecosystem": "npm", "name": "pkg"}, "versions": ["1.0.0"]}]}
+
+        class FakeSession:
+            def __enter__(self): return self
+            def __exit__(self, *exc): return False
+            def mount(self, *args, **kwargs): pass
+            def get(self, url, timeout=None):
+                vid = url[len(db_warehouse.OSV_API_URL):]
+                requested.append(vid)
+                if vid == "GONE-1": return FakeApiResponse(404)
+                if vid == "FLAKY-1" and not flaky_recovers["value"]: return FakeApiResponse(500)
+                return FakeApiResponse(200, vid)
+
+        class FakeFeedResponse:
+            text = ("2024-05-02T10:00:00Z,npm/OK-1\n"
+                    "2024-05-02T11:00:00Z,Red Hat/RHSA-2026:1234\n"
+                    "2024-05-02T12:00:00Z,npm/GONE-1\n"
+                    "2024-05-02T13:00:00Z,npm/FLAKY-1\n"
+                    "2024-04-01T00:00:00Z,npm/OLD-1\n")
+            def raise_for_status(self): pass
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            tmp_db = os.path.join(tmp, "t.db")
+            with patch.object(db_warehouse, "DB_DIR", tmp), \
+                 patch.object(db_warehouse, "DB_PATH", tmp_db), \
+                 patch.object(db_warehouse, "LOCAL_ZIP_PATH", os.path.join(tmp, "none.zip")), \
+                 patch.object(db_warehouse.requests, "get", return_value=FakeFeedResponse()), \
+                 patch.object(db_warehouse.requests, "Session", FakeSession), \
+                 patch.object(db_warehouse.time, "sleep", lambda *_: None), \
+                 patch('sys.stdout', io.StringIO()):
+                self.assertNotEqual(os.path.abspath(db_warehouse.DB_PATH), os.path.abspath("database/threat_stream.db"),
+                                    "[!] Test would have touched the production warehouse.")
+                conn = db_warehouse.init_database()
+                conn.execute("INSERT INTO snapshots (generated_at, interval_from, interval_to, target_layer) VALUES (?, ?, ?, ?)",
+                             ("x", "1970-01-01", "2024-05-01T00:00:00+00:00", "incremental_sync"))
+                conn.commit()
+
+                db_warehouse.sync_incremental_window(conn)
+
+                self.assertIn("RHSA-2026:1234", requested, "[!] Colon-bearing advisory was not requested under its true ID.")
+                self.assertNotIn("Red Hat/RHSA-2026", requested, "[!] Garbage colon-split ID was requested.")
+                self.assertNotIn("OLD-1", requested, "[!] An entry older than the baseline was re-fetched.")
+                ingested = {r[0] for r in conn.execute("SELECT advisory_id FROM vulnerabilities")}
+                self.assertEqual(ingested, {"OK-1", "RHSA-2026:1234"})
+
+                held = conn.execute("SELECT interval_to FROM snapshots ORDER BY snapshot_id DESC LIMIT 1").fetchone()[0]
+                self.assertEqual(datetime.datetime.fromisoformat(held), datetime.datetime(2024, 5, 2, 12, 59, 59, tzinfo=utc),
+                                 "[!] High-water mark must be held just before the earliest failed fetch (FLAKY-1), not advanced past it.")
+
+                flaky_recovers["value"] = True
+                db_warehouse.sync_incremental_window(conn)
+                advanced = conn.execute("SELECT interval_to FROM snapshots ORDER BY snapshot_id DESC LIMIT 1").fetchone()[0]
+                self.assertGreater(datetime.datetime.fromisoformat(advanced), datetime.datetime(2025, 1, 1, tzinfo=utc),
+                                   "[!] High-water mark did not advance once every fetch succeeded.")
+                self.assertIn("FLAKY-1", {r[0] for r in conn.execute("SELECT advisory_id FROM vulnerabilities")})
+                conn.close()
+
+
+    # -------------------------------------------------------------------------
+    # INGEST FIXTURE TESTS (db_warehouse.parse_osv_json -- the code that actually fills the DB)
+    # Small hand-built OSV records with exact expected output. Every case here is a real bug that
+    # got through the old aggregate-count golden masters, because those compared totals taken
+    # from a live database rather than asserting what a single record should become.
+    # -------------------------------------------------------------------------
+    _ROW_FIELDS = ("advisory_id package_name ecosystems cvss_score blast_radius threat_profile last_modified "
+                   "malware_vector vulnerable_versions dwell_days withdrawn_date published_date cve_alias aliases "
+                   "cwe_ids package_names_by_ecosystem purls_by_ecosystem repo_anchor fixed_by_ecosystem").split()
+
+    @staticmethod
+    def _osv_record(**overrides):
+        record = {
+            "id": "GHSA-test-0001",
+            "published": "2026-01-01T00:00:00Z",
+            "modified": "2026-01-10T00:00:00Z",
+            "summary": "A vulnerability",
+            "details": "",
+            "affected": [{
+                "package": {"ecosystem": "npm", "name": "pkg"},
+                "versions": ["1.0.0"],
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.0.1"}]}],
+            }],
+            "references": [],
+        }
+        record.update(overrides)
+        return record
+
+    def _ingest(self, **overrides):
+        return dict(zip(self._ROW_FIELDS, db_warehouse.parse_osv_json(self._osv_record(**overrides))))
+
+    def test_ecosystem_tag_bucketing_has_one_shared_memoized_implementation(self):
+        """
+        [INTEGRITY] db_warehouse.py (at ingest) and top10ecosystems.py (reading the live stream)
+        both bucket raw OSV ecosystem tags. They used to each carry their own copy of the logic and
+        of the ecosystem lists, hand-mirrored -- which is how the "pub" vs "Public" bug survived in
+        one place after being fixed in the other. There is now exactly one implementation
+        (osv_ecosystems.py); this fails if a second copy creeps back, or the memoization is lost
+        (the bucketing runs ~4M times per dashboard window; caching it took one from 64s to 25s).
+        """
+        import osv_ecosystems
+        for name in ("clean_ecosystem_tag", "get_artifact_layer"):
+            self.assertIs(getattr(top10ecosystems, name), getattr(osv_ecosystems, name), f"[!] top10ecosystems.{name} is not the shared implementation.")
+        self.assertIs(db_warehouse.clean_ecosystem_tag, osv_ecosystems.clean_ecosystem_tag, "[!] db_warehouse.clean_ecosystem_tag is not the shared implementation.")
+
+        for path in ("top10ecosystems.py", "db_warehouse.py"):
+            with open(path, "r", encoding="utf-8") as f:
+                text = f.read()
+            self.assertNotIn('"Alpaquita Linux"', text, f"[!] {path} has its own copy of the ecosystem lists again -- import them from osv_ecosystems.")
+            self.assertNotIn('"crates.io": "Crates.io"', text, f"[!] {path} has its own copy of the hard-mapping table again -- import it from osv_ecosystems.")
+
+        self.assertTrue(hasattr(osv_ecosystems.clean_ecosystem_tag, "cache_info"),
+                        "[!] clean_ecosystem_tag lost its memoization -- a dashboard window gets ~2.6x slower.")
+
+        expected = {"npm": "npm", "PyPI": "PyPI", "maven": "Maven (Java)", "Maven": "Maven (Java)", "Go": "Go (Golang)",
+                    "crates.io": "Crates.io", "GIT": "GIT", "Debian:11": "Debian", "Debian:12": "Debian", "Pub": "Pub",
+                    "  NPM  ": "npm", "0001-1": "Android", "": "Android"}
+        for tag, bucket in expected.items():
+            self.assertEqual(osv_ecosystems.clean_ecosystem_tag(tag), bucket, f"[!] Wrong bucket for {tag!r}.")
+        self.assertNotEqual(osv_ecosystems.clean_ecosystem_tag("SUSE:Linux Enterprise Module for Public Cloud 12"), "Pub")
+        self.assertEqual(set(osv_ecosystems.MASTER_TRACKS),
+                         set(osv_ecosystems.KNOWN_CONTAINER_ECOSYSTEMS) | set(osv_ecosystems.KNOWN_REGISTRY_ECOSYSTEMS) | {"GIT", "Android", "Untagged Commit Hash/CVE Noise"})
+
+    def test_top_records_for_ecosystem_matches_the_naive_full_sort(self):
+        """
+        [EQUIVALENCE] Sections IV and VII pick the top 10 advisories per ecosystem. That used to
+        rescan the whole ~2M-entry lookup per ecosystem and sort every match; it now uses a
+        one-pass index and heapq.nsmallest. This pins identical selection AND identical tie
+        resolution against the naive algorithm it replaced, on data with many deliberate ties,
+        advisories spanning several ecosystems, a blank ID (excluded), and ecosystem names that
+        match several index keys or none.
+        """
+        import random
+        rng = random.Random(3)
+        names = ["npm", "PyPI", "Maven (Java)", "Debian", "Android"]
+        lookup = {}
+        for i in range(400):
+            lookup[f"ID-{i:04d}"] = {"ecosystems": rng.sample(names, rng.randint(1, 3)),
+                                     "cvss_score": float(rng.choice([0, 5.0, 7.5, 9.8])), "blast_radius": rng.choice([0, 1, 3, 50]),
+                                     "package_name": f"pkg{i}", "last_modified": "2026-01-01"}
+        lookup["   "] = {"ecosystems": ["npm"], "cvss_score": 10.0, "blast_radius": 999, "package_name": "blank", "last_modified": "2026-01-01"}
+
+        sort_key = lambda vid, meta: (-meta["cvss_score"], -meta["blast_radius"])
+        for eco in names + ["npm PyPI", "Maven (Java) Debian", "Nonexistent"]:
+            eco_lower = eco.lower()
+            naive = sorted(((vid, meta) for vid, meta in lookup.items()
+                            if vid.strip() and any(raw.lower() in eco_lower for raw in meta["ecosystems"])),
+                           key=lambda pair: sort_key(*pair))[:10]
+            actual = top10ecosystems._top_records_for_ecosystem(lookup, eco, sort_key)
+            self.assertEqual([vid for vid, _ in actual], [vid for vid, _ in naive], f"[!] Top-10 selection diverged for ecosystem {eco!r}.")
+            self.assertTrue(all(meta is lookup[vid] for vid, meta in actual))
+
+    def test_lookup_loads_light_fields_up_front_and_hydrates_heavy_details_on_demand(self):
+        """
+        [CONTRACT] build_ghsa_from_db() used to parse five JSON columns for every one of ~2M
+        advisories on every run, though only Section VIII (advisories in the current window) and
+        project-manifest matching read them. The lookup now carries only the light fields, and
+        hydrate_lookup_details() fills in the heavy ones for just the IDs asked for. Built from a
+        throwaway warehouse through the real ingest path, so it exercises the same parser that
+        fills production.
+        """
+        import tempfile
+        records = [
+            self._osv_record(id="GHSA-hyd-0001", references=[{"url": "https://github.com/netty/netty/security/advisories/GHSA-x"}],
+                             affected=[{"package": {"ecosystem": "npm", "name": "pkg-a", "purl": "pkg:npm/pkg-a"}, "versions": ["1.0.0", "1.0.1"],
+                                        "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.0.2"}]}]},
+                                       {"package": {"ecosystem": "PyPI", "name": "pkg-a"}, "versions": ["2.0"]}]),
+            self._osv_record(id="GHSA-hyd-0002"),
+            self._osv_record(id="SUSE-SU-2026:9-1"),
+        ]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            tmp_db = os.path.join(tmp, "t.db")
+            with patch.object(db_warehouse, "DB_DIR", tmp), patch.object(db_warehouse, "DB_PATH", tmp_db):
+                self.assertNotEqual(os.path.abspath(tmp_db), os.path.abspath(top10ecosystems.DB_PATH))
+                conn = db_warehouse.init_database()
+                conn.executemany("""INSERT INTO vulnerabilities (advisory_id, package_name, ecosystems, cvss_score, blast_radius,
+                    threat_profile, last_modified, malware_vector, vulnerable_versions, dwell_days, withdrawn_date, published_date,
+                    cve_alias, aliases, cwe_ids, package_names_by_ecosystem, purls_by_ecosystem, repo_anchor, fixed_by_ecosystem)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", [db_warehouse.parse_osv_json(r) for r in records])
+                conn.commit()
+                conn.close()
+
+            with patch('sys.stdout', io.StringIO()):
+                lookup = top10ecosystems.build_ghsa_from_db(db_path=tmp_db)
+            self.assertEqual(set(lookup), {"GHSA-hyd-0001", "GHSA-hyd-0002", "SUSE-SU-2026:9-1"})
+
+            light = {"ecosystems", "package_name", "type", "vector", "dwell_days", "blast_radius", "cvss_score", "last_modified"}
+            heavy = {"vulnerable_versions", "package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor", "fixed_by_ecosystem"}
+            for entry in lookup.values():
+                self.assertEqual(set(entry), light, "[!] The lookup should carry only the light fields until hydrated.")
+
+            self.assertEqual(top10ecosystems.hydrate_lookup_details(lookup, ["GHSA-hyd-0001", "NOT-IN-LOOKUP"], tmp_db), 1)
+            hydrated = lookup["GHSA-hyd-0001"]
+            self.assertTrue(heavy <= set(hydrated))
+            self.assertEqual(hydrated["vulnerable_versions"], {"1.0.0", "1.0.1", "2.0"})
+            self.assertEqual(hydrated["package_names_by_ecosystem"], {"npm": ["pkg-a"], "PyPI": ["pkg-a"]})
+            self.assertEqual(hydrated["purls_by_ecosystem"], {"npm": ["pkg:npm/pkg-a"]})
+            self.assertEqual(hydrated["repo_anchor"], "netty/netty")
+            self.assertEqual(hydrated["fixed_by_ecosystem"], {"npm": True, "PyPI": False})
+            self.assertEqual(set(lookup["GHSA-hyd-0002"]), light, "[!] Hydrating one advisory must not touch the others.")
+
+            self.assertEqual(top10ecosystems.hydrate_lookup_details(lookup, ["GHSA-hyd-0001"], tmp_db), 0, "[!] Hydration is not idempotent.")
+            self.assertEqual(top10ecosystems.hydrate_lookup_details(lookup, ["GHSA-hyd-0002", "SUSE-SU-2026:9-1"], tmp_db), 2)
+            self.assertIsNone(lookup["GHSA-hyd-0002"]["repo_anchor"])      # hydrated even when the value is NULL/None
+
+    def test_project_alert_order_is_deterministic(self):
+        """
+        [REGRESSION] Project-manifest alerts were deduplicated through a set and sorted by package
+        name alone, so advisories sharing a package printed in a different order on every run
+        (Python randomizes string hashing per process). Ties now break on advisory ID.
+        """
+        base = [(f"ROOT-APP-PYPI-CVE-2026-{n:05d}", "requests", "PyPI", "Vulnerability Fix (New Entry)") for n in (99, 7, 31, 4)]
+        base += [("ROOT-APP-PYPI-CVE-2020-1", "cvss", "PyPI", "Vulnerability Fix (Update)")]
+        expected = [base[4]] + sorted(base[:4], key=lambda a: a[0])
+        import random
+        rng = random.Random(11)
+        for _ in range(25):
+            shuffled = base + base[:2]             # duplicates must collapse too
+            rng.shuffle(shuffled)
+            self.assertEqual(top10ecosystems._sorted_project_alerts(shuffled), expected)
+
+    def test_scatter_pair_export_is_deterministic_and_capped(self):
+        """
+        [REGRESSION] Chart V's CVSS-vs-blast-radius points are randomly down-sampled to a cap per
+        ecosystem. The sampling was unseeded, so the same data exported different points every
+        run. It must be reproducible regardless of pool insertion order, and respect the cap.
+        """
+        cap = top10ecosystems._MAX_SCATTER_POINTS_PER_ECO
+        entries = [(f"ID-{i}", (1 + i % 50, "Vulnerability Fix (Update)", f"pkg{i}", 1.0 + (i % 90) / 10, None, None)) for i in range(cap + 400)]
+        forward = {"npm": dict(entries), "PyPI": dict(entries[:50])}
+        backward = {"npm": dict(reversed(entries)), "PyPI": dict(reversed(entries[:50]))}
+        first = top10ecosystems._extract_cvss_blast_radius_pairs(forward)
+        self.assertEqual(first, top10ecosystems._extract_cvss_blast_radius_pairs(forward))
+        self.assertEqual(first, top10ecosystems._extract_cvss_blast_radius_pairs(backward), "[!] Sampling depends on pool insertion order.")
+        self.assertEqual(len(first["npm"]), cap)
+        self.assertEqual(len(first["PyPI"]), 50)
+
+    def test_ingest_cvss_malware_override(self):
+        """Explicitly malicious payloads max out at 10.0 regardless of any severity data."""
+        self.assertEqual(db_warehouse.extract_production_cvss({"id": "MAL-2026-9999"}), 10.0)
+        self.assertEqual(db_warehouse.extract_production_cvss({"id": "GHSA-xxxx", "summary": "This is a malware package"}), 10.0)
+
+    def test_ingest_cvss_v3_vector_scores_via_first_library(self):
+        vuln = {"id": "GHSA-xxxx", "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}
+        self.assertEqual(db_warehouse.extract_production_cvss(vuln), 9.8)
+
+    def test_ingest_cvss_empty_severity_is_zero(self):
+        self.assertEqual(db_warehouse.extract_production_cvss({"id": "CVE-2026-0000", "severity": []}), 0.0)
+
+    def test_ingest_advisory_id_with_colon_is_preserved(self):
+        """Red Hat/SUSE/Rocky IDs contain colons; ingest must keep them intact."""
+        self.assertEqual(self._ingest(id="SUSE-SU-2026:1234-1")["advisory_id"], "SUSE-SU-2026:1234-1")
+
+    def test_ingest_malware_classifier_trusts_keywords_only_when_cwes_corroborate(self):
+        """
+        [REGRESSION] A bug IN a malware scanner (GuardDog: CWE-116, summary mentions "malicious
+        package content") and a privilege-escalation bug that merely mentions "backdoor" accounts
+        were both flagged as malware by a bare keyword match. Keywords now count only when the
+        advisory's own CWEs corroborate (CWE-506 present, or no CWE assigned at all).
+        """
+        scanner_bug = self._ingest(summary="Terminal escape injection from malicious package content",
+                                   database_specific={"cwe_ids": ["CWE-116"]})
+        self.assertFalse(scanner_bug["threat_profile"].startswith("Malware"), scanner_bug["threat_profile"])
+
+        privesc = self._ingest(summary="Lets an attacker create backdoor service accounts",
+                               database_specific={"cwe_ids": ["CWE-269", "CWE-284"]})
+        self.assertFalse(privesc["threat_profile"].startswith("Malware"), privesc["threat_profile"])
+
+        real_no_cwe = self._ingest(summary="Typosquat of a popular package")
+        self.assertTrue(real_no_cwe["threat_profile"].startswith("Malware"), real_no_cwe["threat_profile"])
+
+        real_cwe_506 = self._ingest(summary="Package contains a backdoor", database_specific={"cwe_ids": ["CWE-506"]})
+        self.assertTrue(real_cwe_506["threat_profile"].startswith("Malware"), real_cwe_506["threat_profile"])
+
+        self.assertTrue(self._ingest(id="MAL-2026-1")["threat_profile"].startswith("Malware"))
+
+    def test_ingest_suse_public_cloud_does_not_become_the_pub_ecosystem(self):
+        """
+        [REGRESSION] "pub" is a substring of "Public", so SUSE's "...Module for Public Cloud 12"
+        ecosystem tag was bucketed into the Dart/Flutter "Pub" registry, which then fed Section
+        VIII false cross-registry pairs. Tags must match at token boundaries only.
+        """
+        affected = [{"package": {"ecosystem": "SUSE:Linux Enterprise Module for Public Cloud 12", "name": "python-pip"},
+                     "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "1.0"}]}]}]
+        ecosystems = json.loads(self._ingest(id="SUSE-SU-2026:1-1", affected=affected)["ecosystems"])
+        self.assertNotIn("Pub", ecosystems)
+
+        real_pub = [{"package": {"ecosystem": "Pub", "name": "http"}, "versions": ["1.0.0"]}]
+        self.assertIn("Pub", json.loads(self._ingest(affected=real_pub)["ecosystems"]))
+
+    def test_ingest_cve_mirror_reference_is_not_a_repo_anchor(self):
+        """
+        [REGRESSION] Many advisories (Chainguard's CGA-* especially) cite the CVE Project's own
+        record mirror (cveproject/cvelistv5) as a reference. It must not become the advisory's
+        repo anchor -- it had become ~24% of all stored anchors, which Section VIII reads as
+        "same upstream project", producing false cross-registry matches.
+        """
+        mirror = [{"url": "https://github.com/CVEProject/cvelistV5/blob/main/cves/2026/1xxx/CVE-2026-1.json"}]
+        self.assertIsNone(self._ingest(references=mirror)["repo_anchor"])
+
+        mixed = mirror + [{"url": "https://github.com/netty/netty/security/advisories/GHSA-xxxx"}]
+        self.assertEqual(self._ingest(references=mixed)["repo_anchor"], "netty/netty")
+
+    def test_ingest_republished_record_is_new_entry_and_aged_record_is_update(self):
+        """
+        Classification and dwell follow published vs modified. A record re-issued with
+        published == modified (Root.io does this) is a "New Entry" with zero dwell; one modified
+        weeks after publication is an "Update" whose dwell is that gap in days.
+        """
+        fresh = self._ingest(published="2026-09-30T00:00:00Z", modified="2026-09-30T12:00:00Z")
+        self.assertEqual(fresh["threat_profile"], "Vulnerability Fix (New Entry)")
+        self.assertEqual(fresh["dwell_days"], 0)
+
+        aged = self._ingest(published="2026-05-01T00:00:00Z", modified="2026-05-22T00:00:00Z")
+        self.assertEqual(aged["threat_profile"], "Vulnerability Fix (Update)")
+        self.assertEqual(aged["dwell_days"], 21)
+
+        no_fix = self._ingest(affected=[{"package": {"ecosystem": "npm", "name": "pkg"}, "versions": ["1.0.0"]}])
+        self.assertEqual(no_fix["threat_profile"], "Metadata Correction / Adjustments")
+
+    def test_ingest_withdrawn_record_is_classified_withdrawn(self):
+        row = self._ingest(withdrawn="2026-03-01T00:00:00Z")
+        self.assertEqual(row["threat_profile"], "Withdrawn / Retracted Advisory")
+        self.assertEqual(row["withdrawn_date"], "2026-03-01")
+
+    def test_ingest_blast_radius_is_enumerated_version_count_and_zero_for_range_only_records(self):
+        """
+        blast_radius is the count of version strings an advisory enumerates. Go-style records list
+        affected scope only as ranges, so they legitimately score 0 -- a known limitation of this
+        metric, pinned here so nobody mistakes it for "no impact".
+        """
+        enumerated = [{"package": {"ecosystem": "npm", "name": "pkg"}, "versions": ["1.0.0", "1.0.1", "1.0.2"]}]
+        self.assertEqual(self._ingest(affected=enumerated)["blast_radius"], 3)
+
+        range_only = [{"package": {"ecosystem": "Go", "name": "example.com/mod"},
+                       "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.64.0"}]}]}]
+        self.assertEqual(self._ingest(affected=range_only)["blast_radius"], 0)
+
+    # -------------------------------------------------------------------------
+    # MISSING-WAREHOUSE BEHAVIOR (the file-only/ZIP fallback was removed)
+    # -------------------------------------------------------------------------
+    def test_missing_warehouse_is_a_hard_error_not_a_silent_zip_fallback(self):
+        """
+        [REGRESSION] A missing or unreadable warehouse used to silently fall back to downloading
+        and streaming a ~2.6GB ZIP, producing different data with no warning. It must now stop
+        with a clear message instead.
+        """
+        missing = os.path.join("output", "definitely_not_a_warehouse.db")
+        with self.assertRaises(FileNotFoundError) as ctx:
+            top10ecosystems.build_ghsa_from_db(db_path=missing)
+        self.assertIn("db_warehouse.py", str(ctx.exception))
+
+        with patch('sys.stdout', io.StringIO()), self.assertRaises(SystemExit) as exit_ctx:
+            top10ecosystems.require_warehouse(missing)
+        self.assertEqual(exit_ctx.exception.code, 1)
+
+    # -------------------------------------------------------------------------
+    # DATABASE HEALTH INVARIANTS (read-only checks of the live warehouse)
+    # Deliberately NOT exact values: these hold after any refresh, so they never need re-minting.
+    # They would have caught the problems found in this warehouse in practice: ~74K advisories
+    # whose IDs were mangled by the sync, ~24% of repo anchors polluted by the CVE mirror, bogus
+    # Pub tags on SUSE advisories, and a sync high-water mark days ahead of the actual data.
+    # -------------------------------------------------------------------------
+    def _warehouse(self):
+        if not os.path.exists(top10ecosystems.DB_PATH):
+            self.fail(f"[!] Warehouse missing at {top10ecosystems.DB_PATH}. Build it with: python db_warehouse.py")
+        return sqlite3.connect(f"file:{top10ecosystems.DB_PATH}?mode=ro", uri=True)
+
+    def _scalar(self, sql, params=()):
+        conn = self._warehouse()
+        try:
+            return conn.execute(sql, params).fetchone()[0]
+        finally:
+            conn.close()
+
+    def test_db_health_no_advisory_ids_contain_a_slash(self):
+        """An ID with '/' is an ecosystem prefix that leaked into the ID (a parsing bug), never a real advisory."""
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE advisory_id LIKE '%/%'"), 0)
+
+    def test_db_health_repo_anchor_is_not_polluted_by_the_cve_mirror(self):
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE repo_anchor = 'cveproject/cvelistv5'"), 0,
+                         "[!] CVE-mirror repo anchors are back -- the warehouse was built or synced with stale parsing logic. Rebuild it.")
+
+    def test_db_health_no_suse_advisory_is_tagged_pub(self):
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE advisory_id LIKE 'SUSE-%' AND ecosystems LIKE '%\"Pub\"%'"), 0,
+                         "[!] SUSE advisories tagged Pub -- the 'pub' vs 'Public' substring collision is back. Rebuild the warehouse.")
+
+    def test_db_health_classification_columns_are_well_formed(self):
+        allowed = ("Malware (New Entry)", "Malware (Incremental Update)", "Vulnerability Fix (New Entry)",
+                   "Vulnerability Fix (Update)", "Metadata Correction / Adjustments", "Withdrawn / Retracted Advisory")
+        placeholders = ",".join("?" * len(allowed))
+        checks = {
+            "unknown threat_profile value": (f"SELECT COUNT(*) FROM vulnerabilities WHERE threat_profile NOT IN ({placeholders})", allowed),
+            "negative dwell_days": ("SELECT COUNT(*) FROM vulnerabilities WHERE dwell_days < 0", ()),
+            "negative blast_radius": ("SELECT COUNT(*) FROM vulnerabilities WHERE blast_radius < 0", ()),
+            "cvss outside 0-10": ("SELECT COUNT(*) FROM vulnerabilities WHERE cvss_score < 0 OR cvss_score > 10", ()),
+            "empty advisory_id": ("SELECT COUNT(*) FROM vulnerabilities WHERE advisory_id IS NULL OR advisory_id = ''", ()),
+        }
+        for label, (sql, params) in checks.items():
+            self.assertEqual(self._scalar(sql, params), 0, f"[!] Warehouse health violation: {label}.")
+
+    def test_db_health_no_record_is_modified_in_the_future(self):
+        tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        self.assertEqual(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE last_modified > ?", (tomorrow,)), 0)
+
+    def test_db_health_sync_high_water_mark_is_consistent_with_the_data(self):
+        """
+        The sync resumes from the recorded high-water mark. If that mark runs far AHEAD of the
+        newest record actually stored, everything in between was silently skipped -- exactly how
+        a truncated cache file once hid three days of upstream changes. OSV never goes several
+        days without any modification, so a multi-day lead is a sign of a gap.
+        """
+        conn = self._warehouse()
+        try:
+            baseline, source = db_warehouse.resolve_sync_baseline(conn.cursor())
+            newest = conn.execute("SELECT MAX(last_modified) FROM vulnerabilities").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertIn("high-water", source, "[!] Warehouse has no usable sync high-water mark. Rebuild it with: python db_warehouse.py")
+        high_water = (baseline + db_warehouse.SYNC_OVERLAP).date()
+        newest_day = datetime.date.fromisoformat(newest)
+        self.assertLessEqual((high_water - newest_day).days, 3,
+                             f"[!] Sync high-water mark ({high_water}) is {(high_water - newest_day).days} days ahead of the newest stored "
+                             f"record ({newest_day}); advisories in between were likely skipped. Rebuild with: python db_warehouse.py")
+
 
 if __name__ == '__main__':
     unittest.main()

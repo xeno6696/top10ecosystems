@@ -33,41 +33,40 @@ python db_warehouse.py
 | `--rebuild` | **Full fresh rebuild.** Deletes the local database file *and* every cached artifact (the ~1GB master ZIP, the EPSS feed, the KEV catalog), so the next run downloads everything from scratch rather than silently reusing whatever happens to be sitting in `./cache`. Use this when you want a guaranteed-clean rebuild, not a quick refresh — expect it to take several minutes even with a fast connection, since it re-parses the full upstream advisory corpus. |
 | `--skip-kev` | Skip the CISA KEV catalog refresh pipeline for this run. |
 
-### 3. Initial Baseline Calibration
-When running the verification suite for the first time, you will likely encounter unit test failures in the text alignment gates. This is **expected behavior** as the system compares live execution output against local "Golden Master" baseline files that may not perfectly match your local filesystem paths or the current state of the live warehouse.
+### 3. Run the Verification Suite
+```bash
+python test_runner.py
+```
+The suite needs the warehouse from step 2 and takes a few minutes, mostly spent loading the advisory index. It checks:
 
-1. **Run the suite:**
-   ```bash
-   python test_runner.py --database
-   ```
-2. **Investigate the failure:** The `AssertionError` output will display a surgical line-by-line delta. Review this output. If the differences represent expected system formatting or ordinary data drift (the local warehouse legitimately advances day to day) rather than data regressions, proceed to re-mint the baseline.
-3. **Calibrate:** Use the `--update` flag to force the engine to overwrite the existing baselines with the current, verified environment output:
-   ```bash
-   python test_runner.py --database --update
-   ```
-   *Note: one gate — the strict text-alignment positive control against `src/test/resources/comparison_console_output.txt` — has no `--update` branch of its own (unlike the other golden-master fixtures). If it fails after everything else is green, re-mint it directly by capturing `compare_snapshots()`'s output for the base/current JSON pair it uses and overwriting that file (it's UTF-16 encoded — write it with `encoding="utf-16"` to match).*
+- **Ingest fixtures** — small hand-built OSV records run through `db_warehouse.parse_osv_json` with exact expected output: threat classification, ecosystem bucketing, repo anchors, dwell, blast radius, advisory-ID handling. Each case is a real bug that was found in this tool, pinned so it can't return.
+- **Warehouse health invariants** — read-only checks that hold after *any* refresh: no mangled advisory IDs, no polluted repo anchors, well-formed columns, and a sync high-water mark that is consistent with the data actually stored. These never need re-minting. A failure means the warehouse itself needs attention, usually `python db_warehouse.py --rebuild`.
+- **Sync behavior** — faked-network tests of the incremental sync: baseline selection, failure accounting, and the atomic master-archive download.
+- **Report logic** — dashboards, exports, trend and cross-check rendering.
+- **The `--compare` text baseline** — `src/test/resources/comparison_console_output.txt` pins the console formatting of `--compare` for two fixed snapshot files. It is deterministic and independent of the warehouse. If you change that output's format on purpose, re-mint it with `python test_runner.py --update` (the file is UTF-16 encoded).
+
+There are deliberately no "golden master" comparisons against live warehouse data: they drifted on every routine refresh, which trained people to re-mint blindly, and they never caught the ingest bugs that mattered.
 
 ### 4. Run the Main Dashboard Engine
-With your relational data asset successfully populated, call the core application using the `--database` execution flag to isolate operations to your local index for performance:
+With the warehouse populated, run the core application. The warehouse built by `db_warehouse.py` is the only data source; if it hasn't been built, commands stop with a message telling you to run `python db_warehouse.py`:
 ```bash
 # Analyze application registry layers over a distinct historical interval
-python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-28
+python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28
 ```
-Omit `--database` to fall back to streaming the OSV bulk ZIP directly (slower, no local index required, and doesn't get the KEV/EPSS enrichment described below).
 
 ### 5. High-Performance Isolation Filtering
 To skip heavy scanning overhead and optimize operational speeds, pass the `--registry` option along with a comma-separated checklist array to drop unrelated database footprints instantly. Quote the whole list if any registry name contains spaces or parentheses (e.g. `Maven (Java)`):
 ```bash
 # Isolate calculation matrix mappings strictly to target registries
-python top10ecosystems.py --database --registry "npm,PyPI,Maven (Java)" --from 2026-04-18 --to 2026-05-28
+python top10ecosystems.py --registry "npm,PyPI,Maven (Java)" --from 2026-04-18 --to 2026-05-28
 ```
 
 ### 6. Advanced Research Hunting & Snapshot Tooling
 ```bash
 # Hunt for suspicious contested retractions within a context window
-python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-28 --hunt-retracted
+python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28 --hunt-retracted
 
-# Standalone Comparison (Pure file-diffing, does not require --database)
+# Standalone Comparison (pure file-diffing, no warehouse needed)
 python top10ecosystems.py --compare snapshot_a.json snapshot_b.json
 ```
 
@@ -109,7 +108,7 @@ A standard `top10ecosystems.py` invocation (without `--trends`/`--crosscheck`/`-
 **Section VIII** answers a specific supply-chain question: when the same advisory spans multiple ecosystems, is that because the same project is genuinely released natively to each registry, or because one registry is just vendoring another's code unmodified?
 - **VIII-A — True Cross-Compiled**: the same upstream project independently released to multiple registries (e.g. a library shipped natively to both PyPI and Maven).
 - **VIII-B — Repackaged-As-Is**: one registry mechanically vendoring another's artifact unmodified (the textbook case is Maven's `webjars` namespace wrapping an npm package verbatim), with a per-ecosystem fix-status marker (`F`/`U`/`?`) and a dependency-direction signal for which side is the plausible upstream fix origin.
-- **VIII-C — Cross-Tracker CVE Correlation**: the same CVE independently tracked as separate advisory records across ecosystems (requires `--database`).
+- **VIII-C — Cross-Tracker CVE Correlation**: the same CVE independently tracked as separate advisory records across ecosystems.
 
 Pass `--priority-sort` to re-rank Sections I/V/VI/VII by KEV presence → EPSS score → CVSS/blast-radius instead of CVSS/blast-radius alone (default ranking is unchanged when the flag is omitted).
 
@@ -117,9 +116,9 @@ Pass `--priority-sort` to re-rank Sections I/V/VI/VII by KEV presence → EPSS s
 
 ## 🎯 KEV/EPSS Prioritized Dispatch List (`--crosscheck`)
 
-Cross-checks the CISA KEV catalog, FIRST's EPSS exploitation-probability score, and raw OSV/CVSS severity against the vulnerability catalog for a given window. The console table always shows the "what should a developer actually work on first" ranking — KEV (known to be actively exploited) first, then by descending EPSS probability, then by CVSS/blast-radius. Requires `--database` and an explicit `--registry` filter:
+Cross-checks the CISA KEV catalog, FIRST's EPSS exploitation-probability score, and raw OSV/CVSS severity against the vulnerability catalog for a given window. The console table always shows the "what should a developer actually work on first" ranking — KEV (known to be actively exploited) first, then by descending EPSS probability, then by CVSS/blast-radius. Requires an explicit `--registry` filter:
 ```bash
-python top10ecosystems.py --database --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17
+python top10ecosystems.py --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17
 ```
 - `--crosscheck-limit N` caps the console table to the top N rows (default 100; `0` for uncapped).
 - `--crosscheck-export [PATH]` exports the full, uncapped list as **three** JSON files — one per ranking mode, same underlying rows, different sort/rank — so a consumer picks exactly the ranking they mean instead of reconciling multiple numbers themselves:
@@ -133,9 +132,9 @@ python top10ecosystems.py --database --crosscheck --registry npm,PyPI --from 202
 
 ## 📈 Ecosystem Trend Briefings (`--trends`)
 
-Computes lookback trend metrics, mutation-velocity spikes, and dormancy-decay models for a specific registry over a rolling window (default 30 days, override with `--window-days N`). Requires `--database` and an explicit `--registry` target:
+Computes lookback trend metrics, mutation-velocity spikes, and dormancy-decay models for a specific registry over a rolling window (default 30 days, override with `--window-days N`). Requires an explicit `--registry` target:
 ```bash
-python top10ecosystems.py --database --trends --registry npm --window-days 30 --to 2026-09-17
+python top10ecosystems.py --trends --registry npm --window-days 30 --to 2026-09-17
 ```
 Includes a KEV-first prioritized list plus a secondary EPSS-only watchlist for advisories that aren't in KEV but carry a meaningfully elevated exploitation probability.
 
@@ -143,9 +142,9 @@ Includes a KEV-first prioritized list plus a secondary EPSS-only watchlist for a
 
 ## 🔍 Retraction Hunting (`--hunt-retracted`)
 
-Surfaces advisories that were published, then withdrawn/retracted, with unusually long dwell times before retraction — a pattern worth a second look, since a retraction that took a long time to happen is a different risk profile than one caught and reversed quickly. Requires `--database`:
+Surfaces advisories that were published, then withdrawn/retracted, with unusually long dwell times before retraction — a pattern worth a second look, since a retraction that took a long time to happen is a different risk profile than one caught and reversed quickly. 
 ```bash
-python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-28 --hunt-retracted
+python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28 --hunt-retracted
 ```
 
 ---
@@ -155,16 +154,17 @@ python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-
 Two related but separate tools for looking at churn over time instead of a single window:
 
 - **`--velocity [DIR]`** stitches a directory of previously-exported JSON snapshots (default `./output`) into a single time-series CSV matrix (`velocity_matrix.csv`), with an optional inline terminal chart via `--terminal-plot`.
-- **`--report OUTPUT_FILE`** builds an HTML dashboard from the same snapshot directory. Two charts always render — ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope) — plus two more that render automatically whenever the loaded snapshots carry the data for them (older snapshots, or a window with zero overlap, just skip that section rather than rendering something empty):
+- **`--report OUTPUT_FILE`** builds an HTML dashboard from the same snapshot directory. Two charts always render — ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope) — plus three more that render automatically whenever the loaded snapshots carry the data for them (older snapshots, or a window with zero overlap, just skip that section rather than rendering something empty):
   - **III. KEV Lead Time Trend** — for advisories later confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition, as of each snapshot. Unlike the other charts this one plots the raw value, not a delta — it's already a point-in-time distribution stat, not a running total.
   - **IV. CVE Active TTR Distribution** — a box plot of days-since-last-modified for active CVE advisories, one box per ecosystem, from the *latest* snapshot in the loaded window only (a distribution's shape isn't something that gains meaning from being diffed across days). Shows both median (box) and mean (diamond marker) together, since Section IV's console table only ever printed the mean — which can badly misrepresent the typical case under a long right skew (e.g. npm's Active TTR (CVE) has run as much as 23x higher on mean than median, driven by a handful of ancient stragglers a mean-only number hides completely).
+  - **V. CVSS vs Blast Radius** — a scatter of every advisory with a nonzero blast radius this window, colored by ecosystem, from the latest snapshot only. Checked against the real archive before building it: CVSS and blast radius correlate near zero to slightly negative across every major ecosystem, so Section V's console ranking (top-10 by blast radius, CVSS as tiebreaker) is picking up an axis that's largely independent of severity — this makes that visible instead of implying the two move together.
 
   Respects `--from`/`--to` to scope the date range, and `--layer` to restrict which layer's archive to aggregate (defaults to `app`, matching the daily archive convention below — mixing snapshots from different layers or scopes in one chart produces meaningless collisions, so it won't do that unless you explicitly ask for a different layer).
 
 ```bash
 # Build/refresh the daily archive one day at a time (or as a comma-separated batch in one run
 # for guaranteed single-warehouse-state consistency across the whole range):
-python top10ecosystems.py --database --layer app --to 2026-09-18,2026-09-19,2026-09-20 --export
+python top10ecosystems.py --layer app --to 2026-09-18,2026-09-19,2026-09-20 --export
 
 # Then chart it:
 python top10ecosystems.py --report output/threat_landscape_report.html --from 2026-08-01 --to 2026-09-20
@@ -184,14 +184,14 @@ Cross-references a local dependency manifest against currently-mutating advisori
 | CycloneDX SBOM (JSON) | `cyclonedx_json` |
 
 ```bash
-python top10ecosystems.py --database --layer app --from 2026-04-18 --to 2026-05-28 --project-file requirements.txt
+python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28 --project-file requirements.txt
 ```
 
 ---
 
 ## 📤 Snapshot Export & Comparison
 
-`--export [PATH]` writes the current run's results to a JSON snapshot (auto-named into `./output` if no path is given). `--compare BASE.json CURRENT.json [--report OUT.html]` diffs two snapshots' leaderboards, threat profiles, and outlier pools without needing `--database` at all — pure file-to-file comparison.
+`--export [PATH]` writes the current run's results to a JSON snapshot (auto-named into `./output` if no path is given). `--compare BASE.json CURRENT.json [--report OUT.html]` diffs two snapshots' leaderboards, threat profiles, and outlier pools without needing the warehouse at all — pure file-to-file comparison.
 
 ---
 

@@ -40,6 +40,8 @@ from collections import Counter
 from cvss import CVSS2, CVSS3, CVSS4
 import requests
 
+from osv_ecosystems import clean_ecosystem_tag
+
 # Storage Routing Baselines
 DB_DIR = "database"
 DB_PATH = os.path.join(DB_DIR, "threat_stream.db")
@@ -60,32 +62,8 @@ GREEN = "\033[92m"
 RED = "\033[91m"
 RESET = "\033[0m"
 
-KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
-MASTER_TRACKS = KNOWN_CONTAINERS + KNOWN_REGISTRIES + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
 
 
-def _ecosystem_tag_matches_track(eco_lower: str, track_lower: str) -> bool:
-    """Whether a raw OSV ecosystem tag (e.g. "Debian:11") should bucket into a known track,
-    without a short track name (e.g. "Pub", "GIT", "Hex") accidentally matching as a substring
-    embedded inside an unrelated longer word. Mirrors top10ecosystems.py's own copy of this
-    helper (the two modules don't import each other). FIX: a plain `eco_lower in track_lower or
-    track_lower in eco_lower` check let "pub" (the Dart/Flutter registry track) match inside
-    "SUSE:Linux Enterprise Module for Public Cloud 12" purely because "pub" is a substring of
-    "Public" -- silently bucketing unrelated SUSE Linux packages (python-pip, python-ply, ...)
-    into the Pub/Android tracks, which then fed Section VIII's cross-registry classifier a
-    spurious "same package released to two registries" false positive (verified: 1,183 such
-    pairs in the live warehouse, all Android<->Pub, all traced back to this exact collision).
-    Requires the shorter string to appear at a token boundary in the longer one -- flanked by
-    start/end of string or a non-alphanumeric character -- rather than embedded inside a longer
-    alphanumeric word. "debian:11" still matches "debian" (boundary is the colon); "public cloud"
-    no longer matches "pub" (boundary would have to fall mid-word, on the "l" of "public")."""
-    def _boundary_match(needle, haystack):
-        if not needle:
-            return False
-        pattern = r'(?<![a-z0-9])' + re.escape(needle) + r'(?![a-z0-9])'
-        return re.search(pattern, haystack) is not None
-    return _boundary_match(eco_lower, track_lower) or _boundary_match(track_lower, eco_lower)
 
 
 # Cross-registry product-identity signal: matches "github.com/OWNER/REPO" wherever it shows up,
@@ -100,6 +78,11 @@ GITHUB_REPO_URL_REGEX = re.compile(r'github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_
 # with no visible signal that the "HIGH confidence, shared-upstream-repo" signal never had a
 # chance to fire.
 _GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github", "cvelistv5"}
+
+
+
+
+
 
 
 def extract_repo_anchor(vuln_data):
@@ -270,25 +253,44 @@ def download_master_archive():
     """Streams down the full 1GB bulk advisory archive bundle natively if missing."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     print(f"[*] Local cache archive missing. Initializing master bulk stream download (~1GB)...")
-    
+
+    # Written to a .part file and only renamed into place once verified complete. Streaming
+    # straight to LOCAL_ZIP_PATH meant an interrupted download (a killed process never reaches
+    # the except block below) left a truncated, unreadable zip sitting at the real cache path
+    # with a fresh mtime -- exactly what happened, and the old sync then trusted that mtime.
+    part_path = LOCAL_ZIP_PATH + ".part"
+    completed = False
     try:
         response = requests.get(MASTER_ZIP_URL, stream=True, timeout=120)
         response.raise_for_status()
-        
-        with open(LOCAL_ZIP_PATH, 'wb') as local_file:
+        # Content-Length is only comparable to bytes written when the body isn't transparently
+        # content-decoded on the way in.
+        expected_bytes = 0 if response.headers.get("Content-Encoding") else int(response.headers.get("Content-Length", 0) or 0)
+
+        written = 0
+        with open(part_path, 'wb') as local_file:
             chunk_count = 0
             for chunk in response.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     local_file.write(chunk)
+                    written += len(chunk)
                     chunk_count += 1
                     if chunk_count % 50 == 0:
                         print(f"    -> Transferred payload chunk: {chunk_count} MB...")
-                        
+
+        if expected_bytes and written != expected_bytes:
+            raise IOError(f"truncated download: received {written:,} of {expected_bytes:,} bytes")
+        if not zipfile.is_zipfile(part_path):
+            raise IOError("downloaded file is not a valid zip archive")
+
+        os.replace(part_path, LOCAL_ZIP_PATH)
+        completed = True
         print(f"{GREEN}[+] Download complete. Saved upstream archive payload to: {LOCAL_ZIP_PATH}{RESET}")
     except Exception as e:
         print(f"{RED}[- ] Critical master archive stream failure: {e}{RESET}")
-        if os.path.exists(LOCAL_ZIP_PATH):
-            os.remove(LOCAL_ZIP_PATH)
+    finally:
+        if not completed and os.path.exists(part_path):
+            os.remove(part_path)
 
 
 def extract_cwe_classifications(vuln_data):
@@ -441,15 +443,7 @@ def parse_osv_json(vuln_data):
                     entry_has_fix = True
 
         if eco:
-            eco_lower = eco.strip().lower()
-            hard_mappings = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
-            eco_clean = hard_mappings.get(eco_lower, None)
-            if not eco_clean:
-                for track in MASTER_TRACKS:
-                    if _ecosystem_tag_matches_track(eco_lower, track.lower()):
-                        eco_clean = track
-                        break
-            if not eco_clean: eco_clean = "Android"
+            eco_clean = clean_ecosystem_tag(eco)
             ecosystems_set.add(eco_clean)
 
             # Per-ecosystem package identity, not just the last-seen name. A single advisory's
@@ -520,6 +514,10 @@ def bootstrap_warehouse_from_zip(conn):
         print("[+] Relational catalog already populated. Skipping bootstrap seed stage.")
         return
 
+    if os.path.exists(LOCAL_ZIP_PATH) and not zipfile.is_zipfile(LOCAL_ZIP_PATH):
+        print(f"{YELLOW}[!] Cached master archive is not a valid zip (truncated download?). Discarding it and re-downloading.{RESET}")
+        os.remove(LOCAL_ZIP_PATH)
+
     if not os.path.exists(LOCAL_ZIP_PATH):
         download_master_archive()
 
@@ -563,10 +561,19 @@ def bootstrap_warehouse_from_zip(conn):
         """, vulnerabilities_batch)
         
         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        # Anchored to the freshness of the data actually loaded -- the start of the newest
+        # last_modified day in it -- not wall-clock time and not a constant. This used to record
+        # the literal "2026-04-18" no matter when the build ran, which left the sync with no
+        # usable high-water mark. Start-of-day (rather than the exact timestamp, which the table
+        # doesn't keep) deliberately over-covers: the first sync re-fetches that day, and upserts
+        # are idempotent, so the only cost is some extra API calls.
+        cursor.execute("SELECT MAX(last_modified) FROM vulnerabilities")
+        newest_day = cursor.fetchone()[0]
+        build_anchor = f"{newest_day}T00:00:00+00:00" if newest_day else now_str
         cursor.execute("""
             INSERT OR IGNORE INTO snapshots (generated_at, interval_from, interval_to, target_layer)
             VALUES (?, ?, ?, ?)
-        """, (now_str, "1970-01-01", "2026-04-18", "all"))
+        """, (now_str, "1970-01-01", build_anchor, "all"))
         
         snapshot_id = cursor.lastrowid
         metric_rows = [(snapshot_id, eco, count) for eco, count in global_leaderboard.items()]
@@ -583,95 +590,149 @@ def bootstrap_warehouse_from_zip(conn):
         print(f"{RED}[- ] Critical failure loading structural database frames: {e}{RESET}")
 
 
-def sync_incremental_window(conn):
-    """Dynamically calculates lookback windows based on relational snapshots and runs parallel syncs."""
-    cursor = conn.cursor()
-    
-    # 1. Establish the baseline interval from local zip archive state
-    if os.path.exists(LOCAL_ZIP_PATH):
-        cache_mtime = os.path.getmtime(LOCAL_ZIP_PATH)
-        cache_dt = datetime.datetime.fromtimestamp(cache_mtime, datetime.timezone.utc)
-        start_date = cache_dt - datetime.timedelta(hours=1)
-        print(f"\n[*] Dynamic Sync Engine Active.")
-        print(f"    -> Local Cache Write Time: {cache_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    else:
-        start_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-        print(f"\n{YELLOW}[!] Cache zip missing. Falling back to static 24-hour delta gate.{RESET}")
-    
-    # 2. STATE INTEGRATION: Check relational snapshots for high-water mark
-    try:
-        cursor.execute("SELECT MAX(interval_to) FROM snapshots")
-        max_snapshot_row = cursor.fetchone()
-        if max_snapshot_row and max_snapshot_row[0]:
-            raw_val = max_snapshot_row[0]
-            snapshot_dt = datetime.datetime.fromisoformat(raw_val.replace("Z", "+00:00"))
-            
-            if snapshot_dt.tzinfo is None:
-                snapshot_dt = snapshot_dt.replace(tzinfo=datetime.timezone.utc)
-            
-            if snapshot_dt > start_date:
-                start_date = snapshot_dt
-                print(f"    -> Relational High-Water Mark Found: {start_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
-    except Exception as e:
-        print(f"{YELLOW}[!] Notice: Could not process snapshot matrix tracking: {e}{RESET}")
+_LEGACY_BUILD_ANCHOR = "2026-04-18"
+SYNC_OVERLAP = datetime.timedelta(hours=1)
 
+
+def advisory_id_from_manifest_path(path: str) -> str:
+    """Extracts the advisory ID from a modified_id.csv `Ecosystem/ID` path.
+
+    Splits on the FIRST slash only and never on ':' -- real advisory IDs from Red Hat, SUSE,
+    openSUSE, Rocky, etc. contain colons themselves (RHSA-2026:1234, openSUSE-SU-2026:11976-1).
+    This used to split on the colon, which collapsed ~74K of the feed's ~2.4M rows into ~185
+    garbage "IDs" like "Red Hat/RHSA-2026" that 404 on the API and were silently dropped, so no
+    incremental sync ever refreshed any of those advisories."""
+    path = path.strip()
+    advisory_id = path.split("/", 1)[1] if "/" in path else path
+    if advisory_id.endswith(".json"):
+        advisory_id = advisory_id[:-5]
+    return advisory_id.strip()
+
+
+def resolve_sync_baseline(cursor):
+    """Returns (start_datetime_utc, source_description): where incremental sync should resume.
+
+    Anchored to the warehouse's OWN recorded high-water mark (snapshots.interval_to), never to
+    the cache zip's file mtime. A zip's mtime says when a file was last written to disk, not how
+    fresh the database built from it is: a re-downloaded or interrupted/truncated zip moves its
+    mtime forward without the database gaining anything, which silently skipped three days of
+    upstream changes (everything between the last real build and a partial download) before
+    this was changed. Overlaps by SYNC_OVERLAP so boundary rows are re-fetched, not missed --
+    upserts are idempotent, so overlap only costs a few extra API calls.
+
+    Rows whose interval_to is the legacy hardcoded placeholder (_LEGACY_BUILD_ANCHOR, written by
+    older full builds regardless of when they ran) carry no information and are ignored; a
+    database with only that row falls back to the zip's mtime (if the zip is actually valid),
+    then to 24 hours."""
+    high_water = None
+    try:
+        cursor.execute("SELECT interval_to FROM snapshots")
+        for (raw,) in cursor.fetchall():
+            if not raw or raw == _LEGACY_BUILD_ANCHOR:
+                continue
+            try:
+                parsed = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+            if high_water is None or parsed > high_water:
+                high_water = parsed
+    except sqlite3.Error:
+        pass
+
+    if high_water is not None:
+        return high_water - SYNC_OVERLAP, "relational high-water mark"
+
+    if os.path.exists(LOCAL_ZIP_PATH) and zipfile.is_zipfile(LOCAL_ZIP_PATH):
+        cache_dt = datetime.datetime.fromtimestamp(os.path.getmtime(LOCAL_ZIP_PATH), datetime.timezone.utc)
+        return cache_dt - SYNC_OVERLAP, "legacy fallback: cache zip write time (no usable high-water mark)"
+
+    return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1), "24-hour fallback (no usable high-water mark or valid cache zip)"
+
+
+def sync_incremental_window(conn):
+    """Pulls every advisory the upstream modification feed lists as changed since the warehouse's
+    recorded high-water mark and upserts it, with retries and explicit failure accounting."""
+    cursor = conn.cursor()
+
+    start_date, baseline_source = resolve_sync_baseline(cursor)
+    print(f"\n[*] Dynamic Sync Engine Active.")
+    print(f"    -> Baseline source: {baseline_source}")
     print(f"    -> Ingestion Boundary Gate: {start_date.strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
+    # Captured BEFORE the feed is fetched: anything modified after this instant is not covered by
+    # this run's feed snapshot, so it is the furthest the high-water mark can safely advance.
+    sync_started_at = datetime.datetime.now(datetime.timezone.utc)
+
     try:
-        response = requests.get(MANIFEST_URL, timeout=30)
+        response = requests.get(MANIFEST_URL, timeout=120)
         response.raise_for_status()
         reader = csv.reader(io.StringIO(response.text))
     except Exception as e:
         print(f"{RED}[- ] Failed to fetch streaming modification index: {e}{RESET}")
         return
 
-    target_ids = set()
+    target_mod_times = {}
     for row in reader:
         if not row: continue
         mod_time_str, path = row[0], row[1]
         try:
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
         except ValueError: continue
-        
+
         if mod_time >= start_date:
-            v_id = path.split(":")[0].strip() if ":" in path else path.split("/")[-1].replace(".json", "")
+            v_id = advisory_id_from_manifest_path(path)
             if v_id and v_id != "N/A":
-                target_ids.add(v_id)
-                
-    if not target_ids:
+                previous = target_mod_times.get(v_id)
+                if previous is None or mod_time > previous:
+                    target_mod_times[v_id] = mod_time
+
+    if not target_mod_times:
         print(f"{GREEN}[+] Zero late mutations detected upstream since last compilation. Warehouse completely current.{RESET}")
         return
-        
-    print(f"[+] Identified {len(target_ids):,} modern stream modifications to update.")
-    
+
+    print(f"[+] Identified {len(target_mod_times):,} modern stream modifications to update.")
+
     updates_batch = []
-    
+    unavailable_ids = []
+    failed_ids = []
+
     def fetch_vulnerability_payload(http_session, advisory_id):
-        try:
-            res = http_session.get(f"{OSV_API_URL}{advisory_id}", timeout=10)
-            if res.status_code == 200:
-                vuln_payload = res.json()
-                parsed_row = parse_osv_json(vuln_payload)
-                if parsed_row[0]:
-                    return parsed_row
-        except Exception: pass
-        return None
+        reason = "unknown"
+        for attempt in range(4):
+            try:
+                res = http_session.get(f"{OSV_API_URL}{advisory_id}", timeout=20)
+                if res.status_code == 200:
+                    parsed_row = parse_osv_json(res.json())
+                    if parsed_row[0]:
+                        return ("ok", advisory_id, parsed_row)
+                    return ("unavailable", advisory_id, None)
+                if res.status_code == 404:
+                    return ("unavailable", advisory_id, None)
+                reason = f"HTTP {res.status_code}"
+            except Exception as e:
+                reason = type(e).__name__
+            time.sleep(0.5 * (3 ** attempt))
+        return ("failed", advisory_id, reason)
 
     with requests.Session() as session:
+        session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=40, pool_maxsize=40))
         with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-            future_to_id = {
-                executor.submit(fetch_vulnerability_payload, session, v_id): v_id 
-                for v_id in sorted(target_ids)
-            }
-            
-            for idx, future in enumerate(concurrent.futures.as_completed(future_to_id), start=1):
-                if idx % 100 == 0 or idx == len(target_ids):
-                    print(f"    -> Syncing stream entries: {idx:,} / {len(target_ids):,}")
-                
-                result = future.result()
-                if result:
-                    updates_batch.append(result)
-        
+            futures = [executor.submit(fetch_vulnerability_payload, session, v_id) for v_id in sorted(target_mod_times)]
+
+            for idx, future in enumerate(concurrent.futures.as_completed(futures), start=1):
+                if idx % 1000 == 0 or idx == len(futures):
+                    print(f"    -> Syncing stream entries: {idx:,} / {len(futures):,}")
+
+                status, advisory_id, payload = future.result()
+                if status == "ok":
+                    updates_batch.append(payload)
+                elif status == "unavailable":
+                    unavailable_ids.append(advisory_id)
+                else:
+                    failed_ids.append((advisory_id, payload))
+
     if updates_batch:
         print(f"[*] Executing transactional upsert for {len(updates_batch):,} localized stream elements...")
         cursor.executemany("""
@@ -682,15 +743,32 @@ def sync_incremental_window(conn):
                 package_names_by_ecosystem, purls_by_ecosystem, repo_anchor, fixed_by_ecosystem
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, updates_batch)
-        
+
+    if unavailable_ids:
+        print(f"{YELLOW}[!] {len(unavailable_ids):,} listed advisories were unavailable from the API (404 or unparseable; e.g. "
+              f"{', '.join(unavailable_ids[:3])}). Reported but not counted as failures: these are permanent conditions, "
+              f"and holding the high-water mark for them would force every future sync to re-fetch the same window.{RESET}")
+
+    # The high-water mark must never advance past an advisory that failed to fetch, or it would
+    # never be retried: hold it just before the earliest failure so the next sync picks it up.
+    new_high_water = sync_started_at
+    if failed_ids:
+        earliest_failed = min(target_mod_times[v_id] for v_id, _ in failed_ids)
+        new_high_water = min(sync_started_at, earliest_failed - datetime.timedelta(seconds=1))
+        print(f"{RED}[- ] {len(failed_ids):,} advisories failed to fetch after retries (e.g. "
+              f"{failed_ids[0][0]}: {failed_ids[0][1]}). High-water mark held at "
+              f"{new_high_water.strftime('%Y-%m-%d %H:%M:%S')} UTC so the next sync retries them.{RESET}")
+
     try:
-        now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
         cursor.execute("""
             INSERT OR REPLACE INTO snapshots (generated_at, interval_from, interval_to, target_layer)
             VALUES (?, ?, ?, 'incremental_sync')
-        """, (now_str, start_date.isoformat(), now_str))
+        """, (datetime.datetime.now(datetime.timezone.utc).isoformat(), start_date.isoformat(), new_high_water.isoformat()))
         conn.commit()
-        print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized and anchored.{RESET}")
+        if failed_ids:
+            print(f"{YELLOW}[!] Warehouse partially synchronized: {len(updates_batch):,} upserted, {len(failed_ids):,} pending retry.{RESET}")
+        else:
+            print(f"{GREEN}[+] Relational warehouse delta stream successfully synchronized and anchored.{RESET}")
     except Exception as e:
         print(f"{RED}[- ] Failed to record execution snapshot context: {e}{RESET}")
 
