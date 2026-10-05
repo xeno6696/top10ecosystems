@@ -27,15 +27,17 @@ import argparse
 import base64
 import csv
 import datetime
+import functools
+import heapq
 import io
 import json
 import os
+import random
 import re
 import sqlite3
 import statistics
 import sys
 import time
-import zipfile
 from collections import Counter, defaultdict
 
 # Third-Party Framework Imports
@@ -47,6 +49,11 @@ import numpy as np
 import plotext as pltx
 import requests
 
+from osv_ecosystems import (
+    KNOWN_CONTAINER_ECOSYSTEMS, KNOWN_REGISTRY_ECOSYSTEMS, MASTER_TRACKS,
+    clean_ecosystem_tag, get_artifact_layer,
+)
+
 # ANSI Color Codes for Scannable Shell Output
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -54,100 +61,28 @@ YELLOW = "\033[93m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
+# The SQLite warehouse built by db_warehouse.py is the only data source -- there is no
+# file-only/ZIP-streaming mode anymore (the --database flag was removed along with it).
+DB_PATH = "database/threat_stream.db"
+
+
+def require_warehouse(db_path: str = DB_PATH) -> None:
+    """Exits with a clear message if the warehouse hasn't been built yet, instead of letting a
+    command fail deep inside a query."""
+    if not os.path.exists(db_path):
+        print(f"{RED}[-] Warehouse database not found at {db_path}. Build it first with: python db_warehouse.py{RESET}")
+        sys.exit(1)
+
 
 # ==============================================================================
 # GLOBAL METADATA & ARTIFACT ROUTING LAYER
 # ==============================================================================
 
-def get_artifact_layer(eco_name):
-    """Buckets ecosystems into their proper architectural tracking layers."""
-    container_images = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-    app_registries = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
-    if eco_name in container_images: return "Container Base Image"
-    elif eco_name in app_registries: return "App Software Registry"
-    elif eco_name == "GIT": return "Source Control (SCM)"
-    return "Global Baseline Noise"
 
 
-def extract_cvss_score(vuln_data):
-    """Parses OSV severity vectors using the official FIRST cvss library."""
-    vuln_id = vuln_data.get("id", "")
-    if vuln_id.startswith("MAL-") or "malware" in json.dumps(vuln_data).lower():
-        return 10.0
-        
-    severity_list = vuln_data.get("severity", [])
-    if not severity_list: return 0.0
-        
-    for sev in severity_list:
-        sev_type = sev.get("type", "")
-        vector_str = sev.get("score", "")
-        if not vector_str: continue
-            
-        try:
-            if sev_type == "CVSS_V3" or "CVSS:3" in vector_str:
-                return float(CVSS3(vector_str).base_score)
-            elif sev_type == "CVSS_V4" or "CVSS:4" in vector_str:
-                return float(CVSS4(vector_str).base_score)
-            elif sev_type == "CVSS_V2" or "RUSTSEC" in vuln_id:
-                return float(CVSS2(vector_str).base_score)
-        except Exception: continue
-            
-    return 0.0
 
 
-def extract_cwe_classifications(vuln_data):
-    """Extracts and normalizes all CWE identifiers across disparate upstream OSV sources. Mirrors
-    db_warehouse.py's own copy of this helper (the two modules don't import each other, matching
-    the existing extract_cvss_score / extract_production_cvss split), used by the malware-keyword
-    corroboration check below for the ZIP-fallback ingestion path in build_ghsa_ecosystem_map()."""
-    cwes = set()
 
-    db_spec = vuln_data.get("database_specific", {})
-    if isinstance(db_spec, dict):
-        for item in db_spec.get("cwe_ids", []):
-            if isinstance(item, str) and item.strip():
-                match = re.search(r"CWE-\d+", item, re.IGNORECASE)
-                if match:
-                    cwes.add(match.group(0).upper())
-
-        for item in db_spec.get("cwes", []):
-            if isinstance(item, str):
-                match = re.search(r"CWE-\d+", item, re.IGNORECASE)
-                if match:
-                    cwes.add(match.group(0).upper())
-            elif isinstance(item, dict):
-                cwe_raw = item.get("cwe_id") or item.get("id") or ""
-                match = re.search(r"CWE-\d+", str(cwe_raw), re.IGNORECASE)
-                if match:
-                    cwes.add(match.group(0).upper())
-
-    for affected in vuln_data.get("affected", []):
-        aff_spec = affected.get("database_specific", {})
-        if isinstance(aff_spec, dict):
-            for item in aff_spec.get("cwe_ids", []):
-                if isinstance(item, str) and item.strip():
-                    match = re.search(r"CWE-\d+", item, re.IGNORECASE)
-                    if match:
-                        cwes.add(match.group(0).upper())
-
-    return sorted(list(cwes))
-
-
-# Cross-registry product-identity signal: matches "github.com/OWNER/REPO" wherever it shows up,
-# either in an advisory's own reference links or embedded directly in a Go-ecosystem purl
-# (pkg:golang/github.com/OWNER/REPO...). Mirrors db_warehouse.py's own copy of this constant/
-# helper (the two modules don't import each other, matching the existing extract_cvss_score /
-# extract_production_cvss split), used by extract_repo_anchor() below for the ZIP-fallback
-# ingestion path in build_ghsa_ecosystem_map().
-GITHUB_REPO_URL_REGEX = re.compile(r'github\.com/([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+)', re.IGNORECASE)
-# "cvelistv5" is the CVE Project's own record-mirror repo (cveproject/cvelistv5) -- many
-# advisories (Chainguard's CGA-* entries especially) cite it as their only reference link instead
-# of, or alongside, the actual vulnerable project's repo. Left unskipped, it silently becomes the
-# single most common repo_anchor value in the warehouse (53.6% of all non-null anchors, verified
-# live) and degrades every one of those advisories to the weaker name-matching heuristic tiers
-# with no visible signal that the "HIGH confidence, shared-upstream-repo" signal never had a
-# chance to fire.
-_GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".github", "cvelistv5"}
 
 # Namespace prefixes that mark a MECHANICAL, unmodified repackaging of another ecosystem's
 # artifact -- not a native release. Maven's "webjars" project is the textbook example: it wraps
@@ -155,101 +90,39 @@ _GITHUB_REPO_ANCHOR_SKIP = {"advisories", "security", "security-advisories", ".g
 # This is the same pattern the user described for RHEL/Debian OS-vendor repackaging.
 _REPACKAGE_PURL_NAMESPACES = ("pkg:maven/org.webjars",)
 
-# Language/package registries (where maintainers actually publish releases) vs. OS/container image
-# vendors (which only ever re-bundle someone else's already-published code, never originate it).
-# Used by generate_enterprise_threat_leaderboard()'s own layer routing AND by Section VIII-C's
-# presence grid to mark which columns could plausibly be "where the fix ships first" -- a
-# container-ecosystem column can never be that, by definition, so it's never highlighted.
-_KNOWN_CONTAINER_ECOSYSTEMS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-_KNOWN_REGISTRY_ECOSYSTEMS = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 
 
-def _ecosystem_tag_matches_track(eco_lower: str, track_lower: str) -> bool:
-    """Whether a raw OSV ecosystem tag (e.g. "Debian:11") should bucket into a known track,
-    without a short track name (e.g. "Pub", "GIT", "Hex") accidentally matching as a substring
-    embedded inside an unrelated longer word. FIX: a plain `eco_lower in track_lower or
-    track_lower in eco_lower` check let "pub" (the Dart/Flutter registry track) match inside
-    "SUSE:Linux Enterprise Module for Public Cloud 12" purely because "pub" is a substring of
-    "Public" -- silently bucketing unrelated SUSE Linux packages (python-pip, python-ply, ...)
-    into the Pub/Android tracks, which then fed Section VIII's cross-registry classifier a
-    spurious "same package released to two registries" false positive (verified: 1,183 such
-    pairs in the live warehouse, all Android<->Pub, all traced back to this exact collision).
-    Requires the shorter string to appear at a token boundary in the longer one -- flanked by
-    start/end of string or a non-alphanumeric character -- rather than embedded inside a longer
-    alphanumeric word. "debian:11" still matches "debian" (boundary is the colon); "public cloud"
-    no longer matches "pub" (boundary would have to fall mid-word, on the "l" of "public")."""
-    def _boundary_match(needle, haystack):
-        if not needle:
-            return False
-        pattern = r'(?<![a-z0-9])' + re.escape(needle) + r'(?![a-z0-9])'
-        return re.search(pattern, haystack) is not None
-    return _boundary_match(eco_lower, track_lower) or _boundary_match(track_lower, eco_lower)
 
 
-_MASTER_TRACKS = _KNOWN_CONTAINER_ECOSYSTEMS + _KNOWN_REGISTRY_ECOSYSTEMS + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
-_ECO_HARD_MAPPINGS = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
 
 
-def _clean_ecosystem_tag(eco_raw: str) -> str:
-    """Buckets a raw OSV ecosystem tag (e.g. "maven", "Debian:11") into its canonical track name
-    (e.g. "Maven (Java)", "Debian") -- the same hard-mapping + boundary-aware substring match this
-    file used to duplicate inline in two places (and db_warehouse.py's parse_osv_json duplicates
-    as its own mirrored copy, per the usual cross-module convention).
-
-    FIX (Section VIII data-flow audit): a THIRD copy of this same bucketing was needed in
-    build_ghsa_ecosystem_map() below, which instead keyed its per-ecosystem dicts
-    (names_by_eco/purls_by_eco/fixed_by_eco) by the raw, uncleaned tag -- e.g. "Go" and "Maven"
-    rather than "Go (Golang)" and "Maven (Java)". Since Section VIII's classifier
-    (classify_advisory_cross_registry_evidence) and its registry/container gate
-    (_KNOWN_REGISTRY_ECOSYSTEMS/_KNOWN_CONTAINER_ECOSYSTEMS) both key and check against the
-    CANONICAL names, the ZIP-streaming fallback path (--database omitted) silently produced
-    wrong Section VIII output for any advisory touching an ecosystem whose raw tag differs from
-    its canonical name: a genuine same-project Go+Maven release was invisible (false negative,
-    verified with a synthetic advisory), and raw container-version tags that never collapse
-    together (e.g. "Debian:11" and "Debian:12" staying as two distinct "ecosystems" instead of
-    both bucketing to "Debian") could leak nonsense multi-version-of-one-distro rows into VIII-B.
-    Rather than adding a fourth near-identical copy of this logic to fix that call site, it's
-    consolidated here so the three in-file call sites (and any future one) can't drift apart the
-    way the boolean/evidence Section VIII classifiers already did once (see
-    classify_advisory_cross_registry's docstring)."""
-    eco_lower = eco_raw.strip().lower()
-    eco_clean = _ECO_HARD_MAPPINGS.get(eco_lower, None)
-    if not eco_clean:
-        for track in _MASTER_TRACKS:
-            if _ecosystem_tag_matches_track(eco_lower, track.lower()):
-                eco_clean = track
-                break
-    return eco_clean or "Android"
 
 
-def extract_repo_anchor(vuln_data):
-    """Derives a canonical 'owner/repo' identity string for an advisory (see db_warehouse.py's
-    identical helper for the full rationale). Used by the Section VIII cross-registry
-    classification to recognize a genuinely multi-ecosystem NATIVE release of the same upstream
-    project, as distinct from one ecosystem mechanically vendoring another's code as-is."""
-    candidates = Counter()
 
-    for ref in vuln_data.get("references", []):
-        url = ref.get("url", "") or ""
-        m = GITHUB_REPO_URL_REGEX.search(url)
-        if m:
-            owner, repo = m.group(1).lower(), re.sub(r'\.git$', '', m.group(2), flags=re.IGNORECASE).lower()
-            if repo in _GITHUB_REPO_ANCHOR_SKIP:
-                continue
-            candidates[f"{owner}/{repo}"] += 1
 
-    for affected in vuln_data.get("affected", []):
-        purl = affected.get("package", {}).get("purl", "") or ""
-        m = GITHUB_REPO_URL_REGEX.search(purl)
-        if m:
-            owner, repo = m.group(1).lower(), re.sub(r'\.git$', '', m.group(2), flags=re.IGNORECASE).lower()
-            if repo in _GITHUB_REPO_ANCHOR_SKIP:
-                continue
-            candidates[f"{owner}/{repo}"] += 2
+def parse_stream_path(path: str):
+    """Splits a modified_id.csv path into (advisory_id, ecosystem_prefix_or_None).
 
-    if not candidates:
-        return None
-    return candidates.most_common(1)[0][0]
+    Real rows are "Ecosystem/ID" (the prefix names the ecosystem) or, rarely, a bare ID. The ID
+    itself may contain colons -- Red Hat, SUSE, openSUSE and Rocky advisories do
+    ("Red Hat/RHSA-2026:1234") -- so this only ever splits on "/". It used to treat any path with
+    a colon as a legacy "ID:ecosystem" form, which turned those ~74K rows into an advisory ID like
+    "Red Hat/RHSA-2026" and a bogus ecosystem like "1234" (~29K distinct garbage tags, all
+    silently bucketed into the "Android" catch-all, each costing a full scan of every track). That
+    legacy form never appears in the real feed (0 of 2.4M rows)."""
+    parts = path.split("/")
+    advisory_id = parts[-1].replace(".json", "")
+    if len(parts) == 1 or parts[0].lower() in ("root", ""):
+        return advisory_id, None
+    return advisory_id, parts[0]
+
+
+def _sorted_project_alerts(alerts) -> list:
+    """Project-manifest alerts, deduplicated and in a stable order: package name, then advisory ID.
+    This used to be sorted(list(set(alerts)), key=package_name) -- a set's iteration order isn't
+    stable across processes (string hashing is randomized per run), so advisories sharing a
+    package name (e.g. several for "requests") printed in a different order every run."""
+    return sorted(set(alerts), key=lambda alert: (alert[1], alert[0]))
 
 
 def normalize_package_token(name: str) -> str:
@@ -376,11 +249,11 @@ def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, 
             # ecosystem pair with no registry/container awareness at all). Verified live: 1,183
             # spurious pairs currently exist where a SUSE Linux package got mistagged into the
             # Android/Pub buckets via the ecosystem-tag substring bug (see
-            # _ecosystem_tag_matches_track) and then matched itself across those two bogus
+            # ecosystem_tag_matches_track) and then matched itself across those two bogus
             # buckets as an "exact name match" cross_compiled release. "repackaged" is left
             # unrestricted -- a registry-vs-container pair (Debian repackaging an npm library) is
             # exactly VIII-B's documented RHEL/Debian-style use case, not a bug to filter out.
-            both_registries = eco_a in _KNOWN_REGISTRY_ECOSYSTEMS and eco_b in _KNOWN_REGISTRY_ECOSYSTEMS
+            both_registries = eco_a in KNOWN_REGISTRY_ECOSYSTEMS and eco_b in KNOWN_REGISTRY_ECOSYSTEMS
             names_a = package_names_by_ecosystem.get(eco_a) or []
             names_b = package_names_by_ecosystem.get(eco_b) or []
             purls_a = (purls_by_ecosystem or {}).get(eco_a) or []
@@ -406,27 +279,6 @@ def classify_advisory_cross_registry_evidence(package_names_by_ecosystem: dict, 
     return best_cross_compiled, best_repackaged
 
 
-def run_data_health_check(id_to_meta):
-    """Audits the GHSA lookup index for structural integrity."""
-    malformed_count = 0
-    health_log = []
-    
-    for vuln_id, data in id_to_meta.items():
-        if not vuln_id or vuln_id == "N/A":
-            malformed_count += 1
-            health_log.append(f"Missing/Malformed ID: {data}")
-            continue
-            
-        if not data.get("ecosystems"):
-            health_log.append(f"Missing Ecosystem tag: {vuln_id}")
-            malformed_count += 1
-            
-    if malformed_count > 0:
-        print(f"\n{RED}[!] DATA HEALTH WARNING: {malformed_count} malformed records detected in the OSV index.{RESET}")
-        for entry in health_log[:5]:
-            print(f"    -> {entry}")
-    else:
-        print(f"[+] Data Health Check Passed: {len(id_to_meta):,} records verified.")
 
 
 # ==============================================================================
@@ -544,160 +396,41 @@ def auto_sniff_manifest_strategy(file_path: str) -> str:
 # DATABASE COMPILATION ENGINE
 # ==============================================================================
 
-def build_ghsa_ecosystem_map(cache_dir: str = "./cache", cache_expiry_hours: int = 24):
-    master_zip_url = "https://storage.googleapis.com/osv-vulnerabilities/all.zip"
-    os.makedirs(cache_dir, exist_ok=True)
-    local_zip_path = os.path.join(cache_dir, "osv_master_all.zip")
-    should_download = True
-    
-    if os.path.exists(local_zip_path):
-        file_age_hours = (time.time() - os.path.getmtime(local_zip_path)) / 3600
-        if file_age_hours < cache_expiry_hours:
-            print(f"[+] Found fresh local cache: {local_zip_path} (Age: {file_age_hours:.1f} hours). Skipping download.")
-            should_download = False
+def hydrate_lookup_details(ghsa_lookup: dict, advisory_ids, db_path: str = DB_PATH) -> int:
+    """Fills in the heavy per-advisory detail fields -- vulnerable_versions (a set),
+    package_names_by_ecosystem, purls_by_ecosystem, repo_anchor, fixed_by_ecosystem -- for just
+    the given advisory IDs, in place, and returns how many entries it hydrated.
 
-    if should_download:
-        print(f"[*] Downloading master database archive from OSV (~1GB)...")
-        try:
-            response = requests.get(master_zip_url, stream=True, timeout=120)
-            response.raise_for_status()
-            with open(local_zip_path, 'wb') as local_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk: local_file.write(chunk)
-            print(f"[+] Download complete. Saved to: {local_zip_path}")
-        except Exception as e:
-            print(f"[-] Download failed: {e}")
-            if not os.path.exists(local_zip_path): return {}
-
-    print("[*] Building global advisory memory index & profiling threat lifecycle states...")
-    id_to_meta = {}
+    build_ghsa_from_db() deliberately leaves these out: parsing them for every one of ~2M
+    advisories dominated its runtime and memory, yet only Section VIII (the advisories seen in the
+    current window) and project-manifest matching ever read them. Idempotent: an entry that
+    already carries "repo_anchor" (even as None) is skipped. IDs absent from the lookup or from
+    the warehouse are ignored. Mutates entries in place, which is safe for the lookup-identity
+    caches (_get_or_build_absolute_ranks, _get_or_build_ecosystem_index) because they depend only
+    on the light fields, which this never touches."""
+    pending = [vid for vid in advisory_ids if vid in ghsa_lookup and "repo_anchor" not in ghsa_lookup[vid]]
+    if not pending:
+        return 0
+    conn = sqlite3.connect(db_path)
+    hydrated = 0
     try:
-        with zipfile.ZipFile(local_zip_path) as z:
-            for file_name in z.namelist():
-                if file_name.endswith('.json'):
-                    with z.open(file_name) as f:
-                        try:
-                            vuln_data = json.load(f)
-                            if "withdrawn" in vuln_data: continue
-                            vuln_id = vuln_data.get("id", "")
-                            ecosystems = set()
-                            has_fixes = False
-                            is_malware = False
-                            p_name = "N/A"
-                            vuln_versions = set() 
-                            
-                            if vuln_id.startswith("MAL-") or "malicious" in file_name.lower(): is_malware = True
-                            summary = vuln_data.get("summary", "").lower()
-                            details = vuln_data.get("details", "").lower()
-                            # FIX: see db_warehouse.py's parse_osv_json for the full rationale --
-                            # a bare keyword substring match false-positives on real vulnerabilities
-                            # that merely mention this vocabulary as subject matter (e.g. a malware
-                            # *scanner*'s own bug, or a privilege-escalation bug that enables
-                            # "backdoor" accounts). Only trust the keyword match when the
-                            # advisory's own CWEs corroborate it (CWE-506 Embedded Malicious Code,
-                            # or no CWE assigned at all).
-                            keyword_hit = "backdoor" in summary or "typosquat" in summary or "malicious package" in summary
-                            if keyword_hit:
-                                cwe_list_check = extract_cwe_classifications(vuln_data)
-                                if not cwe_list_check or "CWE-506" in cwe_list_check:
-                                    is_malware = True
-
-                            max_versions_found = 0
-                            names_by_eco = {}
-                            purls_by_eco = {}
-                            fixed_by_eco = {}
-                            for affected in vuln_data.get("affected", []):
-                                pkg_block = affected.get("package", {})
-                                eco = pkg_block.get("ecosystem")
-                                name = pkg_block.get("name")
-                                purl = pkg_block.get("purl")
-                                if eco: ecosystems.add(eco)
-                                if name: p_name = name.strip()
-                                for v in affected.get("versions", []): vuln_versions.add(str(v).strip())
-                                v_len = len(affected.get("versions", []))
-                                if v_len > max_versions_found: max_versions_found = v_len
-                                # entry_has_fix mirrors db_warehouse.py's parse_osv_json: scoped to
-                                # just this affected[] block (one ecosystem), not OR'd across the
-                                # whole advisory like has_fixes below -- see that function's comment
-                                # for why the whole-advisory flag can't tell ecosystems apart.
-                                entry_has_fix = False
-                                for ranges in affected.get("ranges", []):
-                                    for events in ranges.get("events", []):
-                                        if "fixed" in events:
-                                            has_fixes = True
-                                            entry_has_fix = True
-                                # Per-ecosystem package identity (see db_warehouse.py's parse_osv_json
-                                # for the full rationale). FIX (Section VIII data-flow audit): this
-                                # used to key these three dicts by the raw, uncleaned `eco` tag (e.g.
-                                # "Go", "Maven") -- a structurally different shape than --database
-                                # mode's parse_osv_json produces (canonical "Go (Golang)", "Maven
-                                # (Java)"), even though Section VIII's classifier and its registry/
-                                # container gate both key and check against the canonical names.
-                                # That silently broke Section VIII for the ZIP-streaming fallback
-                                # path: a genuine same-project Go+Maven release was invisible (raw
-                                # tags never matched _KNOWN_REGISTRY_ECOSYSTEMS), and raw container-
-                                # version tags that never collapse together (e.g. "Debian:11" vs
-                                # "Debian:12" staying as two distinct "ecosystems" instead of both
-                                # bucketing to "Debian") could leak nonsense multi-version-of-one-
-                                # distro rows into VIII-B. Now keyed by the same _clean_ecosystem_tag
-                                # bucketing --database mode uses, so the two paths agree.
-                                eco_clean = _clean_ecosystem_tag(eco) if eco else None
-                                if eco_clean and name:
-                                    clean_name = name.strip()
-                                    bucket = names_by_eco.setdefault(eco_clean, [])
-                                    if clean_name and clean_name not in bucket:
-                                        bucket.append(clean_name)
-                                if eco_clean and purl:
-                                    bucket = purls_by_eco.setdefault(eco_clean, [])
-                                    if purl not in bucket:
-                                        bucket.append(purl)
-                                if eco_clean:
-                                    fixed_by_eco[eco_clean] = fixed_by_eco.get(eco_clean, False) or entry_has_fix
-                            
-                            published_str = vuln_data.get("published", "1970-01-01T00:00:00Z")
-                            modified_str = vuln_data.get("modified", "1970-01-01T00:00:00Z")
-                            dwell_days = 0.0
-                            try:
-                                p_dt = datetime.datetime.fromisoformat(published_str.replace("Z", "+00:00"))
-                                m_dt = datetime.datetime.fromisoformat(modified_str.replace("Z", "+00:00"))
-                                dwell_days = max(0.0, (m_dt - p_dt).days)
-                            except ValueError: pass
-
-                            # ARCHITECTURAL FIX: Use native datetime object date matching
-                            is_new_entry = (p_dt.date() == m_dt.date())
-                            
-                            malware_vector = "Unclassified Malicious Payload"
-                            if is_malware:
-                                if "typosquat" in summary or "typosquat" in details: malware_vector = "Typosquatting / Brand Hijacking"
-                                elif "dependency confusion" in summary or "dependency confusion" in details: malware_vector = "Dependency Confusion Campaign"
-                                elif any(x in summary or x in details for x in ["exfiltrat", "token", "credential", "steal"]): malware_vector = "Data Exfiltration / Credential Stealer"
-                                elif any(x in summary or x in details for x in ["reverse shell", "backdoor", "remote code"]): malware_vector = "Persistent Backdoor / Execution Shell"
-
-                            if is_malware: classification = "Malware (New Entry)" if is_new_entry else "Malware (Incremental Update)"
-                            elif has_fixes: classification = "Vulnerability Fix (New Entry)" if is_new_entry else "Vulnerability Fix (Update)"
-                            else: classification = "Metadata Correction / Adjustments"
-
-                            if vuln_id and ecosystems:
-                                id_to_meta[vuln_id] = {
-                                    "ecosystems": list(ecosystems),
-                                    "package_name": p_name,
-                                    "type": classification,
-                                    "vector": malware_vector,
-                                    "dwell_days": dwell_days,
-                                    "blast_radius": max_versions_found,
-                                    "vulnerable_versions": vuln_versions,
-                                    "cvss_score": extract_cvss_score(vuln_data),
-                                    "last_modified": modified_str[:10],
-                                    "package_names_by_ecosystem": names_by_eco,
-                                    "purls_by_ecosystem": purls_by_eco,
-                                    "repo_anchor": extract_repo_anchor(vuln_data),
-                                    "fixed_by_ecosystem": fixed_by_eco
-                                }
-                        except json.JSONDecodeError: continue 
-        print(f"[+] Successfully indexed {len(id_to_meta):,} global advisory mappings.")
-    except Exception as e:
-        print(f"[-] Failed to read master archive: {e}")
-    return id_to_meta
+        for i in range(0, len(pending), 500):
+            chunk = pending[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            for vid, versions_json, names_json, purls_json, repo_anchor, fixed_json in conn.execute(
+                f"SELECT advisory_id, vulnerable_versions, package_names_by_ecosystem, purls_by_ecosystem, "
+                f"repo_anchor, fixed_by_ecosystem FROM vulnerabilities WHERE advisory_id IN ({placeholders})", chunk
+            ):
+                entry = ghsa_lookup[vid]
+                entry["vulnerable_versions"] = set(json.loads(versions_json)) if versions_json else set()
+                entry["package_names_by_ecosystem"] = json.loads(names_json) if names_json else {}
+                entry["purls_by_ecosystem"] = json.loads(purls_json) if purls_json else {}
+                entry["repo_anchor"] = repo_anchor
+                entry["fixed_by_ecosystem"] = json.loads(fixed_json) if fixed_json else {}
+                hydrated += 1
+    finally:
+        conn.close()
+    return hydrated
 
 
 def _priority_sort_key(entry: dict, id_val: str, priority_sort_mode="default"):
@@ -739,6 +472,52 @@ def _priority_sort_key(entry: dict, id_val: str, priority_sort_mode="default"):
     return (kev_hit, -epss, -cvss, -radius, id_val)
 
 
+_ecosystem_index_cache = {"ghsa_lookup": None, "index": None}
+
+
+def _get_or_build_ecosystem_index(ghsa_lookup: dict) -> dict:
+    """One pass over the lookup -> {lowercased ecosystem name: [advisory IDs, in lookup order]}.
+
+    Sections IV and VII each need "the top 10 advisories for ecosystem E" once per active
+    ecosystem. They used to rescan all ~2M lookup entries per ecosystem (a dozen full passes each,
+    copying every match into a fresh dict only to keep ten). This builds the grouping once and is
+    shared by both sections. Memoized on the lookup object itself under the same assumption as
+    _get_or_build_absolute_ranks: ghsa_lookup is never mutated in place."""
+    if _ecosystem_index_cache["ghsa_lookup"] is ghsa_lookup:
+        return _ecosystem_index_cache["index"]
+    index = defaultdict(list)
+    for vuln_id, meta in ghsa_lookup.items():
+        if not (isinstance(vuln_id, str) and vuln_id.strip()):
+            continue
+        for key in {raw_eco.lower() for raw_eco in meta.get('ecosystems', [])}:
+            index[key].append(vuln_id)
+    _ecosystem_index_cache["ghsa_lookup"] = ghsa_lookup
+    _ecosystem_index_cache["index"] = index
+    return index
+
+
+def _top_records_for_ecosystem(ghsa_lookup: dict, eco: str, sort_key, n: int = 10) -> list:
+    """The n best advisories for an ecosystem as (advisory_id, meta) pairs; sort_key(advisory_id,
+    meta) -> comparable. Same selection as sorting every matching record and slicing [:n],
+    including how ties resolve (lookup order): heapq.nsmallest is documented as equivalent to
+    sorted(...)[:n]. An advisory belongs to an ecosystem if any of its ecosystem names is a
+    substring of the ecosystem's lowercased name -- the original membership rule, kept as-is."""
+    index = _get_or_build_ecosystem_index(ghsa_lookup)
+    eco_lower = eco.lower()
+    matching = [ids for key, ids in index.items() if key in eco_lower]
+    if not matching:
+        return []
+    if len(matching) == 1:
+        candidates = matching[0]
+    else:
+        # An advisory matched through several of its ecosystem names must appear once, and ties
+        # must still resolve in lookup order, so restore that order explicitly.
+        position = {vuln_id: i for i, vuln_id in enumerate(ghsa_lookup)}
+        candidates = sorted({vid for ids in matching for vid in ids}, key=position.__getitem__)
+    best = heapq.nsmallest(n, candidates, key=lambda vid: sort_key(vid, ghsa_lookup[vid]))
+    return [(vid, ghsa_lookup[vid]) for vid in best]
+
+
 _absolute_rank_cache = {"ghsa_lookup": None, "priority_sort_mode": None, "global_absolute_ranks": None, "eco_absolute_ranks": None}
 
 
@@ -776,7 +555,7 @@ def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_mode="default"
     ecosystem_archive_buckets = defaultdict(list)
     for advisory_id, advisory_data in ghsa_lookup.items():
         for raw_eco in advisory_data.get("ecosystems", []):
-            eco_clean = _clean_ecosystem_tag(raw_eco)
+            eco_clean = clean_ecosystem_tag(raw_eco)
             ecosystem_archive_buckets[eco_clean].append((advisory_id, advisory_data))
 
     eco_absolute_ranks = {}
@@ -791,19 +570,25 @@ def _get_or_build_absolute_ranks(ghsa_lookup: dict, priority_sort_mode="default"
     return global_absolute_ranks, eco_absolute_ranks
 
 
-def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_registries: list = None, *, priority_sort: bool = False) -> dict:
-    """Queries the local SQLite warehouse to build a legacy-compatible memory lookup map.
+def build_ghsa_from_db(db_path: str = DB_PATH, target_registries: list = None, *, priority_sort: bool = False) -> dict:
+    """Queries the local SQLite warehouse to build the in-memory advisory lookup map.
 
     priority_sort=False (default): identical query/behavior to before this
     flag existed -- no join, no new dict keys, zero risk to existing output.
     priority_sort=True: additionally LEFT JOINs epss_scores/kev_catalog on
     cve_alias, adding epss_score/epss_percentile/kev_date_added/kev_due_date
     to each entry for the ranking sites that opt into _priority_sort_key().
+
+    A missing or unreadable warehouse is a hard error. This used to silently fall back to
+    streaming the ~2.6GB master ZIP instead -- a second ingestion path with its own copy of the
+    classification logic that quietly produced different data, which is how several bugs hid.
     """
     id_to_meta = {}
     if not os.path.exists(db_path):
-        return build_ghsa_ecosystem_map()
-        
+        raise FileNotFoundError(
+            f"Warehouse database not found at {db_path}. Build it first with: python db_warehouse.py"
+        )
+
     filter_set = {r.strip().lower() for r in target_registries} if target_registries else None
     print(f"[*] Extracting global context from SQLite warehouse: {db_path}...")
     if filter_set:
@@ -815,54 +600,35 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
 
-        # BACKWARD COMPAT: package_names_by_ecosystem/purls_by_ecosystem/repo_anchor (Section VIII
-        # cross-registry rework) and fixed_by_ecosystem (Section VIII-C fix-status grid) are both
-        # additive columns from later schema migrations. A warehouse that hasn't been re-ingested
-        # since either migration still gets the columns via ALTER TABLE (see db_warehouse.py's
-        # init_database), but the values are NULL until --rebuild re-ingests -- so each is only
-        # selected when actually present, rather than crashing on an older physical file.
-        cursor.execute("PRAGMA table_info(vulnerabilities)")
-        available_cols = {row[1] for row in cursor.fetchall()}
-        has_cross_registry_cols = {"package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"} <= available_cols
-        has_fixed_by_eco_col = "fixed_by_ecosystem" in available_cols
-
-        extra_cols = []
-        if has_cross_registry_cols:
-            extra_cols += ["package_names_by_ecosystem", "purls_by_ecosystem", "repo_anchor"]
-        if has_fixed_by_eco_col:
-            extra_cols.append("fixed_by_ecosystem")
-
+        # Only the "light" columns that every consumer of the lookup needs are loaded here. The
+        # heavy per-advisory JSON detail (affected-version sets, per-ecosystem package names and
+        # purls, repo anchor, fix status) used to be parsed for all ~2M rows on every run -- the
+        # bulk of this function's time and memory -- but is only ever read for the handful of
+        # advisories in a given window (Section VIII) or matching a project manifest. See
+        # hydrate_lookup_details(), which fills those in on demand for just the IDs that need them.
         if priority_sort:
-            extra_select = "".join(f", v.{c}" for c in extra_cols)
-            cursor.execute(f"""
+            cursor.execute("""
                 SELECT v.advisory_id, v.package_name, v.cvss_score, v.blast_radius, v.threat_profile,
-                       v.ecosystems, v.last_modified, v.malware_vector, v.vulnerable_versions, v.dwell_days,
-                       e.epss_score, e.percentile, k.date_added, k.due_date{extra_select}
+                       v.ecosystems, v.last_modified, v.malware_vector, v.dwell_days,
+                       e.epss_score, e.percentile, k.date_added, k.due_date
                 FROM vulnerabilities v
                 LEFT JOIN epss_scores e ON v.cve_alias = e.cve_id
                 LEFT JOIN kev_catalog k ON v.cve_alias = k.cve_id
             """)
         else:
-            extra_select = "".join(f", {c}" for c in extra_cols)
-            cursor.execute(f"""
-                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile, ecosystems, last_modified, malware_vector, vulnerable_versions, dwell_days{extra_select}
+            cursor.execute("""
+                SELECT advisory_id, package_name, cvss_score, blast_radius, threat_profile,
+                       ecosystems, last_modified, malware_vector, dwell_days
                 FROM vulnerabilities
             """)
 
-        for row in cursor.fetchall():
-            row = list(row)
-            names_by_eco_json = purls_by_eco_json = repo_anchor = fixed_by_eco_json = None
-            if has_fixed_by_eco_col:
-                fixed_by_eco_json = row[-1]
-                row = row[:-1]
-            if has_cross_registry_cols:
-                names_by_eco_json, purls_by_eco_json, repo_anchor = row[-3], row[-2], row[-1]
-                row = row[:-3]
-
+        # Iterated, not fetchall()'d: don't hold ~2M raw row tuples in memory alongside the dict
+        # being built from them.
+        for row in cursor:
             if priority_sort:
-                v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days, epss_score, epss_pct, kev_added, kev_due = row
+                v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, dwell_days, epss_score, epss_pct, kev_added, kev_due = row
             else:
-                v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, v_versions_json, dwell_days = row
+                v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, dwell_days = row
             ecosystems_list = json.loads(ecos_json) if ecos_json else ["Android"]
 
             # PERFORMANCE WIN: Early rejection exit prior to heavy allocations
@@ -870,7 +636,6 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
                 if not any(e.lower() in filter_set for e in ecosystems_list):
                     continue
 
-            version_set = set(json.loads(v_versions_json)) if v_versions_json else set()
             meta_entry = {
                 "ecosystems": ecosystems_list,
                 "package_name": p_name,
@@ -878,13 +643,8 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
                 "vector": m_vector,
                 "dwell_days": dwell_days,
                 "blast_radius": radius,
-                "vulnerable_versions": version_set,
                 "cvss_score": cvss,
                 "last_modified": last_mod,
-                "package_names_by_ecosystem": json.loads(names_by_eco_json) if names_by_eco_json else {},
-                "purls_by_ecosystem": json.loads(purls_by_eco_json) if purls_by_eco_json else {},
-                "repo_anchor": repo_anchor,
-                "fixed_by_ecosystem": json.loads(fixed_by_eco_json) if fixed_by_eco_json else {}
             }
             if priority_sort:
                 meta_entry["epss_score"] = epss_score
@@ -895,9 +655,8 @@ def build_ghsa_from_db(db_path: str = "database/threat_stream.db", target_regist
         conn.close()
         print(f"[+] Successfully loaded {len(id_to_meta):,} records out of the SQLite warehouse index.")
     except Exception as e:
-        print(f"[- ] Relational warehouse extraction failure: {e}. Falling back to ZIP.")
-        return build_ghsa_ecosystem_map()
-        
+        raise RuntimeError(f"Relational warehouse extraction failure from {db_path}: {e}") from e
+
     return id_to_meta
 
 
@@ -953,15 +712,10 @@ def print_section_iv_threat_metabolism(active_matrix_ecosystems, spatial_dwell_m
         raw_avg_c = sum(c_list)/len(c_list) if c_list else 0.0
         raw_avg_r = sum(r_list)/len(r_list) if r_list else 0.0
         
-        valid_eco_records = []
-        eco_lower_matrix = eco.lower()
-        for vuln_id, meta in ghsa_lookup.items():
-            if any(raw_eco.lower() in eco_lower_matrix for raw_eco in meta.get('ecosystems', [])) and isinstance(vuln_id, str) and vuln_id.strip():
-                meta_with_id = meta.copy()
-                meta_with_id['injected_id'] = vuln_id
-                valid_eco_records.append(meta_with_id)
-
-        static_top_10 = sorted(valid_eco_records, key=lambda x: (-x['cvss_score'], -x['blast_radius']))[:10]
+        static_top_10 = [
+            {**meta, 'injected_id': vuln_id}
+            for vuln_id, meta in _top_records_for_ecosystem(ghsa_lookup, eco, lambda vid, meta: (-meta['cvss_score'], -meta['blast_radius']))
+        ]
         backlog_ages = []
         for vuln in static_top_10:
             last_mod_str = vuln.get('last_modified', '1970-01-01')
@@ -1255,18 +1009,11 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
             print(f"{'Static Risk Position Matrix':<52} | {'Artifact Name':<30} | {'Last Active'}")
         print("-" * divider_width)
 
-        valid_eco_records = []
-        eco_lower_def = eco.lower()
-        for vuln_id, meta in ghsa_lookup.items():
-            if any(raw_eco.lower() in eco_lower_def for raw_eco in meta.get('ecosystems', [])) and isinstance(vuln_id, str) and vuln_id.strip():
-                meta_with_id = meta.copy()
-                meta_with_id['injected_id'] = vuln_id
-                valid_eco_records.append(meta_with_id)
-
-        static_top_10 = sorted(
-            valid_eco_records,
-            key=lambda x: _priority_sort_key(x, x['injected_id'], priority_sort_mode)
-        )[:10]
+        static_top_10 = [
+            {**meta, 'injected_id': vuln_id}
+            for vuln_id, meta in _top_records_for_ecosystem(
+                ghsa_lookup, eco, lambda vid, meta: _priority_sort_key(meta, vid, priority_sort_mode))
+        ]
 
         for rank, vuln in enumerate(static_top_10, start=1):
             v_id = vuln['injected_id']
@@ -1443,11 +1190,10 @@ def _compute_kev_lead_time_stats(db_path: str, session_advisory_ids: set) -> dic
     before our earliest published_date, which can happen for a record OSV has since rewritten)
     are excluded for the same reason: they don't represent a real lookback distance.
 
-    Returns None if there's no KEV overlap in scope (including if db_path is falsy/missing --
-    this is DB-only, same constraint as Section VIII-C), else {"mean_days", "median_days",
+    Returns None if there's no KEV overlap in scope, else {"mean_days", "median_days",
     "sample_count"}.
     """
-    if not session_advisory_ids or not db_path or not os.path.exists(db_path):
+    if not session_advisory_ids:
         return None
 
     conn = sqlite3.connect(db_path)
@@ -1585,7 +1331,7 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
         else:
             text = "F" if fixed_status[eco] else "U"
         padded = f"{text:<{col_width}}"
-        if is_present and eco in _KNOWN_REGISTRY_ECOSYSTEMS:
+        if is_present and eco in KNOWN_REGISTRY_ECOSYSTEMS:
             padded = f"{RED}{padded}{RESET}"
         return f"| {padded} "
 
@@ -1612,7 +1358,7 @@ def _fix_status_tag(fixed_by_eco: dict, eco: str) -> str:
     return "F" if fixed_by_eco[eco] else "U"
 
 
-def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_available: bool, qualifying_count: int, cve_correlation_rows: list):
+def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: int, cve_correlation_rows: list):
     """Renders Section VIII as three sub-tables answering one question -- is this vulnerability
     actually the same thing being counted more than once -- at two different scopes:
       A, B: WITHIN one advisory's own package listing (see rank_cross_registry_tables) -- is a
@@ -1644,7 +1390,7 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
         (cve_id, record_count, ecosystems, fixed_status)
         for cve_id, eco_count, record_count, ecosystems, fixed_status in cve_correlation_rows
     ]
-    grid_lines = _render_cross_ecosystem_grid(c_grid_rows) if (cve_correlation_available and cve_correlation_rows) else []
+    grid_lines = _render_cross_ecosystem_grid(c_grid_rows) if cve_correlation_rows else []
     box_width = max([125] + [_visible_length(l) for l in grid_lines] + [_visible_length(l) for l in a_grid_lines])
 
     print("\n" + "="*box_width)
@@ -1702,23 +1448,19 @@ def print_section_viii_identity_correlation(table_a, table_b, cve_correlation_av
     print()
     print("-" * box_width)
     print(f"  {BOLD}VIII-C. CROSS-TRACKER CVE CORRELATION (same CVE, independently-tracked advisory records){RESET}")
-    if not cve_correlation_available:
-        print("-" * box_width)
-        print("  [+] Requires --database (needs a table-wide query with no cheap non-database equivalent).")
+    print("  [!] Coverage floor: ~8.3% of tracked advisories carry a resolvable CVE ID -- absence")
+    print("      here means untraceable, not necessarily isolated.")
+    print("-" * box_width)
+    if not cve_correlation_rows:
+        print("  [+] This window: 0 CVEs confirmed to span 2+ independently-tracked ecosystems.")
     else:
-        print("  [!] Coverage floor: ~8.3% of tracked advisories carry a resolvable CVE ID -- absence")
-        print("      here means untraceable, not necessarily isolated.")
-        print("-" * box_width)
-        if not cve_correlation_rows:
-            print("  [+] This window: 0 CVEs confirmed to span 2+ independently-tracked ecosystems.")
-        else:
-            print(f"  This window: {qualifying_count} CVE(s) confirmed to span 2+ independently-tracked ecosystems.")
-            print()
-            # Presence grid instead of a prose ecosystem list -- fixed-width X-per-ecosystem reads
-            # as a scannable pattern across rows, and (unlike a name/prose column) never needs
-            # truncation regardless of how long an ecosystem's real name is.
-            for line in grid_lines:
-                print(line)
+        print(f"  This window: {qualifying_count} CVE(s) confirmed to span 2+ independently-tracked ecosystems.")
+        print()
+        # Presence grid instead of a prose ecosystem list -- fixed-width X-per-ecosystem reads
+        # as a scannable pattern across rows, and (unlike a name/prose column) never needs
+        # truncation regardless of how long an ecosystem's real name is.
+        for line in grid_lines:
+            print(line)
     print("="*box_width + "\n")
 
 
@@ -1754,7 +1496,40 @@ def _compute_dwell_distribution_stats(spatial_dwell: dict) -> dict:
     return stats
 
 
-def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None, spatial_dwell_cve: dict = None):
+_MAX_SCATTER_POINTS_PER_ECO = 1500
+
+
+def _extract_cvss_blast_radius_pairs(ecosystem_outlier_pools: dict) -> dict:
+    """
+    Reduces ecosystem_outlier_pools -- the full population of advisories with a nonzero
+    blast_radius this run touched (Section V's source data, not just its top-10-per-ecosystem
+    console slice) -- to raw (cvss_score, blast_radius) pairs per ecosystem, for the --report
+    scatter chart. Checked against the real warehouse before building this: CVSS and
+    blast_radius correlate near zero to slightly negative across every major ecosystem
+    (npm -0.43, PyPI -0.10, Maven -0.12, Go -0.07, Packagist +0.02) -- Section V's "top-10 by
+    blast radius, CVSS as tiebreaker" ranking is picking up an axis that's essentially
+    independent of severity, which a ranked list can't make visually obvious the way a scatter
+    can. Pool values are (blast_radius, update_type, package_name, cvss_score, epss_score,
+    kev_date_added) tuples -- see the ecosystem_outlier_pools population loop.
+
+    Capped at _MAX_SCATTER_POINTS_PER_ECO per ecosystem via random sampling: a full-archive
+    cumulative window pushes some ecosystems (npm, PyPI) past 9,000 points each, which balloons
+    the exported JSON to ~2MB per snapshot for data a scatter can't actually show any more
+    clearly past a couple thousand overlapping dots anyway -- the visual saturates long before
+    the raw count does. Sorted first and sampled with a fixed seed, so the same data always yields
+    the same exported points (it used to vary run to run, making snapshots non-reproducible).
+    """
+    pairs = {}
+    for eco, pool in (ecosystem_outlier_pools or {}).items():
+        eco_pairs = sorted([v[3], v[0]] for v in pool.values() if v[3] and v[3] > 0)
+        if len(eco_pairs) > _MAX_SCATTER_POINTS_PER_ECO:
+            eco_pairs = random.Random(0).sample(eco_pairs, _MAX_SCATTER_POINTS_PER_ECO)
+        if eco_pairs:
+            pairs[eco] = eco_pairs
+    return pairs
+
+
+def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, export_outlier_manifests, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None, spatial_dwell_cve: dict = None, ecosystem_outlier_pools: dict = None):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
         return
@@ -1788,7 +1563,8 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
                 "profile_matrix": export_profile_matrix,
                 "outliers_leaderboards": export_outlier_manifests,
                 "kev_lead_time": kev_lead_time,
-                "dwell_cve_distribution": _compute_dwell_distribution_stats(spatial_dwell_cve)
+                "dwell_cve_distribution": _compute_dwell_distribution_stats(spatial_dwell_cve),
+                "cvss_blast_radius_pairs": _extract_cvss_blast_radius_pairs(ecosystem_outlier_pools)
             }, ef, indent=4)
         print(f"[Static Snapshot Saved]: {export_path}")
     except Exception as e: 
@@ -1803,7 +1579,7 @@ def generate_enterprise_threat_leaderboard(
     custom_export_arg=None, project_file_path: str = None,
     forced_format: str = None, audit_mode: bool = False, ghsa_lookup: dict = None,
     manifest_rows: list = None, *, priority_sort_active: bool = False, target_registries: list = None,
-    db_path: str = None
+    db_path: str = DB_PATH
     ):
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -1822,8 +1598,8 @@ def generate_enterprise_threat_leaderboard(
     is_project_mode = False
     allowed_project_ecosystems = []
     
-    known_containers = _KNOWN_CONTAINER_ECOSYSTEMS
-    known_registries = _KNOWN_REGISTRY_ECOSYSTEMS
+    known_containers = KNOWN_CONTAINER_ECOSYSTEMS
+    known_registries = KNOWN_REGISTRY_ECOSYSTEMS
     master_tracks = known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
     
     if target_layer == "app": final_leaderboard.update({k: 0 for k in known_registries})
@@ -1843,7 +1619,7 @@ def generate_enterprise_threat_leaderboard(
             print(f"[-] Configuration Error: Unable to accurately parse layout structure for: {manifest_target}")
             sys.exit(1)
 
-    if ghsa_lookup is None: ghsa_lookup = build_ghsa_ecosystem_map()
+    if ghsa_lookup is None: ghsa_lookup = build_ghsa_from_db(db_path=db_path, target_registries=target_registries, priority_sort=priority_sort_active)
 
     manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
     total_raw_rows = 0
@@ -1893,41 +1669,26 @@ def generate_enterprise_threat_leaderboard(
             current_vector = None
             current_id = "N/A"
 
-            if ":" in path:
-                parts = path.split(":")
-                if len(parts) > 1:
-                    current_id = parts[0].strip()
-                    raw_ecosystems.append(parts[1].strip())
-                    
-                    # FIX #2: Consult the relational database to see if this is an all-new CVE discovery
-                    if current_id in ghsa_lookup:
-                        update_type = ghsa_lookup[current_id]["type"]
-                    else:
-                        update_type = "Vulnerability Fix (Update)"
+            osv_id, eco_prefix = parse_stream_path(path)
+            current_id = osv_id
+            if eco_prefix is None:
+                # Bare/root ID with no ecosystem prefix: the ecosystems come from the lookup.
+                if osv_id in ghsa_lookup:
+                    raw_ecosystems.extend(ghsa_lookup[osv_id]["ecosystems"])
+                    update_type = ghsa_lookup[osv_id]["type"]
+                    if "Malware" in update_type: current_vector = ghsa_lookup[osv_id]["vector"]
                 else: raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
             else:
-                path_parts = path.split('/')
-                if len(path_parts) == 1 or path_parts[0].lower() in ['root', '']:
-                    osv_id = path_parts[-1].replace(".json", "")
-                    current_id = osv_id
-                    if osv_id in ghsa_lookup:
-                        raw_ecosystems.extend(ghsa_lookup[osv_id]["ecosystems"])
-                        update_type = ghsa_lookup[osv_id]["type"]
-                        if "Malware" in update_type: current_vector = ghsa_lookup[osv_id]["vector"]
-                    else: raw_ecosystems.append("Untagged Commit Hash/CVE Noise")
+                raw_ecosystems.append(eco_prefix)
+                if eco_prefix.lower() in ['npm', 'pypi'] and "mal-" in osv_id.lower():
+                    update_type = "Malware (New Entry)"
+                    current_vector = ghsa_lookup.get(osv_id, {}).get("vector", "Unclassified Malicious Payload")
                 else:
-                    raw_ecosystems.append(path_parts[0])
-                    osv_id = path_parts[-1].replace(".json", "")
-                    current_id = osv_id
-                    if path_parts[0].lower() in ['npm', 'pypi'] and "mal-" in path_parts[-1].lower():
-                        update_type = "Malware (New Entry)"
-                        current_vector = ghsa_lookup.get(osv_id, {}).get("vector", "Unclassified Malicious Payload")
-                    else: 
-                        # FIX #1 (Retained): Context lookup for standard slash-split entries
-                        if osv_id in ghsa_lookup:
-                            update_type = ghsa_lookup[osv_id]["type"]
-                        else:
-                            update_type = "Vulnerability Fix (Update)"
+                    # Context lookup for standard Ecosystem/ID entries
+                    if osv_id in ghsa_lookup:
+                        update_type = ghsa_lookup[osv_id]["type"]
+                    else:
+                        update_type = "Vulnerability Fix (Update)"
 
             for eco in raw_ecosystems:
                 eco_raw = eco.strip()
@@ -1940,7 +1701,7 @@ def generate_enterprise_threat_leaderboard(
                 if registry_filter_set and eco_lower not in registry_filter_set:
                     continue
 
-                eco_clean = _clean_ecosystem_tag(eco_lower)
+                eco_clean = clean_ecosystem_tag(eco_lower)
 
                 if eco_clean == "Untagged Commit Hash/CVE Noise" and not debug_mode: continue
 
@@ -1956,6 +1717,7 @@ def generate_enterprise_threat_leaderboard(
                     if m_name in target_inventory_map:
                         if not allowed_project_ecosystems or eco_clean in allowed_project_ecosystems:
                             local_version = target_inventory_map[m_name]
+                            hydrate_lookup_details(ghsa_lookup, [current_id], db_path)
                             vulnerable_versions_pool = ghsa_lookup[current_id].get("vulnerable_versions", set())
                             if local_version == "0.0.0" or local_version in vulnerable_versions_pool or not vulnerable_versions_pool:
                                 project_intercept_alerts.append((current_id, ghsa_lookup[current_id]["package_name"], eco_clean, update_type))
@@ -2013,7 +1775,7 @@ def generate_enterprise_threat_leaderboard(
             print(f"{BOLD}{RED}[!] BREACH ALERT{RESET}\n" + "-"*95)
             print(f"{'Advisory ID':<22} | {'Package Name':<20} | {'Ecosystem/Registry':<22} | {'Threat Profile'}")
             print("-"*95)
-            for r_id, p_name, eco, u_type in sorted(list(set(project_intercept_alerts)), key=lambda x: x[1]):
+            for r_id, p_name, eco, u_type in _sorted_project_alerts(project_intercept_alerts):
                 print(f"{r_id:<22} | {p_name:<20} | {eco:<22} | {u_type}")
         else: print(f" {GREEN}[+] Clean Bill of Health: Zero active package mutations match your local manifest elements within this timeframe.{RESET}")
         print("="*95 + "\n")
@@ -2081,16 +1843,12 @@ def generate_enterprise_threat_leaderboard(
             priority_sort_mode=render_mode
         )
 
+    hydrate_lookup_details(ghsa_lookup, session_advisory_ids, db_path)
     table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids)
 
-    # Sub-table C needs a table-wide GROUP BY over the whole `vulnerabilities` table, which only
-    # exists in --database mode -- there's no cheap in-memory equivalent for the ZIP-streaming
-    # fallback path, so it's rendered as unavailable rather than silently omitted in that case.
-    if db_path:
-        qualifying_count, cve_correlation_rows = find_cross_ecosystem_cve_correlations(db_path, session_advisory_ids)
-        print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, True, qualifying_count, cve_correlation_rows)
-    else:
-        print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, False, 0, [])
+    # Sub-table C needs a table-wide GROUP BY over the whole `vulnerabilities` table.
+    qualifying_count, cve_correlation_rows = find_cross_ecosystem_cve_correlations(db_path, session_advisory_ids)
+    print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, qualifying_count, cve_correlation_rows)
 
     # Save Snapshot Disk Serialization Routine. KEV lead-time is only computed when an export is
     # actually happening -- it's an extra warehouse query, no point paying for it on every
@@ -2101,8 +1859,9 @@ def generate_enterprise_threat_leaderboard(
         malware_vector_counts, export_profile_matrix, export_outlier_manifests,
         priority_sort_active=priority_sort_active,
         spatial_blast_radius=spatial_blast_radius,
-        kev_lead_time=_compute_kev_lead_time_stats(db_path, session_advisory_ids) if (db_path and custom_export_arg) else None,
-        spatial_dwell_cve=spatial_dwell_cve
+        kev_lead_time=_compute_kev_lead_time_stats(db_path, session_advisory_ids) if custom_export_arg else None,
+        spatial_dwell_cve=spatial_dwell_cve,
+        ecosystem_outlier_pools=ecosystem_outlier_pools
     )
 
 def generate_html_report(snapshots: list, html_output: str):
@@ -2212,7 +1971,7 @@ def generate_html_report(snapshots: list, html_output: str):
         # is already a point-in-time distribution stat (as of that day's data: the mean days
         # between a KEV-flagged CVE's earliest known publish and its KEV addition), so plotting
         # it raw is correct -- diffing it day-over-day would just be noise on top of noise. Only
-        # snapshots actually carrying the field (requires --database and --export together, and
+        # snapshots actually carrying the field (requires --export, and
         # postdate this chart being added) contribute a point; older snapshots are skipped, not
         # zeroed, since 0 would misleadingly read as "instant lead time" rather than "no data."
         kev_lead_points = [
@@ -2338,6 +2097,56 @@ def generate_html_report(snapshots: list, html_output: str):
             <img src="data:image/png;base64,{img_str_dwell}" alt="CVE Active TTR Distribution Chart" />
         </div>"""
 
+        # Chart 5: CVSS vs Blast Radius scatter (latest snapshot only -- same "point-in-time
+        # distribution" reasoning as chart 4, not a trend). Checked correlation against the real
+        # warehouse before building this: CVSS and blast_radius run near-zero to slightly
+        # negative across every major ecosystem (npm -0.43, PyPI -0.10, Maven -0.12, Go -0.07,
+        # Packagist +0.02) -- Section V's "top-10 by blast radius, CVSS as tiebreaker" console
+        # ranking is picking up an axis that's largely independent of severity, which a scatter
+        # makes visually obvious in a way a ranked list can't.
+        cvss_radius_pairs = (latest_snapshot or {}).get("cvss_blast_radius_pairs", {}) or {}
+        scatter_ecos = [eco for eco in target_ecos if eco in cvss_radius_pairs]
+
+        img_str_scatter = None
+        scatter_caption = ""
+        if scatter_ecos:
+            fig5, ax5 = mplplt.subplots(figsize=(12, 6))
+            fig5.patch.set_facecolor('#1e1e1e')
+            ax5.set_facecolor('#1e1e1e')
+
+            total_points = 0
+            for eco in scatter_ecos:
+                pairs = cvss_radius_pairs[eco]
+                cvss_vals = [p[0] for p in pairs]
+                radius_vals = [p[1] for p in pairs]
+                total_points += len(pairs)
+                ax5.scatter(cvss_vals, radius_vals, alpha=0.35, s=18, label=f"{eco} (n={len(pairs)})")
+
+            scatter_caption = f" (as of {latest_snapshot['metadata']['interval_to']}; {total_points:,} advisories plotted)"
+            ax5.set_yscale('log')
+            ax5.set_title("CVSS vs Blast Radius by Ecosystem (log scale)", color='#ffffff', fontsize=14, pad=15)
+            ax5.set_xlabel("CVSS Score", color='#bbbbbb')
+            ax5.set_ylabel("Blast Radius (affected version count, log scale)", color='#bbbbbb')
+            ax5.tick_params(colors='#bbbbbb', labelsize=10)
+            ax5.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
+            ax5.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff', markerscale=2)
+            mplplt.tight_layout()
+
+            buf5 = io.BytesIO()
+            fig5.savefig(buf5, format='png', bbox_inches='tight', facecolor=fig5.get_facecolor())
+            buf5.seek(0)
+            img_str_scatter = base64.b64encode(buf5.read()).decode('utf-8')
+            mplplt.close(fig5)
+
+        scatter_section = ""
+        if img_str_scatter:
+            scatter_section = f"""
+        <h2>V. CVSS vs Blast Radius</h2>
+        <p>Every advisory with a nonzero blast radius this window{scatter_caption}, one dot per advisory, colored by ecosystem. If severity and blast radius were related you'd see a diagonal trend -- there isn't one here (correlation runs near zero to slightly negative across every ecosystem in the real archive). That means Section V's console ranking (top-10 by blast radius, CVSS as tiebreaker) surfaces the most version-sprawling disclosures, not necessarily the most severe ones -- two different axes of risk that don't substitute for each other.</p>
+        <div class="chart">
+            <img src="data:image/png;base64,{img_str_scatter}" alt="CVSS vs Blast Radius Scatter Chart" />
+        </div>"""
+
         # Construct Unified Dashboard Payload Doc
         html_report = f"""<!DOCTYPE html>
 <html>
@@ -2377,7 +2186,7 @@ def generate_html_report(snapshots: list, html_output: str):
         <div class="chart">
             <img src="data:image/png;base64,{img_str_threats}" alt="Threat Mutation Breakdown Chart" />
         </div>
-{kev_lead_section}{dwell_section}
+{kev_lead_section}{dwell_section}{scatter_section}
     </div>
 </body>
 </html>"""
@@ -2632,14 +2441,9 @@ def run_velocity_update(args):
     windows = calculate_report_windows(args, now_utc)
     target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
 
-    # Previously always the ZIP-streaming path regardless of --database -- this was the one
-    # remaining CLI mode that ignored the flag entirely. Same db_path convention as main()'s
-    # primary path: None (ZIP fallback) when --database is omitted.
-    db_path = "database/threat_stream.db" if args.database else None
-    if db_path:
-        global_ghsa_lookup = build_ghsa_from_db(db_path=db_path, target_registries=target_registries, priority_sort=args.priority_sort)
-    else:
-        global_ghsa_lookup = build_ghsa_ecosystem_map()
+    require_warehouse()
+    db_path = DB_PATH
+    global_ghsa_lookup = build_ghsa_from_db(db_path=db_path, target_registries=target_registries, priority_sort=args.priority_sort)
 
     for calculated_start, calculated_end in windows:
         snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer, priority_sort_active=args.priority_sort))
@@ -2682,10 +2486,7 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
     print(f"Current Document: {file_current} (Generated: {current['metadata']['generated_at'][:10]})")
     print("="*85)
 
-    known_clean_keys = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", 
-                        "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL", "Debian", "Ubuntu", "MinimOS", 
-                        "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "GIT",
-                        "Android", "Untagged Commit Hash/CVE Noise"]
+    known_clean_keys = set(MASTER_TRACKS)
 
     sanitized_base_leaderboard = Counter()
     for eco, count in base["leaderboard"].items():
@@ -3134,7 +2935,7 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
 # ADVANCED RESEARCH METRICS & RETRACTION AUDITING 
 # =====================================================================
 
-def display_all_time_retraction_stats(db_path="database/threat_stream.db"):
+def display_all_time_retraction_stats(db_path=DB_PATH):
     """
     Computes global macro-distribution metrics and age brackets for all
     withdrawn advisories relative to today's date.
@@ -3224,7 +3025,7 @@ def display_all_time_retraction_stats(db_path="database/threat_stream.db"):
 
     print("=" * 110)
 
-def extract_suspicious_retractions(db_path="database/threat_stream.db", from_date=None, to_date=None, layer="all"):
+def extract_suspicious_retractions(db_path=DB_PATH, from_date=None, to_date=None, layer="all"):
     """
     Advanced context-aware research hunt engine for tracking contested 
     upstream advisory retractions with deep database schema telemetry.
@@ -3236,8 +3037,6 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    KNOWN_CONTAINERS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
-    KNOWN_REGISTRIES = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
     
     query = """
         SELECT advisory_id, package_name, ecosystems, cvss_score, blast_radius, dwell_days, last_modified, published_date
@@ -3265,9 +3064,9 @@ def extract_suspicious_retractions(db_path="database/threat_stream.db", from_dat
         v_id, p_name, ecos_json, cvss, radius, dwell, last_mod, pub_date = row
         ecos_list = json.loads(ecos_json) if ecos_json else []
         
-        if layer == "app" and not any(e in KNOWN_REGISTRIES for e in ecos_list) and len(ecos_list) > 0:
+        if layer == "app" and not any(e in KNOWN_REGISTRY_ECOSYSTEMS for e in ecos_list) and len(ecos_list) > 0:
             continue
-        elif layer == "os" and not any(e in KNOWN_CONTAINERS for e in ecos_list) and len(ecos_list) > 0:
+        elif layer == "os" and not any(e in KNOWN_CONTAINER_ECOSYSTEMS for e in ecos_list) and len(ecos_list) > 0:
             continue
             
         ecos = ", ".join(ecos_list) if ecos_list else " SCRUBBED BY UPSTREAM"
@@ -3343,11 +3142,8 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
         try:
             mod_time = datetime.datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
             if start_date <= mod_time <= end_date:
-                if ":" in path:
-                    advisory_id = path.split(":")[0].strip()
-                else:
-                    advisory_id = path.split("/")[-1].replace(".json", "").strip()
-                
+                advisory_id = parse_stream_path(path)[0].strip()
+
                 if advisory_id and advisory_id != "N/A":
                     stream_mutation_counter[advisory_id] += 1
         except ValueError: continue
@@ -4143,7 +3939,6 @@ def main():
     parser.add_argument("--velocity", nargs="?", const="./output", metavar="DIR_PATH", help="Stitch snapshots into historical matrix.")
     parser.add_argument("--report", metavar="OUTPUT_FILE", help="Override briefing report output path.")
     parser.add_argument("--terminal-plot", action="store_true", help="Render velocity tracking inline layout.")
-    parser.add_argument("--database", action="store_true", help="Query global advisory context from local SQLite3 warehouse instead of master ZIP archive.")
     parser.add_argument("--registry", type=str, help='Isolate evaluation strictly to a comma-separated registry array subset (e.g., --registry "npm,PyPI,Maven (Java)").')
     parser.add_argument("--hunt-retracted", action="store_true", help="Execute an advanced research hunt for suspicious retracted advisories.")
     parser.add_argument("--trends", action="store_true", help="Activate chronological trend and mutation velocity analysis.")
@@ -4155,12 +3950,10 @@ def main():
     args = parser.parse_args()
     
     if args.hunt_retracted:
-        if not args.database:
-            parser.error("[!] The --hunt-retracted mechanism requires the --database relational engine active.")
-        
-        display_all_time_retraction_stats(db_path="database/threat_stream.db")
+        require_warehouse()
+        display_all_time_retraction_stats(db_path=DB_PATH)
         extract_suspicious_retractions(
-            db_path="database/threat_stream.db",
+            db_path=DB_PATH,
             from_date=args.from_date if hasattr(args, 'from_date') else None,
             to_date=args.to_date if hasattr(args, 'to_date') else None,
             layer=args.layer
@@ -4199,9 +3992,8 @@ def main():
     # FEATURE ROUTING LAYER: TRENDS TIMELINE CALCULATOR
     # =========================================================================
     if args.trends:
-        if not args.database:
-            parser.error("[!] The trend velocity analysis engine requires the --database relational warehouse active.")
-        
+        require_warehouse()
+
         if not args.registry:
             print(f"\n{BOLD}{RED}[!] CONFIGURATION ERROR: Trend analysis requires an explicit repository filter.{RESET}")
             print(f"    -> Usage: python top10ecosystems.py --trends --registry <repo_name>\n")
@@ -4235,7 +4027,7 @@ def main():
         
         for registry in target_registries:
             generate_ecosystem_trend_briefing(
-                db_path="database/threat_stream.db",
+                db_path=DB_PATH,
                 start_date=start_window_dt,
                 end_date=end_window_dt,
                 registry_target=registry,
@@ -4248,12 +4040,11 @@ def main():
     # FEATURE ROUTING LAYER: KEV/EPSS/OSV SUPPLY CHAIN CROSS-CHECK DISPATCH LIST
     # =========================================================================
     if args.crosscheck:
-        if not args.database:
-            parser.error("[!] The --crosscheck engine requires the --database relational warehouse active.")
+        require_warehouse()
 
         if not target_registries:
             print(f"\n{BOLD}{RED}[!] CONFIGURATION ERROR: --crosscheck requires an explicit --registry filter.{RESET}")
-            print(f"    -> Usage: python top10ecosystems.py --database --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17\n")
+            print(f"    -> Usage: python top10ecosystems.py --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17\n")
             sys.exit(1)
 
         if args.to:
@@ -4279,7 +4070,7 @@ def main():
             start_window_dt = datetime.datetime(2026, 4, 18, 0, 0, 0, tzinfo=datetime.timezone.utc)
 
         generate_supply_chain_crosscheck(
-            db_path="database/threat_stream.db",
+            db_path=DB_PATH,
             start_date=start_window_dt,
             end_date=end_window_dt,
             registries=target_registries,
@@ -4288,10 +4079,8 @@ def main():
         )
         return
 
-    if args.database:
-        global_ghsa_lookup = build_ghsa_from_db(db_path="database/threat_stream.db", target_registries=target_registries, priority_sort=args.priority_sort)
-    else:
-        global_ghsa_lookup = build_ghsa_ecosystem_map()
+    require_warehouse()
+    global_ghsa_lookup = build_ghsa_from_db(db_path=DB_PATH, target_registries=target_registries, priority_sort=args.priority_sort)
 
     for calculated_start, calculated_end in calculate_report_windows(args, now_utc):
         print(f"\n[*] Executing Generation Profile for window ending: {calculated_end.date()}")
@@ -4308,7 +4097,7 @@ def main():
             manifest_rows=cached_manifest_rows,
             priority_sort_active=args.priority_sort,
             target_registries=target_registries,
-            db_path="database/threat_stream.db" if args.database else None
+            db_path=DB_PATH
         )
 
 
