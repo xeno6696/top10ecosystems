@@ -23,6 +23,14 @@ KNOWN_REGISTRY_ECOSYSTEMS = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "
 
 # Order matters: the first track a tag matches wins.
 MASTER_TRACKS = KNOWN_CONTAINER_ECOSYSTEMS + KNOWN_REGISTRY_ECOSYSTEMS + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
+
+# Bucket for any raw ecosystem tag that matches no track above (Wolfi, Red Hat, SUSE, openSUSE,
+# Root, TuxCare, Julia, Hackage, ... as of 2026-10: ~20% of the OSV feed). Deliberately NOT a real
+# ecosystem name and NOT in MASTER_TRACKS (it must never act as a match target): this used to be
+# "Android", which silently merged those ecosystems into the genuine Android track (~0.8% of the
+# feed). Output keys that are not a known track also collapse here.
+FALLBACK_ECOSYSTEM = "Other"
+OUTPUT_TRACKS = MASTER_TRACKS + [FALLBACK_ECOSYSTEM]
 ECO_HARD_MAPPINGS = {"maven": "Maven (Java)", "go": "Go (Golang)", "packagist": "Packagist (PHP)", "git": "GIT", "crates.io": "Crates.io"}
 
 _CONTAINER_SET = frozenset(KNOWN_CONTAINER_ECOSYSTEMS)
@@ -72,7 +80,7 @@ def clean_ecosystem_tag(eco_raw: str) -> str:
             if ecosystem_tag_matches_track(eco_lower, track.lower()):
                 eco_clean = track
                 break
-    return eco_clean or "Android"
+    return eco_clean or FALLBACK_ECOSYSTEM
 
 
 def get_artifact_layer(eco_name):

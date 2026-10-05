@@ -51,6 +51,7 @@ import requests
 
 from osv_ecosystems import (
     KNOWN_CONTAINER_ECOSYSTEMS, KNOWN_REGISTRY_ECOSYSTEMS, MASTER_TRACKS,
+    FALLBACK_ECOSYSTEM, OUTPUT_TRACKS,
     clean_ecosystem_tag, get_artifact_layer,
 )
 
@@ -629,7 +630,7 @@ def build_ghsa_from_db(db_path: str = DB_PATH, target_registries: list = None, *
                 v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, dwell_days, epss_score, epss_pct, kev_added, kev_due = row
             else:
                 v_id, p_name, cvss, radius, t_profile, ecos_json, last_mod, m_vector, dwell_days = row
-            ecosystems_list = json.loads(ecos_json) if ecos_json else ["Android"]
+            ecosystems_list = json.loads(ecos_json) if ecos_json else [FALLBACK_ECOSYSTEM]
 
             # PERFORMANCE WIN: Early rejection exit prior to heavy allocations
             if filter_set:
@@ -1600,7 +1601,7 @@ def generate_enterprise_threat_leaderboard(
     
     known_containers = KNOWN_CONTAINER_ECOSYSTEMS
     known_registries = KNOWN_REGISTRY_ECOSYSTEMS
-    master_tracks = known_containers + known_registries + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
+    master_tracks = OUTPUT_TRACKS
     
     if target_layer == "app": final_leaderboard.update({k: 0 for k in known_registries})
     elif target_layer == "container": final_leaderboard.update({k: 0 for k in known_containers})
@@ -2486,16 +2487,16 @@ def compare_snapshots(file_base: str, file_current: str, html_output: str = None
     print(f"Current Document: {file_current} (Generated: {current['metadata']['generated_at'][:10]})")
     print("="*85)
 
-    known_clean_keys = set(MASTER_TRACKS)
+    known_clean_keys = set(OUTPUT_TRACKS)
 
     sanitized_base_leaderboard = Counter()
     for eco, count in base["leaderboard"].items():
-        clean_name = "Android" if eco not in known_clean_keys else eco
+        clean_name = FALLBACK_ECOSYSTEM if eco not in known_clean_keys else eco
         sanitized_base_leaderboard[clean_name] += count
 
     sanitized_curr_leaderboard = Counter()
     for eco, count in current["leaderboard"].items():
-        clean_name = "Android" if eco not in known_clean_keys else eco
+        clean_name = FALLBACK_ECOSYSTEM if eco not in known_clean_keys else eco
         sanitized_curr_leaderboard[clean_name] += count
 
     base_sorted = sorted(sanitized_base_leaderboard.items(), key=lambda x: (x[1], x[0]), reverse=True)
