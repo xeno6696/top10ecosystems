@@ -201,6 +201,8 @@ class TestThreatStreamScanner(unittest.TestCase):
             "test_ingest_advisory_id_with_colon_is_preserved",
             "test_ingest_malware_classifier_trusts_keywords_only_when_cwes_corroborate",
             "test_ingest_suse_public_cloud_does_not_become_the_pub_ecosystem",
+            "test_ingest_unrecognised_ecosystems_land_in_other_never_in_android",
+            "test_db_health_android_is_not_a_catch_all_bucket",
             "test_ingest_cve_mirror_reference_is_not_a_repo_anchor",
             "test_ingest_republished_record_is_new_entry_and_aged_record_is_update",
             "test_ingest_withdrawn_record_is_classified_withdrawn",
@@ -1799,12 +1801,31 @@ class TestThreatStreamScanner(unittest.TestCase):
 
         expected = {"npm": "npm", "PyPI": "PyPI", "maven": "Maven (Java)", "Maven": "Maven (Java)", "Go": "Go (Golang)",
                     "crates.io": "Crates.io", "GIT": "GIT", "Debian:11": "Debian", "Debian:12": "Debian", "Pub": "Pub",
-                    "  NPM  ": "npm", "0001-1": "Android", "": "Android"}
+                    "  NPM  ": "npm", "0001-1": "Other", "": "Other",
+                    "Android": "Android", "Wolfi": "Other", "Red Hat": "Other", "SUSE": "Other", "Root": "Other", "Julia": "Other"}
         for tag, bucket in expected.items():
             self.assertEqual(osv_ecosystems.clean_ecosystem_tag(tag), bucket, f"[!] Wrong bucket for {tag!r}.")
         self.assertNotEqual(osv_ecosystems.clean_ecosystem_tag("SUSE:Linux Enterprise Module for Public Cloud 12"), "Pub")
         self.assertEqual(set(osv_ecosystems.MASTER_TRACKS),
                          set(osv_ecosystems.KNOWN_CONTAINER_ECOSYSTEMS) | set(osv_ecosystems.KNOWN_REGISTRY_ECOSYSTEMS) | {"GIT", "Android", "Untagged Commit Hash/CVE Noise"})
+        self.assertNotIn("Other", osv_ecosystems.MASTER_TRACKS, "[!] The fallback bucket became a match target: raw tags containing the word 'other' would bucket into it.")
+        self.assertEqual(osv_ecosystems.OUTPUT_TRACKS, osv_ecosystems.MASTER_TRACKS + ["Other"])
+
+    def test_ingest_unrecognised_ecosystems_land_in_other_never_in_android(self):
+        """
+        [REGRESSION] Any ecosystem tag outside the known tracks used to bucket into "Android" -- ~20% of
+        the OSV feed (Wolfi, Red Hat, SUSE, Root, ...) merged into a genuine ecosystem that is ~0.8% of
+        it, inflating the container layer's #3 entry and its dwell numbers. Unknown tags go to
+        "Other"; a real Android tag stays Android; an affected-less record is "Other" too.
+        """
+        def ecosystems_for(tag):
+            return json.loads(self._ingest(affected=[{"package": {"ecosystem": tag, "name": "pkg"}, "versions": ["1"]}])["ecosystems"])
+        self.assertEqual(ecosystems_for("Wolfi"), ["Other"])
+        self.assertEqual(ecosystems_for("Red Hat"), ["Other"])
+        self.assertEqual(ecosystems_for("Android"), ["Android"])
+        self.assertEqual(json.loads(self._ingest(affected=[])["ecosystems"]), ["Other"])
+        self.assertEqual(top10ecosystems.get_artifact_layer("Other"), "Global Baseline Noise",
+                         "[!] The fallback bucket must not count toward the container or app layers.")
 
     def test_top_records_for_ecosystem_matches_the_naive_full_sort(self):
         """
@@ -2065,6 +2086,15 @@ class TestThreatStreamScanner(unittest.TestCase):
     def test_db_health_repo_anchor_is_not_polluted_by_the_cve_mirror(self):
         self.assertEqual(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE repo_anchor = 'cveproject/cvelistv5'"), 0,
                          "[!] CVE-mirror repo anchors are back -- the warehouse was built or synced with stale parsing logic. Rebuild it.")
+
+    def test_db_health_android_is_not_a_catch_all_bucket(self):
+        total = self._scalar("SELECT COUNT(*) FROM vulnerabilities")
+        android = self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE ecosystems LIKE '%\"Android\"%'")
+        self.assertLess(android, total * 0.02,
+                        f"[!] {android:,} of {total:,} advisories are tagged Android (genuine Android is well under 1%). "
+                        "The unrecognised-ecosystem fallback is merging into it again, or the warehouse predates the 'Other' bucket. Rebuild it.")
+        self.assertGreater(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE ecosystems LIKE '%\"Other\"%'"), 0,
+                           "[!] No advisory is tagged Other -- the warehouse predates the 'Other' bucket. Rebuild it.")
 
     def test_db_health_no_suse_advisory_is_tagged_pub(self):
         self.assertEqual(self._scalar("SELECT COUNT(*) FROM vulnerabilities WHERE advisory_id LIKE 'SUSE-%' AND ecosystems LIKE '%\"Pub\"%'"), 0,

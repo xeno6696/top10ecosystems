@@ -40,7 +40,7 @@ from collections import Counter
 from cvss import CVSS2, CVSS3, CVSS4
 import requests
 
-from osv_ecosystems import clean_ecosystem_tag
+from osv_ecosystems import clean_ecosystem_tag, FALLBACK_ECOSYSTEM
 
 # Storage Routing Baselines
 DB_DIR = "database"
@@ -469,7 +469,7 @@ def parse_osv_json(vuln_data):
             fixed_by_eco[eco_clean] = fixed_by_eco.get(eco_clean, False) or entry_has_fix
 
     if not ecosystems_set:
-        ecosystems_set.add("Android")
+        ecosystems_set.add(FALLBACK_ECOSYSTEM)
 
     if withdrawn_str:
         classification = "Withdrawn / Retracted Advisory"
