@@ -628,6 +628,17 @@ class TestThreatStreamScanner(unittest.TestCase):
             "cross-registry rework."
         )
 
+        # 6b. Blast radius (affected-version count) is retired from the console: Section V (which
+        # ranked by it) is gone entirely, Section IV shows EPSS/KEV instead, and Sections VI/VII show
+        # the EPSS/KEV column in every run, not only --priority-sort ones.
+        self.assertNotIn("CRITICAL OUTLIER", stdout_capture, "[!] Section V is retired but still rendering.")
+        self.assertNotIn("Blast Radius", stdout_capture, "[!] Blast radius is still printed in the console dashboard.")
+        self.assertIn("Avg EPSS (n)", stdout_capture)
+        self.assertIn("VI. NEW ARRIVALS", stdout_capture)
+        self.assertIn("VII. SYSTEMIC RISK", stdout_capture)
+        self.assertGreaterEqual(stdout_capture.count("EPSS / KEV"), 2, "[!] Sections VI/VII must show the EPSS / KEV column by default.")
+        self.assertFalse(hasattr(top10ecosystems, "print_section_v_outlier_pools"))
+
         # 7. PARITY GATE D: Section VIII's three identity-correlation sub-tables render with the
         # expected headers -- A (cross-compiled) and B (repackaged) look WITHIN one advisory's own
         # listing (rendered as Package A/Package B identity columns), C (cross-tracker CVE
@@ -814,7 +825,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             
         required_schema_nodes = [
             "metadata", "leaderboard", "threat_profile", "layer_profile_matrix", 
-            "malware_vectors", "profile_matrix", "outliers_leaderboards"
+            "malware_vectors", "profile_matrix", "cvss_epss_pairs"
         ]
         for node in required_schema_nodes:
             self.assertIn(node, payload, f"[!] SCHEMA CORRUPTION: Saved snapshot file is missing key '{node}' root data node.")
@@ -1927,19 +1938,87 @@ class TestThreatStreamScanner(unittest.TestCase):
 
     def test_scatter_pair_export_is_deterministic_and_capped(self):
         """
-        [REGRESSION] Chart V's CVSS-vs-blast-radius points are randomly down-sampled to a cap per
+        [REGRESSION] Chart V's CVSS-vs-EPSS points are randomly down-sampled to a cap per
         ecosystem. The sampling was unseeded, so the same data exported different points every
-        run. It must be reproducible regardless of pool insertion order, and respect the cap.
+        run. It must be reproducible regardless of pool insertion order, respect the cap, and never
+        drop a KEV-listed point (the rare ones the chart exists to highlight).
         """
         cap = top10ecosystems._MAX_SCATTER_POINTS_PER_ECO
-        entries = [(f"ID-{i}", (1 + i % 50, "Vulnerability Fix (Update)", f"pkg{i}", 1.0 + (i % 90) / 10, None, None)) for i in range(cap + 400)]
+        entries = [(f"ID-{i}", (1.0 + (i % 90) / 10, (i % 997) / 1000.0, i % 400 == 0)) for i in range(cap + 400)]
         forward = {"npm": dict(entries), "PyPI": dict(entries[:50])}
         backward = {"npm": dict(reversed(entries)), "PyPI": dict(reversed(entries[:50]))}
-        first = top10ecosystems._extract_cvss_blast_radius_pairs(forward)
-        self.assertEqual(first, top10ecosystems._extract_cvss_blast_radius_pairs(forward))
-        self.assertEqual(first, top10ecosystems._extract_cvss_blast_radius_pairs(backward), "[!] Sampling depends on pool insertion order.")
+        first = top10ecosystems._extract_cvss_epss_pairs(forward)
+        self.assertEqual(first, top10ecosystems._extract_cvss_epss_pairs(forward))
+        self.assertEqual(first, top10ecosystems._extract_cvss_epss_pairs(backward), "[!] Sampling depends on pool insertion order.")
         self.assertEqual(len(first["npm"]), cap)
         self.assertEqual(len(first["PyPI"]), 50)
+        expected_kev = sum(1 for _, (_, _, kev) in entries if kev)
+        self.assertEqual(sum(p[2] for p in first["npm"]), expected_kev, "[!] KEV-listed points must survive down-sampling.")
+
+    def test_scatter_pair_export_skips_points_missing_cvss_or_epss(self):
+        pools = {"npm": {"A": (0.0, 0.5, False), "B": (7.5, None, False), "C": (7.5, 0.5, True)}}
+        self.assertEqual(top10ecosystems._extract_cvss_epss_pairs(pools), {"npm": [[7.5, 0.5, 1]]})
+
+    def test_ranking_no_longer_uses_blast_radius(self):
+        """
+        [REGRESSION] Blast radius (affected-version count) correlates negatively with EPSS and carries no
+        KEV signal, so it must not break ties in any ranking mode: equal-CVSS advisories order by id.
+        """
+        small = {"cvss_score": 7.5, "blast_radius": 1}
+        huge = {"cvss_score": 7.5, "blast_radius": 5000}
+        for mode in ("default", "kev", "epss"):
+            self.assertLess(top10ecosystems._priority_sort_key(small, "A", mode), top10ecosystems._priority_sort_key(huge, "B", mode))
+            self.assertLess(top10ecosystems._priority_sort_key(huge, "A", mode), top10ecosystems._priority_sort_key(small, "B", mode),
+                            f"[!] Blast radius is still influencing the '{mode}' ranking.")
+        kev_low = {"cvss_score": 4.0, "kev_date_added": "2026-09-01", "epss_score": 0.1}
+        epss_high = {"cvss_score": 9.0, "epss_score": 0.9}
+        self.assertLess(top10ecosystems._priority_sort_key(kev_low, "B", "kev"), top10ecosystems._priority_sort_key(epss_high, "A", "kev"))
+        self.assertLess(top10ecosystems._priority_sort_key(epss_high, "B", "epss"), top10ecosystems._priority_sort_key(kev_low, "A", "epss"))
+
+    def test_section_iv_shows_epss_and_kev_instead_of_blast_radius(self):
+        import contextlib
+        profile = {}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            top10ecosystems.print_section_iv_threat_metabolism(
+                ["npm", "PyPI"], {}, {"npm": [10.0], "PyPI": [20.0]}, {"npm": [5, 7], "PyPI": [100]}, {},
+                datetime.datetime(2026, 10, 1), profile,
+                spatial_epss={"npm": [0.1, 0.3]}, spatial_kev_hits={"npm": 2})
+        out = buf.getvalue()
+        self.assertIn("Avg EPSS (n)", out)
+        self.assertIn("KEV Hits", out)
+        self.assertNotIn("Blast", out, "[!] Section IV still prints blast radius.")
+        self.assertIn("20.0% (n=2)", out)
+        self.assertEqual(profile["npm"]["avg_epss"], 0.2)
+        self.assertEqual((profile["npm"]["epss_sample"], profile["npm"]["kev_hits"]), (2, 2))
+        self.assertIsNone(profile["PyPI"]["avg_epss"])
+        self.assertEqual(profile["npm"]["avg_blast_radius"], 6.0, "[!] --compare still reads avg_blast_radius from snapshots; keep exporting it.")
+
+    def test_lookup_loader_always_enriches_with_epss_and_kev_when_present(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = os.path.join(tmp, "enrich.db")
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, cvss_score REAL, blast_radius INTEGER, "
+                         "threat_profile TEXT, ecosystems TEXT, last_modified TEXT, malware_vector TEXT, dwell_days REAL, cve_alias TEXT)")
+            conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL, percentile REAL, model_date TEXT)")
+            conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT, due_date TEXT)")
+            conn.executemany("INSERT INTO vulnerabilities VALUES (?,?,?,?,?,?,?,?,?,?)", [
+                ("GHSA-1", "a", 9.0, 1, "t", '["npm"]', "2026-09-01", "", 1.0, "CVE-1"),
+                ("GHSA-2", "b", 5.0, 1, "t", '["npm"]', "2026-09-01", "", 1.0, "CVE-2"),
+                ("GHSA-3", "c", 5.0, 1, "t", '["npm"]', "2026-09-01", "", 1.0, None)])
+            conn.execute("INSERT INTO epss_scores VALUES ('CVE-1', 0.8, 0.99, '2026-10-01')")
+            conn.execute("INSERT INTO epss_scores VALUES ('CVE-2', 0.01, 0.2, '2026-10-01')")
+            conn.execute("INSERT INTO kev_catalog VALUES ('CVE-1', '2026-09-02', '2026-09-23')")
+            conn.commit()
+            conn.close()
+            import contextlib
+            with contextlib.redirect_stdout(io.StringIO()):
+                lookup = top10ecosystems.build_ghsa_from_db(db_path=path)
+            self.assertEqual((lookup["GHSA-1"]["epss_score"], lookup["GHSA-1"]["kev_date_added"]), (0.8, "2026-09-02"))
+            self.assertEqual(lookup["GHSA-2"]["epss_score"], 0.01)
+            self.assertNotIn("kev_date_added", lookup["GHSA-2"], "Entries with no KEV listing must not carry the key.")
+            self.assertNotIn("epss_score", lookup["GHSA-3"], "Entries with no CVE alias must not carry enrichment keys.")
 
     def test_ingest_cvss_malware_override(self):
         """Explicitly malicious payloads max out at 10.0 regardless of any severity data."""
