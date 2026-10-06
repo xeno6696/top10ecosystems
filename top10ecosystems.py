@@ -29,6 +29,7 @@ import csv
 import datetime
 import functools
 import heapq
+import html
 import io
 import json
 import os
@@ -1865,7 +1866,145 @@ def generate_enterprise_threat_leaderboard(
         ecosystem_outlier_pools=ecosystem_outlier_pools
     )
 
-def generate_html_report(snapshots: list, html_output: str):
+_LANDMARK_COLOR = "#ffd54f"
+
+_LANDMARK_CSS = """
+        .chart-wrap { position: relative; display: inline-block; max-width: 100%; }
+        .lm { position: absolute; z-index: 2; background: #ffd54f; color: #1e1e1e; font-size: 11px; font-weight: 600;
+              padding: 2px 6px; border-radius: 10px; text-decoration: none; white-space: nowrap; }
+        .lm.lm-left { transform: translateX(-100%); }
+        .lm:hover { z-index: 10; background: #fff176; }
+        .lm .tip { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; width: 340px; white-space: normal;
+                   text-align: left; background: #151515; color: #e0e0e0; border: 1px solid #ffd54f; border-radius: 6px;
+                   padding: 10px 12px; font-weight: 400; font-size: 12px; line-height: 1.5; }
+        .lm.lm-left .tip { left: auto; right: 0; }
+        .lm:hover .tip { display: block; }
+        .lm .tip strong { color: #ffd54f; }
+        .lm-key { text-align: left; font-size: 13px; color: #aaaaaa; margin: 14px 0 0 0; padding-left: 20px; }
+        .lm-key a { color: #ffd54f; text-decoration: none; }
+        .lm-key a:hover { text-decoration: underline; }
+        .lm-key-title { text-align: left; font-size: 13px; color: #cccccc; margin: 14px 0 0 0; }
+"""
+
+
+def _iso_date_or_none(text):
+    try:
+        return datetime.date.fromisoformat(str(text)[:10])
+    except ValueError:
+        return None
+
+
+def find_landmark_advisories(db_path: str, start_date: str, end_date: str, top_n: int = 3) -> list:
+    """The handful of 'headline' advisories to mark on the --report timeline charts for a window:
+    CVEs on CISA's KEV list (i.e. confirmed exploited -- the closest thing to 'famous this month'
+    the data can define, and the only advisories with a real human-readable name and description
+    in the warehouse, via kev_catalog.vulnerability_name/short_description) that either had an
+    advisory published or were added to KEV inside [start_date, end_date], highest EPSS first,
+    CVSS as the tiebreak. One entry per CVE (many CVEs have several advisory records); its
+    event_date -- where it's placed on the time axis -- is the earliest publish date when that
+    falls in the window, else its KEV-addition date (an older CVE that became urgent this month).
+    Returns [] when the warehouse or its KEV/EPSS tables aren't available, so --report degrades
+    to the plain charts instead of failing."""
+    if not db_path or not os.path.exists(db_path) or not _iso_date_or_none(start_date) or not _iso_date_or_none(end_date):
+        return []
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            """
+            SELECT v.cve_alias, MIN(substr(v.published_date, 1, 10)), k.date_added, k.vulnerability_name,
+                   k.short_description, e.epss_score, MAX(v.cvss_score), k.known_ransomware_use
+            FROM vulnerabilities v
+            JOIN kev_catalog k ON k.cve_id = v.cve_alias
+            LEFT JOIN epss_scores e ON e.cve_id = v.cve_alias
+            WHERE substr(v.published_date, 1, 10) BETWEEN ? AND ? OR k.date_added BETWEEN ? AND ?
+            GROUP BY v.cve_alias
+            ORDER BY e.epss_score DESC, MAX(v.cvss_score) DESC, v.cve_alias
+            LIMIT ?
+            """,
+            (start_date[:10], end_date[:10], start_date[:10], end_date[:10], top_n),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+
+    landmarks = []
+    for cve_id, published, kev_added, name, description, epss, cvss, ransomware in rows:
+        in_window = published and start_date[:10] <= published <= end_date[:10]
+        landmarks.append({
+            "cve_id": cve_id, "name": (name or "").strip(), "description": (description or "").strip(),
+            "epss": epss, "cvss": cvss, "published": published, "kev_added": kev_added,
+            "ransomware": (ransomware or "").strip().lower() == "known",
+            "event_date": published if in_window else kev_added,
+        })
+    return landmarks
+
+
+def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, alt: str) -> str:
+    """Saves fig as an embedded PNG and returns its HTML. With landmarks, each gets a dotted
+    vertical line drawn into the PNG plus a clickable pill laid over the image at the same spot
+    (hover for the KEV name/description/scores; click for the osv.dev record), and a plain-text
+    key below as the fallback. Overlay positions are percentages of the saved image, derived from
+    the same tight bounding box savefig(bbox_inches='tight') crops to, so they stay aligned at any
+    page width. A landmark whose date doesn't parse or has no plotted x-axis is skipped."""
+    pad = 0.1
+    placed = []
+    if landmarks and plotted_dates and ax.has_data():
+        plotted = [_iso_date_or_none(d) for d in plotted_dates]
+        if all(plotted):
+            for lm in landmarks:
+                target = _iso_date_or_none(lm["event_date"])
+                if target:
+                    idx = min(range(len(plotted)), key=lambda i: abs((plotted[i] - target).days))
+                    placed.append((lm, idx))
+
+    for _, idx in placed:
+        ax.axvline(idx, color=_LANDMARK_COLOR, linestyle=":", linewidth=1.3, alpha=0.85, zorder=1)
+
+    overlays = []
+    if placed:
+        fig.canvas.draw()
+        tb = fig.get_tightbbox(fig.canvas.get_renderer())
+        span_w, span_h = tb.width + 2 * pad, tb.height + 2 * pad
+        for k, (lm, idx) in enumerate(placed):
+            x_px = ax.transData.transform((idx, 0))[0]
+            y_px = ax.transAxes.transform((0, 0.96 - 0.09 * k))[1]
+            left = ((x_px / fig.dpi) - (tb.x0 - pad)) / span_w * 100
+            top = (1 - ((y_px / fig.dpi) - (tb.y0 - pad)) / span_h) * 100
+            tip_lines = [f"<strong>{html.escape(lm['name'] or lm['cve_id'])}</strong>"]
+            if lm["description"]:
+                tip_lines.append(html.escape(lm["description"]))
+            facts = [f"Published {lm['published']}" if lm["published"] else None, f"KEV-added {lm['kev_added']}",
+                     f"EPSS {lm['epss']:.0%}" if lm["epss"] is not None else None,
+                     f"CVSS {lm['cvss']:.1f}" if lm["cvss"] else None, "Ransomware use: known" if lm["ransomware"] else None]
+            tip_lines.append("<em>" + " · ".join(f for f in facts if f) + "</em>")
+            flip = " lm-left" if left > 60 else ""
+            overlays.append(
+                f'<a class="lm{flip}" style="left:{left:.2f}%;top:{top:.2f}%" target="_blank" rel="noopener" '
+                f'href="https://osv.dev/vulnerability/{html.escape(lm["cve_id"])}">{html.escape(lm["cve_id"])}'
+                f'<span class="tip">{"<br>".join(tip_lines)}</span></a>'
+            )
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=pad, facecolor=fig.get_facecolor())
+    buf.seek(0)
+    img = f'<img src="data:image/png;base64,{base64.b64encode(buf.read()).decode("utf-8")}" alt="{html.escape(alt)}" />'
+    if not placed:
+        return img
+
+    key_items = "".join(
+        f'<li><a href="https://osv.dev/vulnerability/{html.escape(lm["cve_id"])}" target="_blank" rel="noopener">'
+        f'{html.escape(lm["cve_id"])}</a> -- "{html.escape(lm["name"] or "unnamed")}" '
+        f'<span>(placed at {lm["event_date"]})</span></li>'
+        for lm, _ in placed
+    )
+    return (f'<div class="chart-wrap">{img}{"".join(overlays)}</div>'
+            f'<p class="lm-key-title">Landmark advisories (dotted gold lines): KEV-listed CVEs with the highest EPSS this window, '
+            f'placed at the day each was published or added to KEV. Hover a label for details; click to open the OSV record.</p>'
+            f'<ul class="lm-key">{key_items}</ul>')
+
+
+def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PATH):
     """Generates a historical time-series AppSec trend dashboard from accumulated snapshot logs."""
     if not snapshots:
         print(f"{RED}[-] Report Generation Aborted: No valid snapshot data assets found in output directory.{RESET}")
@@ -1904,6 +2043,9 @@ def generate_html_report(snapshots: list, html_output: str):
     delta_dates = dates[1:]
     has_deltas = len(dates) >= 2
 
+    plotted_range = delta_dates if has_deltas else dates
+    landmarks = find_landmark_advisories(db_path, plotted_range[0], plotted_range[-1]) if plotted_range else []
+
     def _deltas(series):
         return [b - a for a, b in zip(series, series[1:])]
 
@@ -1932,10 +2074,7 @@ def generate_html_report(snapshots: list, html_output: str):
         mplplt.xticks(rotation=30, ha='right')
         mplplt.tight_layout()
 
-        buf1 = io.BytesIO()
-        fig1.savefig(buf1, format='png', bbox_inches='tight', facecolor=fig1.get_facecolor())
-        buf1.seek(0)
-        img_str_ecos = base64.b64encode(buf1.read()).decode('utf-8')
+        chart1_html = _render_chart_with_landmarks(fig1, ax1, landmarks, delta_dates if has_deltas else dates, "Ecosystem Time Series Chart")
         mplplt.close(fig1)
 
         # Chart 2: Threat Profile Daily Breakdown (day-over-day delta)
@@ -1962,10 +2101,7 @@ def generate_html_report(snapshots: list, html_output: str):
         mplplt.xticks(rotation=30, ha='right')
         mplplt.tight_layout()
 
-        buf2 = io.BytesIO()
-        fig2.savefig(buf2, format='png', bbox_inches='tight', facecolor=fig2.get_facecolor())
-        buf2.seek(0)
-        img_str_threats = base64.b64encode(buf2.read()).decode('utf-8')
+        chart2_html = _render_chart_with_landmarks(fig2, ax2, landmarks, delta_dates if has_deltas else dates, "Threat Mutation Breakdown Chart")
         mplplt.close(fig2)
 
         # Chart 3: KEV Lead Time Trend -- NOT a delta chart like the other two. kev_lead_time
@@ -2152,6 +2288,7 @@ def generate_html_report(snapshots: list, html_output: str):
         html_report = f"""<!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
     <title>Enterprise Supply Chain Threat Map Timeline</title>
     <style>
         body {{ background-color: #121212; color: #e0e0e0; font-family: sans-serif; padding: 40px; margin: 0; }}
@@ -2165,6 +2302,7 @@ def generate_html_report(snapshots: list, html_output: str):
         .meta-box {{ background: #151515; padding: 15px 20px; border-radius: 6px; border: 1px solid #252525; margin-bottom: 30px; }}
         .chart {{ text-align: center; margin-top: 25px; background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
         .chart img {{ max-width: 100%; height: auto; border-radius: 4px; }}
+{_LANDMARK_CSS}
     </style>
 </head>
 <body>
@@ -2179,13 +2317,13 @@ def generate_html_report(snapshots: list, html_output: str):
         <h2>I. Ecosystem Daily Volume Delta</h2>
         <p>Tracks day-over-day discovery velocity (new activity per snapshot interval, not the running total) across major software registry targets, so bursty days stand out as spikes instead of subtle slope changes.</p>
         <div class="chart">
-            <img src="data:image/png;base64,{img_str_ecos}" alt="Ecosystem Time Series Chart" />
+            {chart1_html}
         </div>
 
         <h2>II. Threat Behavior Profile Daily Delta</h2>
         <p>Monitors day-over-day composition of inbound mutations between active malware injections, standard software security patches, and database metadata adjustments.</p>
         <div class="chart">
-            <img src="data:image/png;base64,{img_str_threats}" alt="Threat Mutation Breakdown Chart" />
+            {chart2_html}
         </div>
 {kev_lead_section}{dwell_section}{scatter_section}
     </div>
