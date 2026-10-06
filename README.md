@@ -111,10 +111,9 @@ A standard `top10ecosystems.py` invocation (without `--trends`/`--crosscheck`/`-
 | I | Verified Enterprise Ecosystem Leaderboard | Top 10 ecosystems/registries by raw activity delta in the window. |
 | II | Architectural Layer Threat Matrix | Same churn, broken down by App Registry vs. Container Base Image layer and mutation type. |
 | III | Malware Attack Vector Analysis | Breakdown of malware-classified entries by vector (typosquatting, dependency confusion, credential stealing, backdoor/execution). |
-| IV | Ecosystem Threat Metabolism & Systemic Backlog Matrix | Dwell-time (time-to-fix) and blast-radius (affected version count) averages per ecosystem. |
-| V | Critical Outlier Attack Surface Radius Pools | Per-ecosystem top-10 ranking by blast radius/CVSS, regardless of malware/vulnerability classification. |
-| VI | New Arrivals & Campaign Discoveries Within Timeframe | Advisories that are brand-new (not just updated) within the window. |
-| VII | Systemic Risk vs. Active Exposure (The Attention Deficit) | Flags advisories with high objective severity but low community/tracking attention. |
+| IV | Ecosystem Threat Metabolism & Systemic Backlog Matrix | Dwell-time (time-to-fix) averages, backlog age, plus average EPSS and KEV-hit count per ecosystem. |
+| VI | New Arrivals & Campaign Discoveries Within Timeframe | Advisories that are brand-new (not just updated) within the window, with EPSS / KEV per advisory. |
+| VII | Systemic Risk vs. Active Exposure (The Attention Deficit) | Flags advisories with high objective severity but low community/tracking attention, with EPSS / KEV per advisory. |
 | VIII | Is This The Same Vulnerability Showing Up More Than Once? | Three sub-tables (see below). |
 
 **Section VIII** answers a specific supply-chain question: when the same advisory spans multiple ecosystems, is that because the same project is genuinely released natively to each registry, or because one registry is just vendoring another's code unmodified?
@@ -122,7 +121,9 @@ A standard `top10ecosystems.py` invocation (without `--trends`/`--crosscheck`/`-
 - **VIII-B — Repackaged-As-Is**: one registry mechanically vendoring another's artifact unmodified (the textbook case is Maven's `webjars` namespace wrapping an npm package verbatim), with a per-ecosystem fix-status marker (`F`/`U`/`?`) and a dependency-direction signal for which side is the plausible upstream fix origin.
 - **VIII-C — Cross-Tracker CVE Correlation**: the same CVE independently tracked as separate advisory records across ecosystems.
 
-Pass `--priority-sort` to re-rank Sections I/V/VI/VII by KEV presence → EPSS score → CVSS/blast-radius instead of CVSS/blast-radius alone (default ranking is unchanged when the flag is omitted).
+Sections VI and VII rank by CVSS by default. Pass `--priority-sort` to also render them ranked by KEV presence → EPSS score → CVSS, and by EPSS alone → CVSS, alongside the default view.
+
+> **Section numbering:** there is no Section V. It ranked advisories by blast radius (affected-version count), which against the real warehouse correlates negatively with EPSS (−0.16, versus +0.33 for CVSS) and has no KEV-rate trend — it tracks how many releases a project has shipped, not how dangerous a flaw is — so it was retired. The remaining sections keep their numbers. The `blast_radius` column and the snapshot fields derived from it are still stored and still feed `--compare` / `--velocity`.
 
 ---
 
@@ -169,7 +170,7 @@ Two related but separate tools for looking at churn over time instead of a singl
 - **`--report OUTPUT_FILE`** builds an HTML dashboard from the same snapshot directory. Two charts always render — ecosystem-level and threat-profile-level **day-over-day deltas** (not raw cumulative totals — a real burst shows up as an actual spike, not a subtle change in slope) — plus three more that render automatically whenever the loaded snapshots carry the data for them (older snapshots, or a window with zero overlap, just skip that section rather than rendering something empty):
   - **III. KEV Lead Time Trend** — for advisories later confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition, as of each snapshot. Unlike the other charts this one plots the raw value, not a delta — it's already a point-in-time distribution stat, not a running total.
   - **IV. CVE Active TTR Distribution** — a box plot of days-since-last-modified for active CVE advisories, one box per ecosystem, from the *latest* snapshot in the loaded window only (a distribution's shape isn't something that gains meaning from being diffed across days). Shows both median (box) and mean (diamond marker) together, since Section IV's console table only ever printed the mean — which can badly misrepresent the typical case under a long right skew (e.g. npm's Active TTR (CVE) has run as much as 23x higher on mean than median, driven by a handful of ancient stragglers a mean-only number hides completely).
-  - **V. CVSS vs Blast Radius** — a scatter of every advisory with a nonzero blast radius this window, colored by ecosystem, from the latest snapshot only. Checked against the real archive before building it: CVSS and blast radius correlate near zero to slightly negative across every major ecosystem, so Section V's console ranking (top-10 by blast radius, CVSS as tiebreaker) is picking up an axis that's largely independent of severity — this makes that visible instead of implying the two move together.
+  - **V. CVSS vs EPSS** — a scatter of every advisory this window that has both a CVSS score and EPSS data, colored by ecosystem with KEV-listed advisories picked out as red stars, from the latest snapshot only. Only advisories with a resolvable CVE ID have EPSS (about 8% of the warehouse). It shows how weakly CVSS predicts exploitation likelihood (they correlate at about +0.33 across the warehouse): look for stars low on the chart (KEV-confirmed despite modest severity) and unmarked dots high on it (likely exploited, not yet confirmed). Snapshots exported before this chart existed simply skip it.
 
   Respects `--from`/`--to` to scope the date range, and `--layer` to restrict which layer's archive to aggregate (defaults to `app`, matching the daily archive convention below — mixing snapshots from different layers or scopes in one chart produces meaningless collisions, so it won't do that unless you explicitly ask for a different layer).
 
