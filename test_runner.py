@@ -90,7 +90,7 @@ class TestThreatStreamScanner(unittest.TestCase):
 
     def test_000_a_anti_hallucination_guard_for_html_timeline_report(self):
         """[INTEGRITY] Guards against the deletion of the time-series HTML chart renderer."""
-        self.verify_production_target_signature("generate_html_report", expected_args_count=2)
+        self.verify_production_target_signature("generate_html_report", expected_args_count=3)
 
     def test_000_a_anti_hallucination_guard_for_snapshot_loader(self):
         """[INTEGRITY] Guards against the deletion of the snapshot log folder parser."""
@@ -2137,6 +2137,92 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertLessEqual((high_water - newest_day).days, 3,
                              f"[!] Sync high-water mark ({high_water}) is {(high_water - newest_day).days} days ahead of the newest stored "
                              f"record ({newest_day}); advisories in between were likely skipped. Rebuild with: python db_warehouse.py")
+
+    # -------------------------------------------------------------------------
+    # --report LANDMARK ADVISORIES: KEV-listed headline CVEs marked on the daily timeline charts
+    # -------------------------------------------------------------------------
+    def _landmark_db(self, tmp):
+        path = os.path.join(tmp, "landmarks.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, published_date TEXT, cvss_score REAL)")
+        conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT, vulnerability_name TEXT, short_description TEXT, known_ransomware_use TEXT)")
+        conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL)")
+        conn.executemany("INSERT INTO vulnerabilities VALUES (?,?,?,?)", [
+            ("GHSA-a1", "CVE-A", "2026-09-10", 9.8),
+            ("GHSA-a2", "CVE-A", "2026-09-12", 9.8),   # second record for the same CVE
+            ("GHSA-b1", "CVE-B", "2026-01-05", 7.0),   # old CVE, KEV-added inside the window
+            ("GHSA-c1", "CVE-C", "2026-09-20", 5.0),
+            ("GHSA-d1", "CVE-D", "2026-09-15", 9.0),   # in window but not on KEV
+            ("GHSA-e1", "CVE-E", "2026-02-01", 9.0),   # on KEV but nothing falls in the window
+        ])
+        conn.executemany("INSERT INTO kev_catalog VALUES (?,?,?,?,?)", [
+            ("CVE-A", "2026-09-11", "Alpha RCE", "Alpha desc", "Known"),
+            ("CVE-B", "2026-09-22", "Beta Bypass", "Beta desc", "Unknown"),
+            ("CVE-C", "2026-10-30", "Gamma Leak", "Gamma desc", "Unknown"),
+            ("CVE-E", "2026-03-01", "Epsilon", "Epsilon desc", "Unknown"),
+        ])
+        conn.executemany("INSERT INTO epss_scores VALUES (?,?)",
+                         [("CVE-A", 0.5), ("CVE-B", 0.9), ("CVE-C", 0.1), ("CVE-D", 0.99), ("CVE-E", 0.99)])
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_landmark_advisories_are_kev_listed_in_window_ranked_by_epss(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = self._landmark_db(tmp)
+            found = top10ecosystems.find_landmark_advisories(path, "2026-09-01", "2026-09-30", top_n=3)
+            self.assertEqual([lm["cve_id"] for lm in found], ["CVE-B", "CVE-A", "CVE-C"],
+                             "[!] Landmarks must be KEV-listed CVEs with activity in the window, highest EPSS first -- "
+                             "CVE-D (not on KEV) and CVE-E (nothing in the window) must be excluded.")
+            by_id = {lm["cve_id"]: lm for lm in found}
+            self.assertEqual(by_id["CVE-B"]["event_date"], "2026-09-22", "An old CVE KEV-added in the window is placed at its KEV date.")
+            self.assertEqual(by_id["CVE-A"]["event_date"], "2026-09-10", "One entry per CVE, placed at its earliest in-window publish date.")
+            self.assertEqual(by_id["CVE-A"]["name"], "Alpha RCE")
+            self.assertTrue(by_id["CVE-A"]["ransomware"])
+            self.assertFalse(by_id["CVE-B"]["ransomware"])
+            self.assertEqual(len(top10ecosystems.find_landmark_advisories(path, "2026-09-01", "2026-09-30", top_n=1)), 1)
+
+    def test_landmark_advisories_degrade_to_empty_instead_of_failing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self.assertEqual(top10ecosystems.find_landmark_advisories(os.path.join(tmp, "missing.db"), "2026-09-01", "2026-09-30"), [])
+            bare = os.path.join(tmp, "bare.db")
+            conn = sqlite3.connect(bare)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY)")
+            conn.close()
+            self.assertEqual(top10ecosystems.find_landmark_advisories(bare, "2026-09-01", "2026-09-30"), [])
+            self.assertEqual(top10ecosystems.find_landmark_advisories(self._landmark_db(tmp), "Unknown", "2026-09-30"), [])
+
+    def test_landmark_chart_overlay_is_linked_escaped_and_positioned_on_the_image(self):
+        import re
+        dates = ["2026-09-01", "2026-09-02", "2026-09-03"]
+        landmark = {"cve_id": "CVE-A", "name": "<script>alert(1)</script>", "description": "d", "epss": 0.5, "cvss": 9.8,
+                    "published": "2026-09-02", "kev_added": "2026-09-02", "ransomware": False, "event_date": "2026-09-02"}
+        fig, ax = top10ecosystems.mplplt.subplots(figsize=(6, 3))
+        ax.plot(dates, [1, 5, 2])
+        try:
+            out = top10ecosystems._render_chart_with_landmarks(fig, ax, [landmark], dates, "alt")
+        finally:
+            top10ecosystems.mplplt.close(fig)
+        self.assertIn('href="https://osv.dev/vulnerability/CVE-A"', out)
+        self.assertNotIn("<script>", out, "[!] Advisory text must be HTML-escaped before it goes into the report.")
+        self.assertIn("&lt;script&gt;", out)
+        pos = re.search(r'style="left:([\d.]+)%;top:([\d.]+)%"', out)
+        self.assertIsNotNone(pos, "[!] Landmark label overlay missing.")
+        left, top = float(pos.group(1)), float(pos.group(2))
+        self.assertTrue(30 < left < 70, f"[!] Middle-date landmark should sit near the middle of the chart image, got left={left}%.")
+        self.assertTrue(0 <= top <= 100)
+
+    def test_landmark_chart_without_landmarks_is_just_the_plain_image(self):
+        fig, ax = top10ecosystems.mplplt.subplots(figsize=(6, 3))
+        ax.plot(["2026-09-01", "2026-09-02"], [1, 2])
+        try:
+            out = top10ecosystems._render_chart_with_landmarks(fig, ax, [], ["2026-09-01", "2026-09-02"], "alt")
+        finally:
+            top10ecosystems.mplplt.close(fig)
+        self.assertTrue(out.startswith("<img "))
+        self.assertNotIn("chart-wrap", out)
 
 
 if __name__ == '__main__':
