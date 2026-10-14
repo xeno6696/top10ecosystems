@@ -1191,7 +1191,8 @@ _CVE_GRID_MAX_COLUMNS = 15
 
 
 def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int = 5, max_columns: int = _CVE_GRID_MAX_COLUMNS,
-                                  id_label: str = "CVE ID", info_label: str = "Rec", info_col_width: int = None) -> list:
+                                  id_label: str = "CVE ID", info_label: str = "Rec", info_col_width: int = None,
+                                  unfixed_column: bool = False) -> list:
     """Builds an ecosystem-status grid as a list of print-ready lines: a fixed-width F/U/? per
     ecosystem actually touched by these rows (not the full universe of known ecosystems, which
     would mostly be empty columns), ordered by how many rows touch it so the busiest columns land
@@ -1223,7 +1224,11 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
     caller's info column holds (a record count, a confidence tier, ...), rendered with str().
     info_col_width defaults to col_width, but callers whose info values run wider than a status
     letter (e.g. "CONFIRMED") should pass a wider one explicitly, since the fixed-width status
-    cells must stay narrow for the grid to stay scannable."""
+    cells must stay narrow for the grid to stay scannable.
+
+    unfixed_column=True appends an "Unfixed" column summarizing each row (see _unfixed_summary)
+    -- a sort-and-scan shortcut for the F/U/? cells, counted over ALL of a row's ecosystems even
+    when some are beyond max_columns and not broken out as their own column."""
     if info_col_width is None:
         info_col_width = col_width
 
@@ -1254,15 +1259,21 @@ def _render_cross_ecosystem_grid(rows: list, id_width: int = 18, col_width: int 
             padded = f"{RED}{padded}{RESET}"
         return f"| {padded} "
 
-    header = f"{id_label:<{id_width}}" + cell(info_label, info_col_width) + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
+    unfixed_width = 8
+    header = (f"{id_label:<{id_width}}" + cell(info_label, info_col_width)
+              + "".join(cell(_abbreviate_ecosystem_label(eco, col_width)) for eco in shown_ecos)
+              + (cell("Unfixed", unfixed_width) if unfixed_column else ""))
     lines = [header, "-" * len(header)]
     for row_id, info_value, ecosystems, fixed_status in rows:
         eco_set = set(ecosystems)
-        lines.append(f"{row_id:<{id_width}}" + cell(str(info_value), info_col_width) + "".join(status_cell(eco in eco_set, eco, fixed_status) for eco in shown_ecos))
+        lines.append(f"{row_id:<{id_width}}" + cell(str(info_value), info_col_width) + "".join(status_cell(eco in eco_set, eco, fixed_status) for eco in shown_ecos)
+                     + (cell(_unfixed_summary(ecosystems, fixed_status)[0], unfixed_width) if unfixed_column else ""))
     if hidden_count > 0:
         lines.append(f"  (+{hidden_count} additional ecosystem(s) touched by these rows, not broken out as separate columns)")
     lines.append("  F = fix shipped for that ecosystem | U = no fix shipped yet | ? = fix status unknown (needs --rebuild)")
     lines.append(f"  {RED}Red{RESET} = language/package registry (a plausible fix origin); plain = OS/container image (always downstream).")
+    if unfixed_column:
+        lines.append("  Unfixed = ecosystems with no shipped fix, of those listed ('-' = none; '?' = status unknown for some, so not claimed as unfixed).")
     return lines
 
 
@@ -1275,6 +1286,48 @@ def _fix_status_tag(fixed_by_eco: dict, eco: str) -> str:
     if eco not in fixed_by_eco:
         return "?"
     return "F" if fixed_by_eco[eco] else "U"
+
+
+def _unfixed_summary(ecosystems, fixed_by_eco: dict):
+    """('N of M' text, unfixed count) for one advisory row: how many of its listed ecosystems have
+    NO shipped fix. An ecosystem with no fix-status data at all counts as unknown, never as
+    unfixed -- claiming "still unfixed" from an absence of data would overstate what's known -- so
+    a row with nothing confirmed unfixed but some unknown reads '? of M', and one with both reads
+    'N+ of M'. A fully fixed row is '-', so only rows needing attention carry a number."""
+    unique = list(dict.fromkeys(ecosystems))
+    unfixed = sum(1 for eco in unique if eco in fixed_by_eco and not fixed_by_eco[eco])
+    unknown = sum(1 for eco in unique if eco not in fixed_by_eco)
+    total = len(unique)
+    if unfixed == 0 and unknown == 0:
+        return "-", 0
+    if unfixed == 0:
+        return f"? of {total}", 0
+    return (f"{unfixed}+ of {total}" if unknown else f"{unfixed} of {total}"), unfixed
+
+
+# Display order for VIII-B rows: what you can act on right now first, settled rows last.
+_REPACKAGE_ACTION_ORDER = ["PULL", "WAIT", "CHECK", "UNKNOWN", "DONE"]
+_REPACKAGE_ACTION_COLOR = {"PULL": RED, "WAIT": YELLOW, "DONE": GREEN, "CHECK": "", "UNKNOWN": ""}
+
+
+def _repackage_action(fixed_by_eco: dict, up_eco: str, down_eco: str) -> str:
+    """What to do about one repackaged-as-is pair, from the fix status of its two ends. The
+    downstream side can only ship a fix after the upstream side has, so upstream's status decides
+    first:
+      WAIT    -- upstream has no shipped fix yet; nothing can be republished downstream.
+      PULL    -- upstream has shipped a fix but downstream hasn't: go get the repackaged update.
+      DONE    -- both ends are fixed.
+      CHECK   -- upstream is fixed but there's no fix-status data for downstream.
+      UNKNOWN -- no fix-status data for upstream (e.g. warehouse not --rebuild'd since the column
+                 was added); deliberately not guessed at."""
+    up, down = _fix_status_tag(fixed_by_eco, up_eco), _fix_status_tag(fixed_by_eco, down_eco)
+    if up == "U":
+        return "WAIT"
+    if up == "?":
+        return "UNKNOWN"
+    if down == "F":
+        return "DONE"
+    return "PULL" if down == "U" else "CHECK"
 
 
 def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: int, cve_correlation_rows: list):
@@ -1298,7 +1351,9 @@ def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: 
         (v_id, evidence["confidence"].upper(), [eco for eco, names in names_by_eco.items() if names], fixed_by_eco)
         for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_a
     ]
-    a_grid_lines = _render_cross_ecosystem_grid(a_grid_rows, id_width=24, id_label="Advisory ID", info_label="Conf", info_col_width=9) if a_grid_rows else []
+    # Rows with the most unfixed ecosystems first (stable, so equal rows keep their span/CVSS order).
+    a_grid_rows.sort(key=lambda r: -_unfixed_summary(r[2], r[3])[1])
+    a_grid_lines = _render_cross_ecosystem_grid(a_grid_rows, id_width=24, id_label="Advisory ID", info_label="Conf", info_col_width=9, unfixed_column=True) if a_grid_rows else []
 
     # The C grid's width depends on how many distinct ecosystems appear across these specific
     # rows (13+ columns is common), which can legitimately exceed the 125 chars that comfortably
@@ -1351,8 +1406,9 @@ def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: 
     if not table_b:
         print("  [+] Zero advisories in this execution frame matched a mechanical repackaging pattern (e.g. Maven webjars, distro rewraps).")
     else:
-        print(f"{'Advisory ID':<24} | {'Confidence':<10} | {'Downstream (repackaged)':<38} | {'Upstream (fix ships here first)'}")
+        print(f"{'Advisory ID':<24} | {'Action':<7} | {'Confidence':<10} | {'Downstream (repackaged)':<38} | {'Upstream (fix ships here first)'}")
         print("-" * box_width)
+        b_rows = []
         for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_b:
             if evidence.get("wrapper_side") == "a":
                 down_eco, down_name = evidence["eco_a"], evidence["name_a"]
@@ -1360,9 +1416,16 @@ def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: 
             else:
                 down_eco, down_name = evidence["eco_b"], evidence["name_b"]
                 up_eco, up_name = evidence["eco_a"], evidence["name_a"]
-            pkg_down = _truncate_with_ellipsis(f"{down_eco}: {down_name} [{_fix_status_tag(fixed_by_eco, down_eco)}]", 38)
-            pkg_up = _truncate_with_ellipsis(f"{up_eco}: {up_name} [{_fix_status_tag(fixed_by_eco, up_eco)}]", 44)
-            print(f"{v_id:<24} | {evidence['confidence'].upper():<10} | {pkg_down:<38} | {pkg_up}")
+            b_rows.append((_repackage_action(fixed_by_eco, up_eco, down_eco), v_id, evidence, f"{down_eco}: {down_name}", f"{up_eco}: {up_name}"))
+        # Actionable rows first (stable, so ties keep their span/CVSS order).
+        b_rows.sort(key=lambda r: _REPACKAGE_ACTION_ORDER.index(r[0]))
+        for action, v_id, evidence, down_text, up_text in b_rows:
+            # Pad the plain word first, then color it, so the ANSI codes don't skew the column.
+            color = _REPACKAGE_ACTION_COLOR[action]
+            action_cell = f"{color}{action:<7}{RESET}" if color else f"{action:<7}"
+            print(f"{v_id:<24} | {action_cell} | {evidence['confidence'].upper():<10} | {_truncate_with_ellipsis(down_text, 38):<38} | {_truncate_with_ellipsis(up_text, 44)}")
+        print("  Action: PULL = upstream fixed, downstream hasn't republished yet | WAIT = upstream still unfixed | DONE = both fixed")
+        print("          CHECK = upstream fixed, downstream status unknown | UNKNOWN = no upstream fix data (needs --rebuild)")
 
     print()
     print("-" * box_width)
