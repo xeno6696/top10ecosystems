@@ -960,7 +960,7 @@ def print_section_vii_attention_deficit(active_matrix_ecosystems, ghsa_lookup, g
         print("-" * divider_width)
 
 
-def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top_n: int = 10):
+def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top_n: int = 10, stats: dict = None):
     """Scans this session's in-scope advisories for cross-registry package relationships and
     ranks the top N for each of the two Section VIII tables:
       - Table A (true cross-compiled): the same project natively released to multiple registries.
@@ -968,7 +968,17 @@ def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top
         of another's code (the RHEL/Debian-style repackaging pattern the user flagged).
     An advisory can land in both tables (e.g. Bootstrap: natively ported to several registries
     AND separately vendored into Maven via webjars) -- see classify_advisory_cross_registry().
-    Ranked by ecosystem span (desc, i.e. how many registries it touches), then CVSS (desc).
+    Ranked actionable-first, then by ecosystem span (desc, i.e. how many registries it touches),
+    then CVSS (desc): rows that still need something done come before settled ones. For table A
+    that means at least one listed ecosystem confirmed unfixed, then unknown fix status, then
+    fully fixed; for table B it is the PULL / WAIT / CHECK / UNKNOWN / DONE order of
+    _repackage_action. Without this the top N was filled by whichever advisories spanned the most
+    registries however long ago they were fixed, so over a window of a few months the handful of
+    rows that were actually open never reached the table (e.g. every PULL row, the ones where
+    upstream has fixed and the repackaged copy hasn't followed).
+    If stats (a dict) is passed it is filled with a_total / a_actionable / b_total / b_actionable
+    -- how many candidates existed before truncating to top_n, and how many of them need action
+    -- so the renderer can say whether the table is hiding anything.
     Returns (table_a_rows, table_b_rows); each row is (advisory_id, ecosystem_count, cvss_score,
     package_names_by_ecosystem, evidence, fixed_by_ecosystem) -- evidence is the dict from
     classify_advisory_cross_registry_evidence() explaining which specific ecosystem pair and
@@ -996,10 +1006,20 @@ def rank_cross_registry_tables(ghsa_lookup: dict, session_advisory_ids: set, top
         if repackaged_evidence:
             table_b_candidates.append((v_id, len(names_by_eco), cvss, names_by_eco, repackaged_evidence, fixed_by_eco))
 
-    sort_key = lambda r: (-r[1], -r[2], r[0])
-    table_a = sorted(table_a_candidates, key=sort_key)[:top_n]
-    table_b = sorted(table_b_candidates, key=sort_key)[:top_n]
-    return table_a, table_b
+    def a_tier(row):
+        text, unfixed = _unfixed_summary([eco for eco, names in row[3].items() if names], row[5])
+        return 0 if unfixed else (2 if text == "-" else 1)
+
+    def b_tier(row):
+        down_eco, _, up_eco, _ = _repackage_ends(row[4])
+        return _REPACKAGE_ACTION_ORDER.index(_repackage_action(row[5], up_eco, down_eco))
+
+    table_a = sorted(table_a_candidates, key=lambda r: (a_tier(r), -r[1], -r[2], r[0]))
+    table_b = sorted(table_b_candidates, key=lambda r: (b_tier(r), -r[1], -r[2], r[0]))
+    if stats is not None:
+        stats["a_total"], stats["a_actionable"] = len(table_a), sum(1 for r in table_a if a_tier(r) == 0)
+        stats["b_total"], stats["b_actionable"] = len(table_b), sum(1 for r in table_b if b_tier(r) <= 1)
+    return table_a[:top_n], table_b[:top_n]
 
 
 # Section VIII (rank_cross_registry_tables) only ever looks INSIDE one advisory's own `affected`
@@ -1305,6 +1325,14 @@ def _unfixed_summary(ecosystems, fixed_by_eco: dict):
     return (f"{unfixed}+ of {total}" if unknown else f"{unfixed} of {total}"), unfixed
 
 
+def _repackage_ends(evidence: dict):
+    """(downstream eco, downstream name, upstream eco, upstream name) for a repackaged-as-is row.
+    wrapper_side says which of the classified pair is the downstream repackage."""
+    if evidence.get("wrapper_side") == "a":
+        return evidence["eco_a"], evidence["name_a"], evidence["eco_b"], evidence["name_b"]
+    return evidence["eco_b"], evidence["name_b"], evidence["eco_a"], evidence["name_a"]
+
+
 # Display order for VIII-B rows: what you can act on right now first, settled rows last.
 _REPACKAGE_ACTION_ORDER = ["PULL", "WAIT", "CHECK", "UNKNOWN", "DONE"]
 _REPACKAGE_ACTION_COLOR = {"PULL": RED, "WAIT": YELLOW, "DONE": GREEN, "CHECK": "", "UNKNOWN": ""}
@@ -1330,7 +1358,7 @@ def _repackage_action(fixed_by_eco: dict, up_eco: str, down_eco: str) -> str:
     return "PULL" if down == "U" else "CHECK"
 
 
-def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: int, cve_correlation_rows: list):
+def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: int, cve_correlation_rows: list, ab_stats: dict = None):
     """Renders Section VIII as three sub-tables answering one question -- is this vulnerability
     actually the same thing being counted more than once -- at two different scopes:
       A, B: WITHIN one advisory's own package listing (see rank_cross_registry_tables) -- is a
@@ -1395,6 +1423,8 @@ def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: 
     else:
         for line in a_grid_lines:
             print(line)
+        if ab_stats:
+            print(f"  {ab_stats['a_actionable']} of {ab_stats['a_total']} cross-compiled advisories this window still have an unfixed ecosystem (listed first).")
 
     # B: unlike A, a repackaged pair DOES have a dependency direction -- the downstream side's fix
     # is gated on the upstream side shipping first and someone noticing/republishing. Columns are
@@ -1410,12 +1440,7 @@ def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: 
         print("-" * box_width)
         b_rows = []
         for v_id, eco_count, cvss, names_by_eco, evidence, fixed_by_eco in table_b:
-            if evidence.get("wrapper_side") == "a":
-                down_eco, down_name = evidence["eco_a"], evidence["name_a"]
-                up_eco, up_name = evidence["eco_b"], evidence["name_b"]
-            else:
-                down_eco, down_name = evidence["eco_b"], evidence["name_b"]
-                up_eco, up_name = evidence["eco_a"], evidence["name_a"]
+            down_eco, down_name, up_eco, up_name = _repackage_ends(evidence)
             b_rows.append((_repackage_action(fixed_by_eco, up_eco, down_eco), v_id, evidence, f"{down_eco}: {down_name}", f"{up_eco}: {up_name}"))
         # Actionable rows first (stable, so ties keep their span/CVSS order).
         b_rows.sort(key=lambda r: _REPACKAGE_ACTION_ORDER.index(r[0]))
@@ -1426,6 +1451,8 @@ def print_section_viii_identity_correlation(table_a, table_b, qualifying_count: 
             print(f"{v_id:<24} | {action_cell} | {evidence['confidence'].upper():<10} | {_truncate_with_ellipsis(down_text, 38):<38} | {_truncate_with_ellipsis(up_text, 44)}")
         print("  Action: PULL = upstream fixed, downstream hasn't republished yet | WAIT = upstream still unfixed | DONE = both fixed")
         print("          CHECK = upstream fixed, downstream status unknown | UNKNOWN = no upstream fix data (needs --rebuild)")
+        if ab_stats:
+            print(f"  {ab_stats['b_actionable']} of {ab_stats['b_total']} repackaged advisories this window need action (PULL or WAIT); the table lists those first.")
 
     print()
     print("-" * box_width)
@@ -1817,11 +1844,12 @@ def generate_enterprise_threat_leaderboard(
         )
 
     hydrate_lookup_details(ghsa_lookup, session_advisory_ids, db_path)
-    table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids)
+    ab_stats = {}
+    table_a_cross_compiled, table_b_repackaged = rank_cross_registry_tables(ghsa_lookup, session_advisory_ids, stats=ab_stats)
 
     # Sub-table C needs a table-wide GROUP BY over the whole `vulnerabilities` table.
     qualifying_count, cve_correlation_rows = find_cross_ecosystem_cve_correlations(db_path, session_advisory_ids)
-    print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, qualifying_count, cve_correlation_rows)
+    print_section_viii_identity_correlation(table_a_cross_compiled, table_b_repackaged, qualifying_count, cve_correlation_rows, ab_stats=ab_stats)
 
     # Save Snapshot Disk Serialization Routine. KEV lead-time is only computed when an export is
     # actually happening -- it's an extra warehouse query, no point paying for it on every
