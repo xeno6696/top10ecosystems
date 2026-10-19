@@ -2485,6 +2485,25 @@ def build_snapshot_filename(start_date, end_date, target_layer=None, *, priority
     return f"{start_date.strftime('%d-%m-%y')}_to_{end_date.strftime('%d-%m-%y')}_{target_layer if target_layer else 'all'}{suffix}.json"
 
 
+def _stage_modification_stream():
+    """Downloads the OSV modification index (modified_id.csv, ~900K rows) once and returns the parsed
+    rows, or None if the download fails -- callers then fall back to each report fetching its own
+    copy. Shared by main() and run_velocity_update(); the latter used to leave this to
+    generate_enterprise_threat_leaderboard, which re-downloaded the whole index for every one of
+    --velocity's windows although the index doesn't change between them."""
+    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
+    print("[*] Staging upstream modification stream index into memory...")
+    try:
+        response = requests.get(manifest_url, timeout=30)
+        response.raise_for_status()
+        rows = list(csv.reader(io.StringIO(response.text)))
+        print(f"[+] Cached {len(rows):,} mutation rows cleanly. Commencing generation pipeline.")
+        return rows
+    except Exception as e:
+        print(f"{YELLOW}[!] Failed to pre-fetch stream index: {e}. Falling back to individual live connections.{RESET}")
+        return None
+
+
 def run_velocity_update(args):
     snapshot_dir = args.velocity or "./output"
     os.makedirs(snapshot_dir, exist_ok=True)
@@ -2495,10 +2514,11 @@ def run_velocity_update(args):
     require_warehouse()
     db_path = DB_PATH
     global_ghsa_lookup = build_ghsa_from_db(db_path=db_path, target_registries=target_registries)
+    manifest_rows = _stage_modification_stream()
 
     for calculated_start, calculated_end in windows:
         snapshot_path = os.path.join(snapshot_dir, build_snapshot_filename(calculated_start, calculated_end, args.layer, priority_sort_active=args.priority_sort))
-        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
+        generate_enterprise_threat_leaderboard(start_date=calculated_start, end_date=calculated_end, target_layer=args.layer, debug_mode=args.debug, custom_export_arg=snapshot_path, project_file_path=args.project_file, forced_format=args.project_format, audit_mode=args.audit, ghsa_lookup=global_ghsa_lookup, manifest_rows=manifest_rows, priority_sort_active=args.priority_sort, target_registries=target_registries, db_path=db_path)
 
     # RESTORED: stitch the accumulated snapshots into a CSV velocity matrix, with an
     # opt-in terminal (plotext) chart via --terminal-plot -- see generate_velocity_matrix().
@@ -3313,17 +3333,18 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 
     deduped_catalog = list(vuln_clusters.values())
 
-    # Sort key preserves this table's EXISTING tiebreak chain (name, then id) exactly when
-    # priority-sort is inactive -- deliberately NOT reusing the shared _priority_sort_key() here,
-    # since that function's own inactive-mode tuple (-cvss, -radius, id) drops the name tiebreak
-    # this table has always used, which would silently change default output.
+    # Sort key keeps this table's name-then-id tiebreak chain -- deliberately NOT reusing the
+    # shared _priority_sort_key(), whose tuple ends at the id and drops the name tiebreak this
+    # table has always used. Blast radius no longer participates in ranking (see that function);
+    # it is still part of the dedup key above, purely to keep distinct advisories for the same
+    # package and CVSS apart rather than as a ranking input.
     def _rank_shift_sort_key(row):
-        _, p_name, cvss, radius, _, epss_score, kev_added = row
+        _, p_name, cvss, _, _, epss_score, kev_added = row
         if not priority_sort_active:
-            return (-cvss, -radius, p_name.lower(), row[0])
+            return (-cvss, p_name.lower(), row[0])
         kev_hit = 0 if kev_added else 1
         epss = epss_score or 0.0
-        return (kev_hit, -epss, -cvss, -radius, p_name.lower(), row[0])
+        return (kev_hit, -epss, -cvss, p_name.lower(), row[0])
 
     # 2. Current catalog ranking (All known items in registry)
     current_sorted = sorted(deduped_catalog, key=_rank_shift_sort_key)
@@ -3455,12 +3476,12 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     # 4. TOP 10 CRITICAL THREAT ARRIVALS & CAMPAIGNS (DEDUPLICATED)
     # -------------------------------------------------------------------------
     print(f"\n[+] Top 10 Critical Threat Arrivals & Campaigns (Published Since {start_str}):")
-    section4_width = 155 if priority_sort_active else 115
+    section4_width = 138 if priority_sort_active else 98
     print("-" * section4_width)
     if priority_sort_active:
-        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Age':<6} | {'EPSS / KEV':<28} | {'Threat Profile'}")
+        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Age':<6} | {'EPSS / KEV':<28} | {'Threat Profile'}")
     else:
-        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Blast Radius':<14} | {'Age':<6} | {'Threat Profile'}")
+        print(f"{'Advisory ID':<20} | {'Artifact Name':<25} | {'CVSS':<5} | {'Age':<6} | {'Threat Profile'}")
     print("-" * section4_width)
 
     if priority_sort_active:
@@ -3474,7 +3495,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
               AND v.ecosystems LIKE ?
               AND v.published_date >= ?
               AND v.threat_profile NOT LIKE '%Withdrawn%'
-            ORDER BY (CASE WHEN k.date_added IS NOT NULL THEN 0 ELSE 1 END), e.epss_score DESC, v.cvss_score DESC, v.blast_radius DESC, v.advisory_id ASC
+            ORDER BY (CASE WHEN k.date_added IS NOT NULL THEN 0 ELSE 1 END), e.epss_score DESC, v.cvss_score DESC, v.advisory_id ASC
             LIMIT 50
         """, (start_str, relaxed_like_pattern, start_str))
     else:
@@ -3485,7 +3506,7 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
               AND ecosystems LIKE ?
               AND published_date >= ?
               AND threat_profile NOT LIKE '%Withdrawn%'
-            ORDER BY cvss_score DESC, blast_radius DESC, advisory_id ASC
+            ORDER BY cvss_score DESC, advisory_id ASC
             LIMIT 50
         """, (start_str, relaxed_like_pattern, start_str))
 
@@ -3507,10 +3528,9 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
     if deduped_worst:
         for row in deduped_worst:
             if priority_sort_active:
-                aid, p_name, cvss, radius, t_profile, pub_date_str, epss_score, kev_added = row
+                aid, p_name, cvss, _, t_profile, pub_date_str, epss_score, kev_added = row
             else:
-                aid, p_name, cvss, radius, t_profile, pub_date_str = row
-            radius_str = f"{radius:,} Vers"
+                aid, p_name, cvss, _, t_profile, pub_date_str = row
 
             age_str = "N/A"
             if pub_date_str:
@@ -3523,9 +3543,9 @@ def generate_ecosystem_trend_briefing(db_path: str, start_date, end_date, regist
 
             if priority_sort_active:
                 epss_kev_col = _format_epss_kev_column(epss_score, kev_added)
-                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {radius_str:<14} | {age_str:<6} | {epss_kev_col} | {t_profile}")
+                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {age_str:<6} | {epss_kev_col} | {t_profile}")
             else:
-                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {radius_str:<14} | {age_str:<6} | {t_profile}")
+                print(f"{aid:<20} | {p_name[:25]:<25} | {cvss:<5.1f} | {age_str:<6} | {t_profile}")
     else:
         print("    [-] No severe new threat arrivals or malware campaigns recorded in this window.")
     print("-" * section4_width)
@@ -3716,11 +3736,11 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
     Console output always prints the "kev" ranking mode (highest to lowest):
         1. KEV catalog hit          -> confirmed active exploitation in the wild
         2. EPSS score, descending   -> probability of exploitation in next 30 days
-        3. CVSS / blast radius      -> raw theoretical severity, as tiebreaker only
+        3. CVSS                     -> raw theoretical severity, as tiebreaker only
 
     export_path, when set, writes THREE files (same rows, three rank orders,
     via the shared _priority_sort_key modes) rather than one -- "default"
-    (CVSS/blast-radius only, the pre-KEV baseline), "epss"
+    (CVSS only, the pre-KEV baseline), "epss"
     (exploitation-probability-first, no KEV gate), and "kev" (the ranking
     above). Each is a complete, self-describing dispatch list with its own
     "rank" field per row, so a consumer picks exactly one file/mode instead
@@ -3836,8 +3856,7 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
         rec["kev_due_date"] = kev_due
         rec["kev_known_ransomware_use"] = kev_ransom
 
-    # Sort in Python (KEV hit desc, EPSS desc, CVSS desc, blast_radius desc,
-    # advisory_id asc) -- can no longer be a pure SQL ORDER BY now that CVE
+    # Sort in Python (KEV hit desc, EPSS desc, CVSS desc, advisory_id asc) -- can no longer be a pure SQL ORDER BY now that CVE
     # resolution includes the id-pattern fallback. Console always shows the
     # "kev" ranking mode (the operational act-on-this-now dispatch order);
     # the export below additionally produces the "default" and "epss" modes
@@ -3922,7 +3941,7 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
         base_root, base_ext = os.path.splitext(base_path)
         base_ext = base_ext or ".json"
 
-        # One file per ranking mode -- default (CVSS/blast-radius only, the
+        # One file per ranking mode -- default (CVSS only, the
         # pre-KEV baseline), epss (exploitation-probability-first, no KEV
         # gate), and kev (today's KEV -> EPSS -> CVSS operational order).
         # Each file is independently a complete, self-describing dispatch
@@ -3997,7 +4016,7 @@ def main():
     parser.add_argument("--crosscheck", action="store_true", help="Generate the KEV -> EPSS -> OSV/CVSS prioritized developer dispatch list.")
     parser.add_argument("--crosscheck-export", nargs='?', const=True, default=False, metavar="PATH", help="Export the cross-check dispatch list as 3 JSON files, one per ranking mode: default/epss/kev (optionally provide a base path). Always exports the FULL list, uncapped.")
     parser.add_argument("--crosscheck-limit", type=int, default=100, metavar="N", help="Cap console output to the top N rows (default 100). Use 0 for no cap. Never affects --crosscheck-export.")
-    parser.add_argument("--priority-sort", action="store_true", help="Rank Sections I/V/VI/VII by KEV -> EPSS -> CVSS/blast-radius instead of CVSS/blast-radius alone. Default (omitted) behavior is completely unchanged.")
+    parser.add_argument("--priority-sort", action="store_true", help="Also render Sections VI/VII ranked by KEV -> EPSS -> CVSS and by EPSS -> CVSS, alongside the default CVSS ranking, and apply the KEV-first ranking to --trends.")
     args = parser.parse_args()
     
     if args.hunt_retracted:
@@ -4028,16 +4047,7 @@ def main():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     target_registries = [r.strip() for r in args.registry.split(",")] if args.registry else None
     
-    manifest_url = "https://storage.googleapis.com/osv-vulnerabilities/modified_id.csv"
-    print("[*] Staging upstream modification stream index into memory...")
-    try:
-        response = requests.get(manifest_url, timeout=30)
-        response.raise_for_status()
-        cached_manifest_rows = list(csv.reader(io.StringIO(response.text)))
-        print(f"[+] Cached {len(cached_manifest_rows):,} mutation rows cleanly. Commencing generation pipeline.")
-    except Exception as e:
-        print(f"{YELLOW}[!] Failed to pre-fetch stream index: {e}. Falling back to individual live connections.{RESET}")
-        cached_manifest_rows = None
+    cached_manifest_rows = _stage_modification_stream()
 
     # =========================================================================
     # FEATURE ROUTING LAYER: TRENDS TIMELINE CALCULATOR

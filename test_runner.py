@@ -1353,6 +1353,52 @@ class TestThreatStreamScanner(unittest.TestCase):
             "[!] Default filename format regressed away from its historical shape."
         )
 
+    def test_trends_briefing_no_longer_shows_or_ranks_by_blast_radius(self):
+        """
+        [REGRESSION] Blast radius (affected-version count) carries no exploitation signal, so --trends must
+        not print a Blast Radius column or use it to order Threat Arrivals, in either ranking mode.
+        """
+        import contextlib, re
+        end = datetime.datetime(2026, 10, 4, tzinfo=datetime.timezone.utc)
+        start = end - datetime.timedelta(days=30)
+        for priority in (False, True):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                top10ecosystems.generate_ecosystem_trend_briefing(top10ecosystems.DB_PATH, start, end, "npm", [], priority_sort_active=priority)
+            out = re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+            self.assertIn("Top 10 Critical Threat Arrivals", out)
+            self.assertNotIn("Blast", out, f"[!] --trends (priority_sort_active={priority}) still prints blast radius.")
+            self.assertNotIn(" Vers", out, f"[!] --trends (priority_sort_active={priority}) still prints an affected-version count.")
+            arrivals = out[out.index("Top 10 Critical Threat Arrivals"):]
+            header = next(l for l in arrivals.splitlines() if l.startswith("Advisory ID") and "Artifact Name" in l and "Age" in l)
+            self.assertEqual(("EPSS / KEV" in header), priority)
+
+    def test_velocity_stages_the_modification_stream_once_for_every_window(self):
+        """
+        [REGRESSION] --velocity ran the full report once per window and never handed it the modification
+        index, so every window re-downloaded the same ~900K-row file. It must be fetched once up front
+        and the same rows passed to each window.
+        """
+        import contextlib, tempfile
+        from types import SimpleNamespace
+        rows = [["2026-10-01T00:00:00Z", "npm/GHSA-x.json"]]
+        calls = []
+        args = SimpleNamespace(velocity=None, registry=None, layer="app", debug=False, project_file=None, project_format=None,
+                               audit=False, priority_sort=False, to=["2026-10-01", "2026-10-02", "2026-10-03"], days=5,
+                               from_date=None, report=None, terminal_plot=False)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            args.velocity = tmp
+            with patch.object(top10ecosystems, "_stage_modification_stream", return_value=rows) as staged, \
+                 patch.object(top10ecosystems, "build_ghsa_from_db", return_value={}), \
+                 patch.object(top10ecosystems, "require_warehouse", lambda: None), \
+                 patch.object(top10ecosystems, "generate_velocity_matrix", lambda **kw: None), \
+                 patch.object(top10ecosystems, "generate_enterprise_threat_leaderboard", lambda **kw: calls.append(kw)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                top10ecosystems.run_velocity_update(args)
+        self.assertEqual(staged.call_count, 1, "[!] The modification stream must be staged exactly once, not per window.")
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all(c["manifest_rows"] is rows for c in calls), "[!] Every window must reuse the staged rows.")
+
     def test_compare_snapshots_golden_master_deltas(self):
         """Validates the comparison engine's delta arithmetic and rank shifts."""
         file_base = os.path.join("src", "test", "resources", "threat_landscape_2026-05-18_app.json")
