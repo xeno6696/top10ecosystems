@@ -1399,6 +1399,113 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertTrue(all(c["manifest_rows"] is rows for c in calls), "[!] Every window must reuse the staged rows.")
 
+    def test_landmark_advisories_restricted_to_charted_registries_carry_their_repository(self):
+        import tempfile
+        registries = ["npm", "PyPI", "Maven (Java)"]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            found = top10ecosystems.find_landmark_advisories(self._landmark_db(tmp), "2026-09-01", "2026-09-30", top_n=5, registries=registries)
+        self.assertEqual([lm["cve_id"] for lm in found], ["CVE-A", "CVE-C"],
+                         "[!] A CVE with no record in a charted registry (CVE-B is Debian-only) can't be colored and must be excluded.")
+        by_id = {lm["cve_id"]: lm for lm in found}
+        self.assertEqual(by_id["CVE-A"]["ecosystems"], ["npm", "PyPI"], "Most records first (npm has 2, PyPI 1).")
+        self.assertEqual(by_id["CVE-C"]["ecosystems"], ["Maven (Java)"])
+        self.assertEqual(by_id["CVE-A"]["event_date"], "2026-09-10")
+
+    def test_landmark_label_takes_its_repository_color_from_the_chart_key(self):
+        repo_style = top10ecosystems._landmark_repo_style
+        colors = {"npm": "#1f77b4", "PyPI": "#ff7f0e"}
+        self.assertEqual(repo_style({"ecosystems": ["PyPI", "npm"]}, colors)[:2], ("PyPI", "#ff7f0e"))
+        self.assertEqual(repo_style({"ecosystems": ["Go (Golang)", "npm"]}, colors)[:2], ("npm", "#1f77b4"),
+                         "A registry with no line in the chart has no key color; fall through to the next one.")
+        self.assertEqual(repo_style({"ecosystems": []}, colors)[:2], (None, top10ecosystems._LANDMARK_COLOR))
+        self.assertEqual(repo_style({"ecosystems": ["npm"]}, None)[:2], (None, top10ecosystems._LANDMARK_COLOR))
+        self.assertEqual(repo_style({"ecosystems": ["npm"]}, colors)[2], "#ffffff", "Dark fill needs light text.")
+        self.assertEqual(repo_style({"ecosystems": ["PyPI"]}, colors)[2], "#111111", "Light fill needs dark text.")
+
+    def test_report_landmark_colors_match_the_ecosystem_chart_lines(self):
+        """End to end through generate_html_report: the pill, its line and its key swatch use the exact
+        color the registry's line has in chart I, and the key names the repository in text."""
+        import contextlib, tempfile
+        def snap(day, npm, pypi):
+            return {"metadata": {"interval_to": day, "interval_from": "2026-04-18", "target_layer_filter": "app"},
+                    "leaderboard": {"npm": npm, "PyPI": pypi}, "threat_profile": {"Malware (New Entry)": npm}}
+        snaps = [snap("2026-09-01", 10, 5), snap("2026-09-10", 30, 9), snap("2026-09-20", 50, 20), snap("2026-09-30", 80, 21)]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db, out = self._landmark_db(tmp), os.path.join(tmp, "report.html")
+            with contextlib.redirect_stdout(io.StringIO()):
+                top10ecosystems.generate_html_report(snaps, out, db_path=db)
+            with open(out, encoding="utf-8") as f:
+                page = f.read()
+        npm_color, pypi_color = "#1f77b4", "#ff7f0e"
+        self.assertIn(f"background:{npm_color};", page, "[!] npm landmark (CVE-A) must use npm's chart color.")
+        self.assertIn(f'class="lm-swatch" style="background:{npm_color}"', page)
+        self.assertIn("npm, PyPI; placed at 2026-09-10", page, "[!] The key must name the repository in text, not only by color.")
+        self.assertNotIn("CVE-B", page, "[!] A distro-only CVE must not be a landmark on a chart of the major registries.")
+
+    def test_rects_overlap_respects_margin_and_touching_edges(self):
+        overlap = top10ecosystems._rects_overlap
+        self.assertTrue(overlap((0, 0, 10, 10), (5, 5, 15, 15)))
+        self.assertFalse(overlap((0, 0, 10, 10), (10, 0, 20, 10)), "Rectangles that only share an edge don't overlap.")
+        self.assertTrue(overlap((0, 0, 10, 10), (12, 0, 20, 10), margin=3), "A margin counts near misses as overlap.")
+        self.assertFalse(overlap((0, 0, 10, 10), (30, 30, 40, 40), margin=3))
+
+    def test_landmark_label_never_lands_on_the_legend(self):
+        """
+        [REGRESSION] Labels were staggered by order only, so one could land on top of the chart legend
+        (upper right). A label must clear the legend's real bounding box -- while labels that don't
+        collide must keep their usual spot.
+        """
+        import re
+        dates = [f"2026-09-{d:02d}" for d in range(1, 11)]
+        def render(with_legend):
+            fig, ax = top10ecosystems.mplplt.subplots(figsize=(12, 6))
+            ax.plot(dates, list(range(10)), label="Malware (New Entry)")
+            ax.plot(dates, list(range(10, 0, -1)), label="Vulnerability Fix (Update)")
+            if with_legend:
+                ax.legend(loc="upper right")
+            lm = {"cve_id": "CVE-2016-3081", "name": "n", "description": "", "epss": 0.5, "cvss": 9.8, "published": None,
+                  "kev_added": "2026-09-10", "ransomware": False, "event_date": dates[-1], "ecosystems": []}
+            try:
+                out = top10ecosystems._render_chart_with_landmarks(fig, ax, [lm], dates, "alt")
+                fig.canvas.draw()
+                renderer = fig.canvas.get_renderer()
+                tb, pad = fig.get_tightbbox(renderer), 0.1
+                legend_box = ax.get_legend().get_window_extent(renderer) if with_legend else None
+                m = re.search(r'style="left:([\d.]+)%;top:([\d.]+)%', out)
+                left, top = float(m.group(1)), float(m.group(2))
+                x = (left / 100 * (tb.width + 2 * pad) + tb.x0 - pad) * fig.dpi
+                y_top = ((1 - top / 100) * (tb.height + 2 * pad) + tb.y0 - pad) * fig.dpi
+                w = 7.6 * len(lm["cve_id"]) + 18
+                x0, x1 = (x - w, x) if left > 60 else (x, x + w)
+                rect = (x0, y_top - top10ecosystems._LANDMARK_PILL_HEIGHT_PX, x1, y_top)
+                return top, rect, (None if legend_box is None else (legend_box.x0, legend_box.y0, legend_box.x1, legend_box.y1))
+            finally:
+                top10ecosystems.mplplt.close(fig)
+        top_plain, _, _ = render(with_legend=False)
+        top_legend, rect, legend_rect = render(with_legend=True)
+        self.assertFalse(top10ecosystems._rects_overlap(rect, legend_rect),
+                         "[!] The landmark label is overlapping the chart legend.")
+        self.assertGreater(top_legend, top_plain, "[!] The label should have moved down to clear the legend.")
+
+    def test_landmark_labels_that_do_not_collide_keep_their_staggered_rows(self):
+        import re
+        dates = [f"2026-09-{d:02d}" for d in range(1, 11)]
+        fig, ax = top10ecosystems.mplplt.subplots(figsize=(12, 6))
+        ax.plot(dates, list(range(10)), label="x")
+        ax.legend(loc="upper right")
+        def lm(cve, day):
+            return {"cve_id": cve, "name": "n", "description": "", "epss": 0.5, "cvss": 9.8, "published": None,
+                    "kev_added": day, "ransomware": False, "event_date": day, "ecosystems": []}
+        try:
+            out = top10ecosystems._render_chart_with_landmarks(
+                fig, ax, [lm("CVE-1-1", dates[1]), lm("CVE-2-2", dates[3]), lm("CVE-3-3", dates[5])], dates, "alt")
+        finally:
+            top10ecosystems.mplplt.close(fig)
+        tops = [float(t) for t in re.findall(r'style="left:[\d.]+%;top:([\d.]+)%', out)]
+        self.assertEqual(len(tops), 3)
+        self.assertEqual(tops, sorted(tops), "Left-side labels stay in their staggered order, each a row lower.")
+        self.assertEqual(len(set(round(t, 1) for t in tops)), 3)
+
     def test_compare_snapshots_golden_master_deltas(self):
         """Validates the comparison engine's delta arithmetic and rank shifts."""
         file_base = os.path.join("src", "test", "resources", "threat_landscape_2026-05-18_app.json")
@@ -2269,16 +2376,16 @@ class TestThreatStreamScanner(unittest.TestCase):
     def _landmark_db(self, tmp):
         path = os.path.join(tmp, "landmarks.db")
         conn = sqlite3.connect(path)
-        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, published_date TEXT, cvss_score REAL)")
+        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, published_date TEXT, cvss_score REAL, ecosystems TEXT)")
         conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT, vulnerability_name TEXT, short_description TEXT, known_ransomware_use TEXT)")
         conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL)")
-        conn.executemany("INSERT INTO vulnerabilities VALUES (?,?,?,?)", [
-            ("GHSA-a1", "CVE-A", "2026-09-10", 9.8),
-            ("GHSA-a2", "CVE-A", "2026-09-12", 9.8),   # second record for the same CVE
-            ("GHSA-b1", "CVE-B", "2026-01-05", 7.0),   # old CVE, KEV-added inside the window
-            ("GHSA-c1", "CVE-C", "2026-09-20", 5.0),
-            ("GHSA-d1", "CVE-D", "2026-09-15", 9.0),   # in window but not on KEV
-            ("GHSA-e1", "CVE-E", "2026-02-01", 9.0),   # on KEV but nothing falls in the window
+        conn.executemany("INSERT INTO vulnerabilities VALUES (?,?,?,?,?)", [
+            ("GHSA-a1", "CVE-A", "2026-09-10", 9.8, '["npm"]'),
+            ("GHSA-a2", "CVE-A", "2026-09-12", 9.8, '["PyPI", "npm"]'),   # second record for the same CVE
+            ("GHSA-b1", "CVE-B", "2026-01-05", 7.0, '["Debian"]'),        # old distro-only CVE, KEV-added inside the window
+            ("GHSA-c1", "CVE-C", "2026-09-20", 5.0, '["Maven (Java)"]'),
+            ("GHSA-d1", "CVE-D", "2026-09-15", 9.0, '["npm"]'),           # in window but not on KEV
+            ("GHSA-e1", "CVE-E", "2026-02-01", 9.0, '["npm"]'),           # on KEV but nothing falls in the window
         ])
         conn.executemany("INSERT INTO kev_catalog VALUES (?,?,?,?,?)", [
             ("CVE-A", "2026-09-11", "Alpha RCE", "Alpha desc", "Known"),
@@ -2333,7 +2440,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertIn('href="https://osv.dev/vulnerability/CVE-A"', out)
         self.assertNotIn("<script>", out, "[!] Advisory text must be HTML-escaped before it goes into the report.")
         self.assertIn("&lt;script&gt;", out)
-        pos = re.search(r'style="left:([\d.]+)%;top:([\d.]+)%"', out)
+        pos = re.search(r'style="left:([\d.]+)%;top:([\d.]+)%', out)
         self.assertIsNotNone(pos, "[!] Landmark label overlay missing.")
         left, top = float(pos.group(1)), float(pos.group(2))
         self.assertTrue(30 < left < 70, f"[!] Middle-date landmark should sit near the middle of the chart image, got left={left}%.")
