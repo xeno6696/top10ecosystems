@@ -129,15 +129,15 @@ Sections VI and VII rank by CVSS by default. Pass `--priority-sort` to also rend
 
 ## 🎯 KEV/EPSS Prioritized Dispatch List (`--crosscheck`)
 
-Cross-checks the CISA KEV catalog, FIRST's EPSS exploitation-probability score, and raw OSV/CVSS severity against the vulnerability catalog for a given window. The console table always shows the "what should a developer actually work on first" ranking — KEV (known to be actively exploited) first, then by descending EPSS probability, then by CVSS/blast-radius. Requires an explicit `--registry` filter:
+Cross-checks the CISA KEV catalog, FIRST's EPSS exploitation-probability score, and raw OSV/CVSS severity against the vulnerability catalog for a given window. The console table always shows the "what should a developer actually work on first" ranking — KEV (known to be actively exploited) first, then by descending EPSS probability, then by CVSS. Requires an explicit `--registry` filter:
 ```bash
 python top10ecosystems.py --crosscheck --registry npm,PyPI --from 2026-08-18 --to 2026-09-17
 ```
 - `--crosscheck-limit N` caps the console table to the top N rows (default 100; `0` for uncapped).
 - `--crosscheck-export [PATH]` exports the full, uncapped list as **three** JSON files — one per ranking mode, same underlying rows, different sort/rank — so a consumer picks exactly the ranking they mean instead of reconciling multiple numbers themselves:
-  - `<PATH>_default.json` — CVSS/blast-radius only (the pre-KEV baseline)
+  - `<PATH>_default.json` — CVSS only (the pre-KEV baseline)
   - `<PATH>_epss.json` — EPSS probability first, no KEV gate
-  - `<PATH>_kev.json` — KEV → EPSS → CVSS/blast-radius (matches the console table)
+  - `<PATH>_kev.json` — KEV → EPSS → CVSS (matches the console table)
 
   (omit `PATH` and it defaults to `output/supply_chain_crosscheck_<end-date>_<mode>.json`). Each file's `dispatch_list` rows carry an explicit `rank` field for that mode.
 
