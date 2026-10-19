@@ -1778,10 +1778,10 @@ _LANDMARK_COLOR = "#ffd54f"
 
 _LANDMARK_CSS = """
         .chart-wrap { position: relative; display: inline-block; max-width: 100%; }
-        .lm { position: absolute; z-index: 2; background: #ffd54f; color: #1e1e1e; font-size: 11px; font-weight: 600;
+        .lm { position: absolute; z-index: 2; font-size: 11px; font-weight: 600;
               padding: 2px 6px; border-radius: 10px; text-decoration: none; white-space: nowrap; }
         .lm.lm-left { transform: translateX(-100%); }
-        .lm:hover { z-index: 10; background: #fff176; }
+        .lm:hover { z-index: 10; filter: brightness(1.18); }
         .lm .tip { display: none; position: absolute; top: 100%; left: 0; margin-top: 6px; width: 340px; white-space: normal;
                    text-align: left; background: #151515; color: #e0e0e0; border: 1px solid #ffd54f; border-radius: 6px;
                    padding: 10px 12px; font-weight: 400; font-size: 12px; line-height: 1.5; }
@@ -1789,7 +1789,8 @@ _LANDMARK_CSS = """
         .lm:hover .tip { display: block; }
         .lm .tip strong { color: #ffd54f; }
         .lm-key { text-align: left; font-size: 13px; color: #aaaaaa; margin: 14px 0 0 0; padding-left: 20px; }
-        .lm-key a { color: #ffd54f; text-decoration: none; }
+        .lm-key a { color: #e0e0e0; text-decoration: none; font-weight: 600; }
+        .lm-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
         .lm-key a:hover { text-decoration: underline; }
         .lm-key-title { text-align: left; font-size: 13px; color: #cccccc; margin: 14px 0 0 0; }
 """
@@ -1802,7 +1803,7 @@ def _iso_date_or_none(text):
         return None
 
 
-def find_landmark_advisories(db_path: str, start_date: str, end_date: str, top_n: int = 3) -> list:
+def find_landmark_advisories(db_path: str, start_date: str, end_date: str, top_n: int = 3, registries: list = None) -> list:
     """The handful of 'headline' advisories to mark on the --report timeline charts for a window:
     CVEs on CISA's KEV list (i.e. confirmed exploited -- the closest thing to 'famous this month'
     the data can define, and the only advisories with a real human-readable name and description
@@ -1811,26 +1812,48 @@ def find_landmark_advisories(db_path: str, start_date: str, end_date: str, top_n
     CVSS as the tiebreak. One entry per CVE (many CVEs have several advisory records); its
     event_date -- where it's placed on the time axis -- is the earliest publish date when that
     falls in the window, else its KEV-addition date (an older CVE that became urgent this month).
+
+    registries, when given (the ecosystems the report's charts actually plot), restricts candidates
+    to CVEs with at least one advisory record in one of them, and tags each landmark with the
+    plotted registries it appears in (most records first, then the order given) so the report can
+    color it to match the chart key. Without it, most KEV CVEs can't be tied to any plotted line:
+    only ~7% (129 of 1,748) have a record in the seven major registries, and the rest live in
+    distro or unrecognized ("Other") ecosystems the charts don't show -- those would be landmarks
+    on a chart that has no repository to attribute them to.
     Returns [] when the warehouse or its KEV/EPSS tables aren't available, so --report degrades
     to the plain charts instead of failing."""
     if not db_path or not os.path.exists(db_path) or not _iso_date_or_none(start_date) or not _iso_date_or_none(end_date):
         return []
+    registries = list(registries or [])
+    eco_filter = (" AND (" + " OR ".join("v.ecosystems LIKE ?" for _ in registries) + ")") if registries else ""
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT v.cve_alias, MIN(substr(v.published_date, 1, 10)), k.date_added, k.vulnerability_name,
                    k.short_description, e.epss_score, MAX(v.cvss_score), k.known_ransomware_use
             FROM vulnerabilities v
             JOIN kev_catalog k ON k.cve_id = v.cve_alias
             LEFT JOIN epss_scores e ON e.cve_id = v.cve_alias
-            WHERE substr(v.published_date, 1, 10) BETWEEN ? AND ? OR k.date_added BETWEEN ? AND ?
+            WHERE (substr(v.published_date, 1, 10) BETWEEN ? AND ? OR k.date_added BETWEEN ? AND ?){eco_filter}
             GROUP BY v.cve_alias
             ORDER BY e.epss_score DESC, MAX(v.cvss_score) DESC, v.cve_alias
             LIMIT ?
             """,
-            (start_date[:10], end_date[:10], start_date[:10], end_date[:10], top_n),
+            (start_date[:10], end_date[:10], start_date[:10], end_date[:10], *[f'%"{r}"%' for r in registries], top_n),
         ).fetchall()
+
+        plotted_by_cve = {}
+        if registries and rows:
+            counts = {row[0]: Counter() for row in rows}
+            marks = ",".join("?" * len(counts))
+            for cve_id, ecos_json in conn.execute(f"SELECT cve_alias, ecosystems FROM vulnerabilities WHERE cve_alias IN ({marks})", list(counts)):
+                try:
+                    counts[cve_id].update(e for e in json.loads(ecos_json or "[]") if e in registries)
+                except (TypeError, ValueError):
+                    pass
+            for cve_id, counter in counts.items():
+                plotted_by_cve[cve_id] = sorted(counter, key=lambda e: (-counter[e], registries.index(e)))
     except sqlite3.Error:
         return []
     finally:
@@ -1844,17 +1867,49 @@ def find_landmark_advisories(db_path: str, start_date: str, end_date: str, top_n
             "epss": epss, "cvss": cvss, "published": published, "kev_added": kev_added,
             "ransomware": (ransomware or "").strip().lower() == "known",
             "event_date": published if in_window else kev_added,
+            "ecosystems": plotted_by_cve.get(cve_id, []),
         })
     return landmarks
 
 
-def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, alt: str) -> str:
+def _landmark_repo_style(lm: dict, eco_colors: dict):
+    """(repository name or None, hex color, readable text color) for one landmark: the first of its
+    plotted registries that has a color in the chart key, else the neutral landmark gold."""
+    from matplotlib.colors import to_hex, to_rgb
+    repo, color = None, _LANDMARK_COLOR
+    for eco in lm.get("ecosystems") or []:
+        if eco in (eco_colors or {}):
+            repo, color = eco, to_hex(eco_colors[eco])
+            break
+    r, g, b = to_rgb(color)
+    return repo, color, ("#111111" if 0.299 * r + 0.587 * g + 0.114 * b > 0.55 else "#ffffff")
+
+
+_LANDMARK_PILL_HEIGHT_PX = 22
+_LANDMARK_SLOT_STEP = 0.09
+_LANDMARK_SLOT_COUNT = 9
+
+
+def _rects_overlap(a: tuple, b: tuple, margin: float = 0.0) -> bool:
+    """True when two (x0, y0, x1, y1) rectangles, padded by margin on every side, intersect."""
+    return not (a[2] + margin <= b[0] or b[2] + margin <= a[0] or a[3] + margin <= b[1] or b[3] + margin <= a[1])
+
+
+def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, alt: str, eco_colors: dict = None) -> str:
     """Saves fig as an embedded PNG and returns its HTML. With landmarks, each gets a dotted
     vertical line drawn into the PNG plus a clickable pill laid over the image at the same spot
     (hover for the KEV name/description/scores; click for the osv.dev record), and a plain-text
     key below as the fallback. Overlay positions are percentages of the saved image, derived from
     the same tight bounding box savefig(bbox_inches='tight') crops to, so they stay aligned at any
-    page width. A landmark whose date doesn't parse or has no plotted x-axis is skipped."""
+    page width. A landmark whose date doesn't parse or has no plotted x-axis is skipped.
+
+    Placement rule: a label never sits on top of the chart's legend or on another label. Each
+    label starts in its own staggered row (the Nth landmark in the Nth slot down from the top) and,
+    if that spot would touch the legend's real bounding box or a label already placed, takes the
+    next free slot instead. Labels that don't collide stay exactly where they were.
+    eco_colors maps a registry to the exact color its line has in the report's ecosystem chart, so a
+    landmark's line and label take its repository's color from that chart's key (and the key below
+    also names the repository in text, so color is never the only cue)."""
     pad = 0.1
     placed = []
     if landmarks and plotted_dates and ax.has_data():
@@ -1866,29 +1921,53 @@ def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, 
                     idx = min(range(len(plotted)), key=lambda i: abs((plotted[i] - target).days))
                     placed.append((lm, idx))
 
-    for _, idx in placed:
-        ax.axvline(idx, color=_LANDMARK_COLOR, linestyle=":", linewidth=1.3, alpha=0.85, zorder=1)
+    for lm, idx in placed:
+        ax.axvline(idx, color=_landmark_repo_style(lm, eco_colors)[1], linestyle=":", linewidth=1.3, alpha=0.85, zorder=1)
 
     overlays = []
     if placed:
         fig.canvas.draw()
         tb = fig.get_tightbbox(fig.canvas.get_renderer())
         span_w, span_h = tb.width + 2 * pad, tb.height + 2 * pad
+        slots = [0.96 - _LANDMARK_SLOT_STEP * i for i in range(_LANDMARK_SLOT_COUNT)]
+        obstacles = []
+        legend = ax.get_legend()
+        if legend is not None:
+            box = legend.get_window_extent(fig.canvas.get_renderer())
+            obstacles.append((box.x0, box.y0, box.x1, box.y1))
         for k, (lm, idx) in enumerate(placed):
             x_px = ax.transData.transform((idx, 0))[0]
-            y_px = ax.transAxes.transform((0, 0.96 - 0.09 * k))[1]
             left = ((x_px / fig.dpi) - (tb.x0 - pad)) / span_w * 100
+            # Pill width is estimated from its text (11px bold caps/digits plus padding); labels past 60%
+            # of the image flip to extend leftward from their line, as in the CSS below.
+            pill_w = 7.6 * len(lm["cve_id"]) + 18
+            x0, x1 = (x_px - pill_w, x_px) if left > 60 else (x_px, x_px + pill_w)
+            chosen = None
+            for slot in slots[k % len(slots):] + slots[:k % len(slots)]:
+                y_top = ax.transAxes.transform((0, slot))[1]
+                rect = (x0, y_top - _LANDMARK_PILL_HEIGHT_PX, x1, y_top)
+                if not any(_rects_overlap(rect, o, margin=6) for o in obstacles):
+                    chosen = (slot, rect)
+                    break
+            if chosen is None:
+                slot = slots[k % len(slots)]
+                y_top = ax.transAxes.transform((0, slot))[1]
+                chosen = (slot, (x0, y_top - _LANDMARK_PILL_HEIGHT_PX, x1, y_top))
+            obstacles.append(chosen[1])
+            y_px = ax.transAxes.transform((0, chosen[0]))[1]
             top = (1 - ((y_px / fig.dpi) - (tb.y0 - pad)) / span_h) * 100
+            repo, color, text_color = _landmark_repo_style(lm, eco_colors)
             tip_lines = [f"<strong>{html.escape(lm['name'] or lm['cve_id'])}</strong>"]
             if lm["description"]:
                 tip_lines.append(html.escape(lm["description"]))
-            facts = [f"Published {lm['published']}" if lm["published"] else None, f"KEV-added {lm['kev_added']}",
+            facts = [f"Repository: {', '.join(lm['ecosystems'])}" if lm.get("ecosystems") else None,
+                     f"Published {lm['published']}" if lm["published"] else None, f"KEV-added {lm['kev_added']}",
                      f"EPSS {lm['epss']:.0%}" if lm["epss"] is not None else None,
                      f"CVSS {lm['cvss']:.1f}" if lm["cvss"] else None, "Ransomware use: known" if lm["ransomware"] else None]
             tip_lines.append("<em>" + " · ".join(f for f in facts if f) + "</em>")
             flip = " lm-left" if left > 60 else ""
             overlays.append(
-                f'<a class="lm{flip}" style="left:{left:.2f}%;top:{top:.2f}%" target="_blank" rel="noopener" '
+                f'<a class="lm{flip}" style="left:{left:.2f}%;top:{top:.2f}%;background:{color};color:{text_color}" target="_blank" rel="noopener" '
                 f'href="https://osv.dev/vulnerability/{html.escape(lm["cve_id"])}">{html.escape(lm["cve_id"])}'
                 f'<span class="tip">{"<br>".join(tip_lines)}</span></a>'
             )
@@ -1901,14 +1980,15 @@ def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, 
         return img
 
     key_items = "".join(
-        f'<li><a href="https://osv.dev/vulnerability/{html.escape(lm["cve_id"])}" target="_blank" rel="noopener">'
+        f'<li><span class="lm-swatch" style="background:{_landmark_repo_style(lm, eco_colors)[1]}"></span>'
+        f'<a href="https://osv.dev/vulnerability/{html.escape(lm["cve_id"])}" target="_blank" rel="noopener">'
         f'{html.escape(lm["cve_id"])}</a> -- "{html.escape(lm["name"] or "unnamed")}" '
-        f'<span>(placed at {lm["event_date"]})</span></li>'
+        f'<span>({html.escape(", ".join(lm["ecosystems"]) if lm.get("ecosystems") else "no plotted registry")}; placed at {lm["event_date"]})</span></li>'
         for lm, _ in placed
     )
     return (f'<div class="chart-wrap">{img}{"".join(overlays)}</div>'
-            f'<p class="lm-key-title">Landmark advisories (dotted gold lines): KEV-listed CVEs with the highest EPSS this window, '
-            f'placed at the day each was published or added to KEV. Hover a label for details; click to open the OSV record.</p>'
+            f'<p class="lm-key-title">Landmark advisories (dotted lines): KEV-listed CVEs with the highest EPSS this window that appear in a charted registry, '
+            f'placed at the day each was published or added to KEV. Each label is colored to match its repository in the ecosystem chart\'s key (Chart I). Hover a label for details; click to open the OSV record.</p>'
             f'<ul class="lm-key">{key_items}</ul>')
 
 
@@ -1952,7 +2032,8 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
     has_deltas = len(dates) >= 2
 
     plotted_range = delta_dates if has_deltas else dates
-    landmarks = find_landmark_advisories(db_path, plotted_range[0], plotted_range[-1]) if plotted_range else []
+    landmarks = find_landmark_advisories(db_path, plotted_range[0], plotted_range[-1], registries=target_ecos) if plotted_range else []
+    eco_colors = {}
 
     def _deltas(series):
         return [b - a for a, b in zip(series, series[1:])]
@@ -1967,11 +2048,11 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
             for eco in target_ecos:
                 series = _deltas(ecosystem_trends[eco])
                 if sum(series) > 0:
-                    ax1.plot(delta_dates, series, marker='o', linewidth=2, label=eco)
+                    eco_colors[eco] = ax1.plot(delta_dates, series, marker='o', linewidth=2, label=eco)[0].get_color()
         else:
             for eco in target_ecos:
                 if sum(ecosystem_trends[eco]) > 0:
-                    ax1.plot(dates, ecosystem_trends[eco], marker='o', linewidth=2, label=eco)
+                    eco_colors[eco] = ax1.plot(dates, ecosystem_trends[eco], marker='o', linewidth=2, label=eco)[0].get_color()
 
         ax1.set_title("Ecosystem Daily Vulnerability Velocity (day-over-day delta)", color='#ffffff', fontsize=14, pad=15)
         ax1.set_ylabel("Daily Stream Volume Delta", color='#bbbbbb')
@@ -1982,7 +2063,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         mplplt.xticks(rotation=30, ha='right')
         mplplt.tight_layout()
 
-        chart1_html = _render_chart_with_landmarks(fig1, ax1, landmarks, delta_dates if has_deltas else dates, "Ecosystem Time Series Chart")
+        chart1_html = _render_chart_with_landmarks(fig1, ax1, landmarks, delta_dates if has_deltas else dates, "Ecosystem Time Series Chart", eco_colors)
         mplplt.close(fig1)
 
         # Chart 2: Threat Profile Daily Breakdown (day-over-day delta)
@@ -2009,7 +2090,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         mplplt.xticks(rotation=30, ha='right')
         mplplt.tight_layout()
 
-        chart2_html = _render_chart_with_landmarks(fig2, ax2, landmarks, delta_dates if has_deltas else dates, "Threat Mutation Breakdown Chart")
+        chart2_html = _render_chart_with_landmarks(fig2, ax2, landmarks, delta_dates if has_deltas else dates, "Threat Mutation Breakdown Chart", eco_colors)
         mplplt.close(fig2)
 
         # Chart 3: KEV Lead Time Trend -- NOT a delta chart like the other two. kev_lead_time
