@@ -41,6 +41,9 @@ import sys
 import time
 from collections import Counter, defaultdict
 
+import env_info
+env_info.exit_if_packages_missing(("cvss", "matplotlib", "plotext", "requests"))
+
 # Third-Party Framework Imports
 from cvss import CVSS2, CVSS3, CVSS4
 import matplotlib
@@ -4076,6 +4079,7 @@ def generate_supply_chain_crosscheck(db_path: str, start_date, end_date, registr
 # =====================================================================
 
 def main(): 
+    env_info.warn_if_unsupported()
     parser = argparse.ArgumentParser(description="OSV Threat Stream Campaign Dashboard Indicator.")
     parser.add_argument("--layer", choices=["container", "app"], help="Isolate by layer type.")
     parser.add_argument("--days", type=int, help="Lookback day window shortcut.")

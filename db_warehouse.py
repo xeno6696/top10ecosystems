@@ -37,6 +37,9 @@ import sys
 import time
 import zipfile
 from collections import Counter
+
+import env_info
+env_info.exit_if_packages_missing(("cvss", "requests"))
 from cvss import CVSS2, CVSS3, CVSS4
 import requests
 
@@ -1073,6 +1076,7 @@ if __name__ == "__main__":
     parser.add_argument("--verify", action="store_true", help="Audit the warehouse against the live OSV feed (read-only); exits non-zero if advisories are missing or stale.")
     parser.add_argument("--skip-kev", action="store_true", help="Skip the CISA KEV catalog refresh pipeline for this run.")
     args = parser.parse_args()
+    env_info.warn_if_unsupported()
 
     if args.verify:
         if not os.path.exists(DB_PATH):

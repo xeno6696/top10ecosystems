@@ -8,13 +8,26 @@ The script builds a local advisory index from OSV, reads the OSV modified adviso
 
 For an engineer cloning this repository clean, follow this sequential execution path to bootstrap the environment and wire the high-performance local database warehouse:
 
-### 1. Clone the Repository & Install Dependencies
-First, target your workspace directory and install the required core packages and high-precision parsing libraries:
+### 1. Clone the Repository & Set Up the Environment
+The supported environment is the Python version in `.python-version` with the exact package versions in `requirements.lock`. One script builds it, using plain `venv` and `pip` (nothing else to install):
 ```bash
 git clone <your-repository-url>
 cd top-10-ecosystems
-pip install -r requirements.txt
+python setup_env.py
 ```
+It creates a project-local `.venv` from whichever Python runs the script, installs the locked versions, and verifies the imports. It is safe to re-run (after pulling a changed lock file, or when an import fails): it only installs when the lock file changed. Nothing is mandatory: on a different Python it still builds a working venv and just says it is unsupported. If a pinned version doesn't exist for your Python, `pip install -r requirements.txt` into the venv is the unsupported way around it.
+
+| Flag | What it does |
+|---|---|
+| *(none)* | Create `.venv` if missing, install the locked versions, verify imports. |
+| `--check` | Read-only: report whether `.venv` is the supported environment (Python version, lock hash, per-package drift); exits non-zero if not. |
+| `--force` | Reinstall even if the lock file is unchanged. |
+| `--recreate` | Delete and rebuild `.venv` (the Python it was built from was removed or replaced). It is never deleted without this flag. |
+| `--relock` | Maintainers: regenerate `requirements.lock` from `requirements.txt` by installing it into a scratch venv and freezing the result. Edit `requirements.txt`, relock, run the tests, commit both. |
+
+Run the tools with the venv's interpreter (`.venv\Scripts\python.exe` on Windows, `.venv/bin/python` elsewhere), or activate it first (`.venv\Scripts\Activate.ps1` / `source .venv/bin/activate`). The commands below assume it is active.
+
+**Support policy.** A bare `python` can be a different interpreter than the venv's, which used to show up as `ModuleNotFoundError: No module named 'cvss'`; the tools now stop with a one-line message pointing at `setup_env.py` instead. If they start in an environment that isn't the supported one (different Python, or packages that differ from the lock), they print `[!] Unsupported environment -- Python X (supported: Y) | lock <hash> | packages: N differ` on stderr and carry on. Paste that line into a bug report: results from any other environment aren't supported. Set `TOP10_ALLOW_UNSUPPORTED_ENV=1` to silence it for deliberate experiments.
 
 ### 2. Initialize and Seed the Relational Data Warehouse
 Before launching dashboard profiles against the relational backend, deploy your local schema layout and seed the SQLite grid indexes:
