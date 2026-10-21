@@ -679,7 +679,7 @@ class TestThreatStreamScanner(unittest.TestCase):
                 if not stripped or stripped.startswith("=") or stripped.startswith("-") or line.count("|") < a_expected_pipes:
                     break
                 cells = line.split("|")
-                marked_count = sum(1 for c in cells[2:] if c.strip())  # cells[0]=Advisory ID, [1]=Conf
+                marked_count = sum(1 for c in cells[2:-1] if c.strip())  # [0]=Advisory ID, [1]=Conf, [-1]=Unfixed summary
                 self.assertGreaterEqual(
                     marked_count, 2,
                     f"[!] REGRESSION: Section VIII-A grid row '{stripped}' has fewer than 2 marked "
@@ -690,11 +690,12 @@ class TestThreatStreamScanner(unittest.TestCase):
         # B: repackaged pairs DO have a dependency direction (downstream waits on upstream), so
         # this table keeps two package cells, now labeled Downstream/Upstream instead of A/B.
         if "Zero advisories" not in zone_b:
+            zone_b = re.sub(r"\x1b\[[0-9;]*m", "", zone_b)
             for row_match in re.finditer(
-                r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(CONFIRMED|HIGH|MEDIUM|LOW)\s*\|\s*(\S.*?)\s*\|\s*(\S.*)$",
+                r"^(GHSA|CVE|PYSEC|MAL|RUSTSEC|GO|CGA)\S*\s*\|\s*(PULL|WAIT|DONE|CHECK|UNKNOWN)\s*\|\s*(CONFIRMED|HIGH|MEDIUM|LOW)\s*\|\s*(\S.*?)\s*\|\s*(\S.*)$",
                 zone_b, re.MULTILINE
             ):
-                pkg_down, pkg_up = row_match.group(3), row_match.group(4)
+                pkg_down, pkg_up = row_match.group(4), row_match.group(5)
                 self.assertTrue(
                     pkg_down.strip() and pkg_up.strip(),
                     f"[!] REGRESSION: Section VIII-B row '{row_match.group(0).strip()}' is missing its "
@@ -922,7 +923,7 @@ class TestThreatStreamScanner(unittest.TestCase):
 
     def test_000_a_anti_hallucination_guard_for_cross_registry_ranker(self):
         """[INTEGRITY] Guards against the deletion of the Section VIII table ranking engine."""
-        self.verify_production_target_signature("rank_cross_registry_tables", expected_args_count=3)
+        self.verify_production_target_signature("rank_cross_registry_tables", expected_args_count=4)
 
     def test_cross_registry_webjars_purl_forces_repackaged(self):
         """[REGRESSION] A Maven 'org.webjars' purl on either side must always classify as
@@ -2661,6 +2662,120 @@ class TestThreatStreamScanner(unittest.TestCase):
             top10ecosystems.mplplt.close(fig)
         self.assertTrue(out.startswith("<img "))
         self.assertNotIn("chart-wrap", out)
+
+    # -------------------------------------------------------------------------
+    # SECTION VIII-A/B ACTIONABILITY: Unfixed column (A) and PULL/WAIT/DONE action words (B)
+    # -------------------------------------------------------------------------
+    def test_repackage_action_follows_upstream_then_downstream_fix_status(self):
+        act = top10ecosystems._repackage_action
+        self.assertEqual(act({"npm": False, "Maven": False}, "npm", "Maven"), "WAIT", "Upstream unfixed: nothing to pull yet.")
+        self.assertEqual(act({"npm": False, "Maven": True}, "npm", "Maven"), "WAIT", "Upstream status decides first.")
+        self.assertEqual(act({"npm": True, "Maven": False}, "npm", "Maven"), "PULL")
+        self.assertEqual(act({"npm": True, "Maven": True}, "npm", "Maven"), "DONE")
+        self.assertEqual(act({"npm": True}, "npm", "Maven"), "CHECK", "Downstream with no data is not guessed at.")
+        self.assertEqual(act({"Maven": False}, "npm", "Maven"), "UNKNOWN", "No upstream data: never claim a state.")
+        self.assertEqual(act({}, "npm", "Maven"), "UNKNOWN")
+
+    def test_unfixed_summary_never_claims_unfixed_from_missing_data(self):
+        summ = top10ecosystems._unfixed_summary
+        self.assertEqual(summ(["npm", "PyPI"], {"npm": True, "PyPI": True}), ("-", 0))
+        self.assertEqual(summ(["npm", "PyPI"], {"npm": False, "PyPI": True}), ("1 of 2", 1))
+        self.assertEqual(summ(["npm", "PyPI", "Go"], {"npm": False, "PyPI": False, "Go": False}), ("3 of 3", 3))
+        self.assertEqual(summ(["npm", "PyPI"], {}), ("? of 2", 0), "Missing fix data is unknown, not unfixed.")
+        self.assertEqual(summ(["npm", "PyPI", "Go"], {"npm": False, "PyPI": True}), ("1+ of 3", 1))
+        self.assertEqual(summ(["npm", "npm"], {"npm": False}), ("1 of 1", 1), "Duplicate ecosystems count once.")
+
+    def test_section_viii_ab_rows_lead_with_what_needs_action(self):
+        import contextlib, re
+        def evidence(down_eco, down_name, up_eco, up_name, confidence="confirmed"):
+            return {"eco_a": down_eco, "name_a": down_name, "eco_b": up_eco, "name_b": up_name,
+                    "wrapper_side": "a", "confidence": confidence, "signal": "x"}
+        def b_row(adv, fixed):
+            ev = evidence("Maven (Java)", "org.webjars:" + adv.lower(), "NuGet", adv.lower())
+            return (adv, 2, 7.5, {}, ev, fixed)
+        table_b = [
+            b_row("GHSA-DONE", {"Maven (Java)": True, "NuGet": True}),
+            b_row("GHSA-WAIT", {"Maven (Java)": False, "NuGet": False}),
+            b_row("GHSA-PULL", {"Maven (Java)": False, "NuGet": True}),
+            b_row("GHSA-UNKN", {}),
+        ]
+        def a_row(adv, fixed):
+            names = {"npm": ["x"], "PyPI": ["x"], "Go (Golang)": ["x"]}
+            return (adv, 3, 9.0, names, {"confidence": "high"}, fixed)
+        table_a = [
+            a_row("GHSA-FIXED", {"npm": True, "PyPI": True, "Go (Golang)": True}),
+            a_row("GHSA-OPEN3", {"npm": False, "PyPI": False, "Go (Golang)": False}),
+            a_row("GHSA-OPEN1", {"npm": False, "PyPI": True, "Go (Golang)": True}),
+        ]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            top10ecosystems.print_section_viii_identity_correlation(table_a, table_b, 0, [])
+        out = re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+
+        b_ids = re.findall(r"^(GHSA-(?:DONE|WAIT|PULL|UNKN))\s*\|\s*(\w+)", out, re.MULTILINE)
+        self.assertEqual(b_ids, [("GHSA-PULL", "PULL"), ("GHSA-WAIT", "WAIT"), ("GHSA-UNKN", "UNKNOWN"), ("GHSA-DONE", "DONE")],
+                         "[!] VIII-B rows must lead with PULL, then WAIT, and end with DONE.")
+        self.assertNotIn("[F]", out)
+        self.assertNotIn("[U]", out)
+        self.assertIn("org.webjars:ghsa-pull", out, "[!] Downstream names must no longer be cut off by a status tag.")
+
+        a_order = re.findall(r"^(GHSA-(?:FIXED|OPEN3|OPEN1))\s.*\|\s*(\S.*?)\s*$", out, re.MULTILINE)
+        self.assertEqual([(i, u) for i, u in a_order], [("GHSA-OPEN3", "3 of 3"), ("GHSA-OPEN1", "1 of 3"), ("GHSA-FIXED", "-")],
+                         "[!] VIII-A rows must lead with the most unfixed ecosystems and show an Unfixed summary.")
+        self.assertIn("Unfixed", out)
+
+    def test_rank_cross_registry_tables_puts_open_advisories_ahead_of_fixed_ones(self):
+        """
+        [REGRESSION] The top N used to be chosen by ecosystem span then CVSS alone, so over a window of
+        a few months the rows that were actually open never reached the table: long-fixed advisories
+        spanning more registries filled every slot. Rows that need action must be selected first, and
+        stats must report how many candidates needed action before truncation.
+        """
+        def native(cvss, fixed, ecos):
+            return {"cvss_score": cvss, "repo_anchor": None, "fixed_by_ecosystem": fixed,
+                    "package_names_by_ecosystem": {e: ["same-name"] for e in ecos},
+                    "purls_by_ecosystem": {e: ["pkg:x/same-name"] for e in ecos}}
+        def webjar(cvss, fixed):
+            return {"cvss_score": cvss, "repo_anchor": None, "fixed_by_ecosystem": fixed,
+                    "package_names_by_ecosystem": {"npm": ["jq"], "Maven (Java)": ["org.webjars.npm:jq"]},
+                    "purls_by_ecosystem": {"npm": ["pkg:npm/jq"], "Maven (Java)": ["pkg:maven/org.webjars.npm/jq"]}}
+        all_fixed = {"npm": True, "PyPI": True, "NuGet": True, "Maven (Java)": True}
+        ghsa_lookup = {
+            "A-FIXED-WIDE": native(9.9, all_fixed, ["npm", "PyPI", "NuGet"]),
+            "A-OPEN-NARROW": native(3.0, {"npm": False, "PyPI": True}, ["npm", "PyPI"]),
+            "A-UNKNOWN": native(5.0, {}, ["npm", "PyPI"]),
+            "B-DONE": webjar(9.0, all_fixed),
+            "B-WAIT": webjar(2.0, {"npm": False, "Maven (Java)": False}),
+            "B-PULL": webjar(1.0, {"npm": True, "Maven (Java)": False}),
+        }
+        stats = {}
+        table_a, table_b = top10ecosystems.rank_cross_registry_tables(ghsa_lookup, set(ghsa_lookup), top_n=2, stats=stats)
+        self.assertEqual([r[0] for r in table_a], ["A-OPEN-NARROW", "A-UNKNOWN"],
+                         "[!] An open advisory must be selected ahead of a fixed one that spans more registries.")
+        self.assertEqual([r[0] for r in table_b], ["B-PULL", "B-WAIT"],
+                         "[!] VIII-B must select PULL first, then WAIT, ahead of DONE rows.")
+        self.assertEqual((stats["a_total"], stats["a_actionable"]), (3, 1), "[!] stats must count candidates before truncating to top_n.")
+        self.assertEqual((stats["b_total"], stats["b_actionable"]), (3, 2))
+
+    def test_section_viii_footer_says_how_many_need_action(self):
+        import contextlib, re
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            top10ecosystems.print_section_viii_identity_correlation(
+                [], [], 0, [], ab_stats={"a_total": 139, "a_actionable": 7, "b_total": 4874, "b_actionable": 20})
+        out = re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+        # Empty tables print their own "zero advisories" line instead of a footer.
+        self.assertNotIn("139", out)
+        table_a = [("GHSA-OPEN", 2, 7.0, {"npm": ["x"], "PyPI": ["x"]}, {"confidence": "high"}, {"npm": False, "PyPI": True})]
+        table_b = [("GHSA-WAIT", 2, 7.0, {}, {"eco_a": "Maven (Java)", "name_a": "m", "eco_b": "npm", "name_b": "n",
+                                              "wrapper_side": "a", "confidence": "confirmed", "signal": "x"}, {"npm": False})]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            top10ecosystems.print_section_viii_identity_correlation(
+                table_a, table_b, 0, [], ab_stats={"a_total": 139, "a_actionable": 7, "b_total": 4874, "b_actionable": 20})
+        out = re.sub(r"\x1b\[[0-9;]*m", "", buf.getvalue())
+        self.assertIn("7 of 139 cross-compiled advisories this window still have an unfixed ecosystem", out)
+        self.assertIn("20 of 4874 repackaged advisories this window need action", out)
 
 
 if __name__ == '__main__':
