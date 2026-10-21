@@ -1452,6 +1452,47 @@ def _extract_cvss_epss_pairs(ecosystem_epss_pools: dict) -> dict:
     return pairs
 
 
+# The registries the --report charts show, so exported counts (the triage comparison) describe the same advisories the
+# scatter plots.
+_REPORT_ECOSYSTEMS = ("npm", "PyPI", "Go (Golang)", "Maven (Java)", "Packagist (PHP)", "Crates.io", "NuGet")
+
+_TRIAGE_RULES = (("CVSS \u2265 9", "cvss", 9.0), ("CVSS \u2265 7", "cvss", 7.0), ("CVSS \u2265 4", "cvss", 4.0),
+                 ("EPSS \u2265 10%", "epss", 0.1), ("EPSS \u2265 1%", "epss", 0.01))
+
+
+def _triage_comparison(points) -> dict:
+    """
+    For (cvss, epss, is_kev) points, how big a work queue each simple triage rule produces and how many
+    KEV-listed advisories it reaches: the "what does EPSS buy you over CVSS alone" comparison behind the
+    --report triage chart. Rules are _TRIAGE_RULES (a CVSS cut-off or an EPSS cut-off, inclusive).
+    """
+    points = list(points)
+    rules = []
+    for label, kind, threshold in _TRIAGE_RULES:
+        index = 0 if kind == "cvss" else 1
+        hits = [p for p in points if p[index] >= threshold]
+        rules.append({"label": label, "kind": kind, "threshold": threshold, "queue": len(hits), "kev_caught": sum(1 for p in hits if p[2])})
+    return {"total": len(points), "kev_total": sum(1 for p in points if p[2]), "rules": rules}
+
+
+def _triage_from_pools(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS):
+    """
+    _triage_comparison over every in-window advisory in `ecosystems` with a CVSS score and EPSS data, counted once even when it
+    affects several ecosystems (the scatter plots it once per ecosystem; a work queue holds it once). Computed
+    from the full pools, not the down-sampled scatter points, so the counts are exact. None when there are none.
+    """
+    merged = {}
+    for eco, pool in (ecosystem_epss_pools or {}).items():
+        if eco not in ecosystems:
+            continue
+        for advisory_id, (cvss, epss, kev) in pool.items():
+            if not cvss or cvss <= 0 or epss is None:
+                continue
+            seen = merged.get(advisory_id)
+            merged[advisory_id] = (cvss, epss, bool(kev) or bool(seen and seen[2]))
+    return _triage_comparison(merged.values()) if merged else None
+
+
 def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None, spatial_dwell_cve: dict = None, ecosystem_epss_pools: dict = None):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
@@ -1486,7 +1527,8 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
                 "profile_matrix": export_profile_matrix,
                 "kev_lead_time": kev_lead_time,
                 "dwell_cve_distribution": _compute_dwell_distribution_stats(spatial_dwell_cve),
-                "cvss_epss_pairs": _extract_cvss_epss_pairs(ecosystem_epss_pools)
+                "cvss_epss_pairs": _extract_cvss_epss_pairs(ecosystem_epss_pools),
+                "triage_comparison": _triage_from_pools(ecosystem_epss_pools)
             }, ef, indent=4)
         print(f"[Static Snapshot Saved]: {export_path}")
     except Exception as e: 
@@ -2090,7 +2132,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
     threat_profile_trends = defaultdict(list)
 
     # Track structural target coordinates over time
-    target_ecos = ["npm", "PyPI", "Go (Golang)", "Maven (Java)", "Packagist (PHP)", "Crates.io", "NuGet"]
+    target_ecos = list(_REPORT_ECOSYSTEMS)
     threat_categories = ["Malware (New Entry)", "Vulnerability Fix (Update)", "Metadata Correction / Adjustments"]
 
     for snap in snapshots:
@@ -2315,6 +2357,79 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
             <img src="data:image/png;base64,{img_str_scatter}" alt="CVSS vs EPSS Scatter Chart" />
         </div>"""
 
+        # Chart 6: what the scatter looks like without EPSS (CVSS alone can't separate the KEV stars from the crowd),
+        # and what each triage rule costs in queue size against how many KEV-listed advisories it reaches.
+        triage_section = ""
+        triage = (latest_snapshot or {}).get("triage_comparison") if scatter_ecos else None
+        triage_exact = bool(triage)
+        if scatter_ecos and not triage:
+            triage = _triage_comparison((p[0], p[1], p[2]) for eco in scatter_ecos for p in cvss_epss_pairs[eco])
+        if triage and triage["total"]:
+            fig6, (ax6a, ax6b) = mplplt.subplots(1, 2, figsize=(14, 5), gridspec_kw={"width_ratios": [1, 1.25]})
+            fig6.patch.set_facecolor('#1e1e1e')
+            for ax in (ax6a, ax6b):
+                ax.set_facecolor('#1e1e1e')
+
+            jitter = random.Random(0)
+            strip = [p for eco in scatter_ecos for p in cvss_epss_pairs[eco]]
+            ax6a.scatter([p[0] + jitter.uniform(-0.08, 0.08) for p in strip if not p[2]], [jitter.random() for p in strip if not p[2]],
+                         s=10, alpha=0.12, color='#8aa9d6', label="Advisory (EPSS hidden)")
+            ax6a.scatter([p[0] + jitter.uniform(-0.08, 0.08) for p in strip if p[2]], [jitter.random() for p in strip if p[2]],
+                         marker='*', s=140, color='#ff5555', edgecolors='#ffffff', linewidths=0.6, zorder=5, label="KEV-listed")
+            for cut in (4, 7, 9):
+                ax6a.axvline(cut, linestyle='--', linewidth=1, color='#ffffff', alpha=0.3)
+            ax6a.set_xlim(0, 10.6)
+            ax6a.set_yticks([])
+            ax6a.set_xlabel("CVSS Score", color='#bbbbbb')
+            ax6a.set_title("Without EPSS: CVSS alone", color='#ffffff', fontsize=13, pad=12)
+            ax6a.tick_params(colors='#bbbbbb', labelsize=10)
+            ax6a.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff', loc='lower left', markerscale=1.3)
+
+            rules = triage["rules"]
+            ypos = list(range(len(rules)))[::-1]
+            total, kev_total = triage["total"], triage["kev_total"]
+            queue_share = [r["queue"] / total for r in rules]
+            kev_share = [(r["kev_caught"] / kev_total) if kev_total else 0 for r in rules]
+            ax6b.barh([y + 0.2 for y in ypos], queue_share, height=0.38, color='#8aa9d6', label="Share of all advisories you would work")
+            ax6b.barh([y - 0.2 for y in ypos], kev_share, height=0.38, color='#ff5555', label="Share of KEV-listed advisories reached")
+            for y, r, qs, ks in zip(ypos, rules, queue_share, kev_share):
+                ax6b.text(qs + 0.01, y + 0.2, f"{r['queue']:,} ({qs:.0%})", va='center', color='#dddddd', fontsize=9)
+                ax6b.text(ks + 0.01, y - 0.2, f"{r['kev_caught']}/{kev_total}", va='center', color='#ffb3b3', fontsize=9)
+            ax6b.set_yticks(ypos)
+            ax6b.set_yticklabels([r["label"] for r in rules], color='#ffffff')
+            ax6b.set_xlim(0, 1.3)
+            ax6b.set_xticks([0, 0.25, 0.5, 0.75, 1.0])
+            ax6b.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+            ax6b.tick_params(colors='#bbbbbb', labelsize=10)
+            ax6b.set_title("Queue size vs KEV reached, by triage rule", color='#ffffff', fontsize=13, pad=12)
+            ax6b.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff', loc='upper center', bbox_to_anchor=(0.5, -0.08), ncol=2)
+            for ax in (ax6a, ax6b):
+                for spine in ax.spines.values():
+                    spine.set_color('#444444')
+            mplplt.tight_layout()
+
+            buf6 = io.BytesIO()
+            fig6.savefig(buf6, format='png', bbox_inches='tight', facecolor=fig6.get_facecolor())
+            buf6.seek(0)
+            img_str_triage = base64.b64encode(buf6.read()).decode('utf-8')
+            mplplt.close(fig6)
+
+            stars = sum(1 for p in strip if p[2])
+            star_note = f"; {stars} are drawn because an advisory gets one star per charted ecosystem it affects" if stars != kev_total else ""
+            by_label = {r["label"]: r for r in rules}
+            cvss7, epss10, epss1 = by_label["CVSS \u2265 7"], by_label["EPSS \u2265 10%"], by_label["EPSS \u2265 1%"]
+            pct = lambda r: f"{r['queue'] / total:.0%}"
+            interval = (latest_snapshot or {}).get("metadata", {}) or {}
+            scope = f"cumulative {html.escape(str(interval.get('interval_from', '?')))} to {html.escape(str(interval.get('interval_to', '?')))}"
+            basis = ("every such advisory in the charted registries, counted once even if it affects several" if triage_exact
+                     else "the plotted sample (capped per ecosystem), so queue sizes are approximate")
+            triage_section = f"""
+        <h2>VI. What EPSS Adds: Triage Queue vs KEV Reached</h2>
+        <p>The left panel is the scatter above with EPSS taken away: on CVSS alone the {kev_total} KEV-listed advisories (stars{star_note}) sit inside the same crowd as everything else, at the same few scores. The right panel prices each simple rule ({scope}; {total:,} advisories with CVSS and EPSS data, based on {basis}). A CVSS &ge; 7 rule queues {cvss7['queue']:,} advisories ({pct(cvss7)}) to reach {cvss7['kev_caught']} of the {kev_total}; EPSS &ge; 10% queues {epss10['queue']:,} ({pct(epss10)}) and reaches {epss10['kev_caught']}. EPSS is not complete either: {kev_total - epss1['kev_caught']} KEV-listed advisories score below 1%. Advisories with no resolvable CVE ID have no EPSS at all (about 92% of the warehouse), so this comparison only covers the subset where both signals exist.</p>
+        <div class="chart">
+            <img src="data:image/png;base64,{img_str_triage}" alt="CVSS-only view and triage queue comparison" />
+        </div>"""
+
         # Construct Unified Dashboard Payload Doc
         html_report = f"""<!DOCTYPE html>
 <html>
@@ -2356,7 +2471,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         <div class="chart">
             {chart2_html}
         </div>
-{kev_lead_section}{dwell_section}{scatter_section}
+{kev_lead_section}{dwell_section}{scatter_section}{triage_section}
     </div>
 </body>
 </html>"""
