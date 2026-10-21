@@ -3222,6 +3222,61 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertNotIn('class="bucketbar"', old_page)
         self.assertNotIn("Latest point (", old_page)
 
+    def test_triage_comparison_counts_queue_and_kev_reached_with_inclusive_thresholds(self):
+        points = [(9.8, 0.95, True), (9.0, 0.10, False), (7.0, 0.01, True), (6.9, 0.009, True), (4.0, 0.5, False), (3.9, 0.0001, False)]
+        result = top10ecosystems._triage_comparison(points)
+        self.assertEqual((result["total"], result["kev_total"]), (6, 3))
+        by_label = {r["label"]: (r["queue"], r["kev_caught"]) for r in result["rules"]}
+        self.assertEqual(by_label["CVSS \u2265 9"], (2, 1), "9.0 is on the boundary, so it is in the queue.")
+        self.assertEqual(by_label["CVSS \u2265 7"], (3, 2))
+        self.assertEqual(by_label["CVSS \u2265 4"], (5, 3))
+        self.assertEqual(by_label["EPSS \u2265 10%"], (3, 1), "0.10 is on the boundary, so it is in the queue.")
+        self.assertEqual(by_label["EPSS \u2265 1%"], (4, 2))
+        for r in result["rules"]:
+            self.assertLessEqual(r["kev_caught"], r["queue"])
+            self.assertLessEqual(r["kev_caught"], result["kev_total"])
+        empty = top10ecosystems._triage_comparison([])
+        self.assertEqual((empty["total"], empty["kev_total"], [r["queue"] for r in empty["rules"]]), (0, 0, [0] * 5))
+
+    def test_triage_from_pools_counts_each_advisory_once_and_only_in_charted_registries(self):
+        pools = {"npm": {"A": (9.8, 0.9, False), "B": (5.0, 0.2, True), "ZERO": (0.0, 0.5, False), "NOEPSS": (7.0, None, False)},
+                 "PyPI": {"A": (9.8, 0.9, True), "C": (7.5, 0.02, False)},          # A also affects npm; PyPI knows it is KEV
+                 "Debian": {"D": (9.9, 0.99, True)}}                                # not a charted registry
+        result = top10ecosystems._triage_from_pools(pools)
+        self.assertEqual(result["total"], 3, "[!] A is one advisory even though two registries list it; junk rows and Debian are out.")
+        self.assertEqual(result["kev_total"], 2, "A is KEV-listed if ANY ecosystem's pool says so.")
+        self.assertIsNone(top10ecosystems._triage_from_pools({}))
+        self.assertIsNone(top10ecosystems._triage_from_pools({"Debian": {"D": (9.9, 0.99, True)}}))
+        self.assertEqual(top10ecosystems._triage_from_pools(pools, ecosystems=("Debian",))["total"], 1)
+
+    def test_report_triage_section_uses_exported_counts_and_flags_the_sampled_fallback(self):
+        import contextlib, tempfile
+        def snap(extra):
+            data = {"metadata": {"interval_to": "2026-09-30", "interval_from": "2026-04-18", "target_layer_filter": "app"},
+                    "leaderboard": {"npm": 5}, "threat_profile": {"Malware (New Entry)": 5},
+                    "cvss_epss_pairs": {"npm": [[9.8, 0.9, 1], [7.5, 0.02, 0], [5.0, 0.001, 1], [8.0, 0.3, 0]]}}
+            data.update(extra)
+            return data
+        exported = top10ecosystems._triage_comparison([(9.8, 0.9, True)] * 3 + [(7.5, 0.02, False)] * 7)   # deliberately unlike the points above
+        def page_for(snapshots):
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                out = os.path.join(tmp, "r.html")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    top10ecosystems.generate_html_report(snapshots, out, db_path=os.path.join(tmp, "absent.db"))
+                with open(out, encoding="utf-8") as f:
+                    return f.read()
+        exact = page_for([snap({"triage_comparison": exported}), snap({"triage_comparison": exported})])
+        self.assertIn("VI. What EPSS Adds", exact)
+        self.assertIn("10 advisories with CVSS and EPSS data", exact, "[!] The section must use the exported (full-pool) counts, not the plotted sample.")
+        self.assertIn("counted once even if it affects several", exact)
+        self.assertNotIn("queue sizes are approximate", exact)
+        fallback = page_for([snap({}), snap({})])
+        self.assertIn("VI. What EPSS Adds", fallback, "Snapshots exported before the triage counts existed must still render the section.")
+        self.assertIn("4 advisories with CVSS and EPSS data", fallback)
+        self.assertIn("queue sizes are approximate", fallback)
+        no_scatter = page_for([{k: v for k, v in snap({}).items() if k != "cvss_epss_pairs"}] * 2)
+        self.assertNotIn("VI. What EPSS Adds", no_scatter, "No EPSS data at all: no section, no crash.")
+
     def test_kev_lead_time_and_axis_helpers_live_in_their_own_modules(self):
         """The report helpers were moved out of top10ecosystems.py; the old private names must stay as aliases, and the
         modules must import without the main script (so later work can use them on their own)."""
