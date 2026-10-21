@@ -175,6 +175,33 @@ python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28 --hunt-r
 
 ---
 
+## 🕓 Vulnerability Timeline (`--timeline`)
+
+Pass one or more CVE or advisory IDs and get a dated history of each, fetched live, so an analyst can answer "what has happened to this, and how urgent is it" in one screen. It needs no warehouse and none of the modification-stream download the other modes do, so it returns in a few seconds:
+```bash
+python top10ecosystems.py --timeline CVE-2016-3081
+python top10ecosystems.py --timeline GHSA-8c6j-ffmf-q6vm CVE-2023-44487   # several IDs; an advisory ID resolves to its CVE
+python top10ecosystems.py --timeline CVE-2016-3081 --json                 # one JSON array, no color codes
+```
+It reads three live sources: `api.osv.dev` (the record and every record it links to), the CISA KEV feed, and `api.first.org` (EPSS history). Each row of the timeline is tagged with where it came from.
+
+| Section | What it shows |
+|---|---|
+| Triage signals (first) | What the dated events suggest, each with its evidence, tagged `[RAISES]`, `[LOWERS]` or `[CONTEXT]` (see below). |
+| Records | Every linked record: published, last modified, CVSS (computed from the vector, with a warning when trackers disagree), ecosystems, withdrawn. |
+| Timeline | Dated events with a day count from the first publication: PUBLISHED (including the NVD date), REVIEWED (GitHub), MODIFIED, WITHDRAWN, EXPLOITED (KEV, with due date and ransomware use), SCORED (EPSS moves of a point or more, plus the start and latest). |
+| Trackers | When each tracker (Debian, Ubuntu, Bitnami, GitHub, and so on) first published and how many days after the first publication, so distro lag is visible. |
+| Fixed versions, References | Fixed versions per package, and reference counts by type with the fix-commit and evidence links listed. |
+| At a glance | Exploited or not, KEV deadline status (flagged OVERDUE only within 30 days of the deadline), first publication to KEV, EPSS level and one-week trend, fix availability, withdrawn. |
+
+**Triage signals** are printed first, because they are what gets discussed in a triage call. They state a fact, the evidence behind it, and what it usually means, for example "EPSS kept rising after KEV listing: 93.4% -> 96.1% (+2.7 pts): predicted exploitation grew after confirmation". They cover KEV listing (and how old the flaw was when listed), known ransomware use, top-percentile EPSS, EPSS jumps (including ones that preceded a KEV listing) and rises or falls after listing, public exploit/evidence links, packages with no fixed version, a fix being available, withdrawal, and context such as severity disagreement between trackers, a new or recently updated record, and how widely it is packaged. **The report prints a caution under the heading, and carries it in the JSON as `signals_caveat`: the thresholds are starting guesses that have not been checked against real incident outcomes, so treat the signals as guidelines for discussion, not calibrated findings. There is deliberately no verdict, tally or recommendation**: whether to escalate, hold or de-escalate is the analyst's or team's decision, and the tool only surfaces what bears on it. The signals can describe the relationship between dated events, never a field change such as a CVSS rescore (OSV and KEV keep no history). Thresholds (EPSS jump size, top percentile, "old flaw" age, how recent counts as recent) are constants at the top of `timeline_signals.py`, so a team can tune them; the `--json` output carries every signal as `{direction, id, text, meaning}` plus the EPSS series they were computed from.
+
+Things it does on purpose: the ID you pass and the main CVE always get their own rows, while other records collapse to one row per tracker (at most 25 records, 3 per tracker, are fetched in full; the rest are counted, so a CVE linked to hundreds of per-image records stays readable). If several CVEs are linked, it follows one that is on the KEV list and names the others. If a source is down it prints what it has plus a note, and an ID is validated against a strict pattern before it reaches a URL. Exit code is non-zero if any ID produced nothing.
+
+**What it cannot show.** OSV and KEV keep only the latest version of a record, so the report says *when* something was modified, never *what* changed; field-level diffs (CVSS rescoring, range edits) would need NVD history or upstream git. FIRST serves only the last 30 days of EPSS. The report states both limits at the bottom.
+
+---
+
 ## 📊 Historical Trend Charting (`--velocity` / `--report`)
 
 Two related but separate tools for looking at churn over time instead of a single window:
@@ -224,5 +251,5 @@ python top10ecosystems.py --layer app --from 2026-04-18 --to 2026-05-28 --projec
 ## ⚙️ Requirements
 
 - Python 3.9 or newer recommended.
-- Network access to OSV-hosted data, the FIRST EPSS feed, and the CISA KEV catalog (for archive bootstrapping, incremental sync windows, and the KEV/EPSS enrichment pipelines).
+- Network access to OSV-hosted data, the FIRST EPSS feed, and the CISA KEV catalog (for archive bootstrapping, incremental sync windows, and the KEV/EPSS enrichment pipelines). `--timeline` also queries `api.osv.dev` and `api.first.org` live.
 - Python libraries (see `requirements.txt`): `requests`, `cvss`, `matplotlib` (for `--report` charts), `plotext` (for `--terminal-plot`).

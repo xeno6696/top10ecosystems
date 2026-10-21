@@ -1713,6 +1713,401 @@ class TestThreatStreamScanner(unittest.TestCase):
             lock.write_text("# header\n\ncertifi==2026.10.19\ncharset_normalizer==3.5.2\nsix==1.17.0\n")
             self.assertEqual(env_info.lock_pins(lock), {"certifi": "2026.10.19", "charset-normalizer": "3.5.2", "six": "1.17.0"})
 
+    # -------------------------------------------------------------------------
+    # --timeline: live CVE/advisory history (tests run on saved real responses, never the network)
+    # -------------------------------------------------------------------------
+    def _timeline_fixture(self, name):
+        import json
+        with open(os.path.join("src", "test", "resources", "timeline", name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def _timeline_get(self, osv=None, kev="default", epss="default", extra=None):
+        """A fake `get` serving the saved Struts responses. osv maps record ID -> record (default: the two real
+        ones); kev/epss may be a payload, None (service down), or "default" (the saved real response)."""
+        import timeline
+        records = osv if osv is not None else {
+            "CVE-2016-3081": self._timeline_fixture("osv_CVE-2016-3081.json"),
+            "GHSA-8c6j-ffmf-q6vm": self._timeline_fixture("osv_GHSA-8c6j-ffmf-q6vm.json"),
+        }
+        records = dict(records, **(extra or {}))
+        kev_payload = self._timeline_fixture("kev_CVE-2016-3081.json") if kev == "default" else kev
+        epss_payload = self._timeline_fixture("epss_CVE-2016-3081.json") if epss == "default" else epss
+
+        def get(url, params=None):
+            if url.startswith(timeline.OSV_VULN_URL):
+                from urllib.parse import unquote
+                record = records.get(unquote(url[len(timeline.OSV_VULN_URL):]))
+                return timeline.Response(200, record, None) if record is not None else timeline.Response(404, None, "HTTP 404")
+            if url == timeline.KEV_FEED_URL:
+                return timeline.Response(200, kev_payload, None) if kev_payload is not None else timeline.Response(503, None, "HTTP 503")
+            if url == timeline.EPSS_API_URL:
+                return timeline.Response(200, epss_payload, None) if epss_payload is not None else timeline.Response(503, None, "HTTP 503")
+            raise AssertionError(f"unexpected URL {url}")
+        return get
+
+    def test_timeline_id_validation_accepts_real_ids_and_refuses_url_tricks(self):
+        import timeline
+        for good in ("CVE-2016-3081", "GHSA-8c6j-ffmf-q6vm", "SUSE-SU-2026:22689-1", "  CVE-2016-3081  "):
+            self.assertEqual(timeline.validate_id(good), good.strip())
+        for bad in ("", "x", "CVE 2016", "a/b", "../etc/passwd", "CVE-2016-3081?x=1", "CVE-2016-3081#frag", "foo" + chr(92) + "bar", "A" * 200, None):
+            with self.assertRaises(ValueError, msg=f"[!] {bad!r} must not be accepted into a URL"):
+                timeline.validate_id(bad)
+
+    def test_timeline_builds_the_real_struts_history_from_saved_responses(self):
+        import datetime, timeline
+        today = datetime.date(2026, 10, 21)
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+        self.assertEqual(result["cve"], "CVE-2016-3081")
+        events = [(e["date"], e["kind"], e["day"]) for e in result["events"]]
+        self.assertIn(("2016-04-26", "PUBLISHED", 0), events)
+        self.assertIn(("2022-05-14", "PUBLISHED", 2209), events)
+        self.assertIn(("2023-07-28", "REVIEWED", 2649), events, "[!] The GitHub review date inside database_specific must be surfaced.")
+        self.assertIn(("2026-10-08", "EXPLOITED", 3817), events)
+        by_key = {(e["date"], e["kind"]): e for e in result["events"]}
+        self.assertIn("NVD same day", by_key[("2016-04-26", "PUBLISHED")]["text"], "NVD publication on the CVE's own date folds into that row.")
+        self.assertIn("remediation due 2026-10-11", by_key[("2026-10-08", "EXPLOITED")]["text"])
+        self.assertEqual(result["events"][0]["date"], "2016-04-26")
+        self.assertEqual([e["date"] for e in result["events"]], sorted(e["date"] for e in result["events"]), "Events must be chronological.")
+        first_epss = next(e for e in result["events"] if e["kind"] == "SCORED")
+        self.assertIn("EPSS 82.9%", first_epss["text"])
+        self.assertEqual(result["fixed_versions"], [{"ecosystem": "Maven", "package": "org.apache.struts:struts2-core",
+                                                     "versions": ["2.3.20.3", "2.3.24.3", "2.3.28.1"]}])
+        self.assertEqual(result["glance"]["first_publication_to_kev_days"], 3817)
+        self.assertEqual(result["kev"]["overdue_days"], 10)
+        self.assertEqual({r["id"] for r in result["records"]}, {"CVE-2016-3081", "GHSA-8c6j-ffmf-q6vm"})
+        self.assertFalse(result["cvss_disagree"], "Both records score 8.1.")
+        self.assertEqual(sorted(result["cvss_scores"].values()), [8.1, 8.1])
+
+    def test_timeline_resolves_the_same_history_from_the_advisory_id(self):
+        import datetime, timeline
+        today = datetime.date(2026, 10, 21)
+        from_cve = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+        from_ghsa = timeline.build_timeline("GHSA-8c6j-ffmf-q6vm", get=self._timeline_get(), today=today)
+        self.assertEqual(from_ghsa["cve"], "CVE-2016-3081", "[!] An advisory ID must resolve to its CVE for KEV and EPSS.")
+        self.assertEqual([(e["date"], e["kind"]) for e in from_cve["events"]], [(e["date"], e["kind"]) for e in from_ghsa["events"]])
+
+    def test_timeline_kev_deadline_wording_depends_on_how_stale_it_is(self):
+        import datetime, timeline
+        def render(today):
+            result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+            return result["kev"], timeline.render_timeline(result, today)
+        kev, text = render(datetime.date(2026, 10, 9))
+        self.assertEqual((kev["overdue_days"], kev["days_until_due"]), (0, 2))
+        self.assertIn("due in 2 days", text)
+        kev, text = render(datetime.date(2026, 10, 11))
+        self.assertIn("due today", text)
+        kev, text = render(datetime.date(2026, 10, 21))
+        self.assertIn("OVERDUE by 10 days", text)
+        kev, text = render(datetime.date(2027, 6, 1))
+        self.assertNotIn("OVERDUE", text, "[!] A years-old deadline must not be shouted as 'OVERDUE'.")
+        self.assertIn("deadline passed", text)
+
+    def test_timeline_epss_rows_keep_the_start_real_moves_and_a_quiet_latest(self):
+        import timeline
+        series = [{"date": f"2026-10-{d:02d}", "score": s, "percentile": 0.9} for d, s in
+                  [(1, 0.50), (2, 0.504), (3, 0.62), (4, 0.62), (5, 0.625), (6, 0.625)]]
+        rows = timeline.compress_epss(series)
+        self.assertEqual([r["date"] for r in rows], ["2026-10-01", "2026-10-03", "2026-10-06"],
+                         "[!] Keep the first point, each move of 1 point or more, and the latest.")
+        self.assertIsNone(rows[0]["delta"])
+        self.assertAlmostEqual(rows[1]["delta"], 0.12, places=3, msg="The delta is against the last SHOWN row (0.50), not the skipped 0.504.")
+        self.assertEqual(rows[2]["unchanged_since"], "2026-10-03", "A latest point that barely moved says since when.")
+        self.assertEqual(timeline.compress_epss([]), [])
+
+    def test_timeline_caps_and_collapses_a_huge_alias_graph(self):
+        import timeline
+        def record(rid, aliases=None, published="2024-01-01T00:00:00Z"):
+            return {"id": rid, "aliases": aliases or [], "published": published, "modified": "2026-01-01T00:00:00Z"}
+        bit = [f"BIT-pkg{i}-2099-0001" for i in range(80)]
+        deb = [f"DEBIAN-CVE-2099-0001-{i}" for i in range(5)]
+        records = {"CVE-2099-0001": record("CVE-2099-0001", bit + deb)}
+        for rid in bit + deb:
+            records[rid] = record(rid, ["CVE-2099-0001"], "2024-03-0%dT00:00:00Z" % (1 + len(rid) % 5))
+        result = timeline.build_timeline("CVE-2099-0001", get=self._timeline_get(osv=records, kev=None, epss=None))
+        trackers = {t["tracker"]: t for t in result["trackers"]}
+        self.assertLessEqual(len(result["records"]), timeline.MAX_RECORDS)
+        self.assertEqual(trackers["BIT"]["fetched"], timeline.MAX_PER_TRACKER, "[!] One noisy tracker must not use up the cap.")
+        self.assertEqual(trackers["BIT"]["known"], 80)
+        self.assertIn("DEBIAN", trackers)
+        self.assertEqual(result["not_fetched"]["BIT"], 80 - timeline.MAX_PER_TRACKER)
+        bit_rows = [e for e in result["events"] if e["record"].startswith("BIT x")]
+        self.assertEqual([e["kind"] for e in bit_rows], ["PUBLISHED"], "A tracker's records collapse to one PUBLISHED row; MODIFIED rolls up.")
+        self.assertEqual(len([e for e in result["events"] if e["kind"] == "MODIFIED"]), 2, "The main CVE's own row plus one roll-up of the rest.")
+
+    def test_timeline_outages_become_notes_not_failures(self):
+        import timeline
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(kev=None, epss=None))
+        text = " | ".join(result["notes"])
+        self.assertIn("CISA KEV feed unavailable", text)
+        self.assertIn("FIRST EPSS unavailable", text)
+        self.assertTrue(any(e["kind"] == "PUBLISHED" for e in result["events"]), "OSV data must still be shown when other sources are down.")
+        self.assertFalse(any(e["kind"] in ("EXPLOITED", "SCORED") for e in result["events"]))
+        self.assertIsNone(result["kev"])
+
+    def test_timeline_still_reports_kev_and_epss_when_osv_has_no_record(self):
+        import timeline
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(osv={}))
+        self.assertEqual(result["records"], [])
+        self.assertTrue(any(e["kind"] == "EXPLOITED" for e in result["events"]))
+        self.assertIn("OSV record CVE-2016-3081 unavailable", " | ".join(result["notes"]))
+
+    def test_timeline_unknown_id_returns_nothing_and_a_nonzero_exit(self):
+        import timeline
+        self.assertIsNone(timeline.build_timeline("GHSA-0000-0000-0000", get=self._timeline_get(osv={})))
+        out = []
+        code = timeline.run(["GHSA-0000-0000-0000", "../x"], get=self._timeline_get(osv={}), out=out.append)
+        self.assertEqual(code, 1)
+        self.assertIn("Nothing found for GHSA-0000-0000-0000", out[0])
+        self.assertIn("doesn't look like", out[1])
+
+    def test_timeline_follows_the_linked_cve_that_is_on_kev(self):
+        import timeline
+        ghsa = {"id": "GHSA-aaaa-bbbb-cccc", "aliases": ["CVE-2099-1111", "CVE-2016-3081"], "published": "2024-01-01T00:00:00Z"}
+        result = timeline.build_timeline("GHSA-aaaa-bbbb-cccc", get=self._timeline_get(osv={"GHSA-aaaa-bbbb-cccc": ghsa}))
+        self.assertEqual(result["cve"], "CVE-2016-3081", "[!] With several linked CVEs, follow one that is actually on the KEV list.")
+        self.assertTrue(any("also linked: CVE-2099-1111" in n for n in result["notes"]))
+
+    def test_timeline_cvss_is_computed_from_the_vector_and_disagreement_is_flagged(self):
+        import timeline
+        v3 = {"severity": [{"type": "CVSS_V3", "score": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}
+        v2 = {"severity": [{"type": "CVSS_V2", "score": "AV:N/AC:L/Au:N/C:P/I:P/A:P"}]}
+        self.assertEqual(timeline.cvss_score(v3), ("3.0", 8.1))
+        self.assertEqual(timeline.cvss_score(v2), ("2.0", 7.5))
+        self.assertEqual(timeline.cvss_score({"severity": [{"type": "CVSS_V3", "score": "not a vector"}]}), (None, None))
+        self.assertEqual(timeline.cvss_score({}), (None, None))
+        low = {"id": "GHSA-low0-low0-low0", "aliases": ["CVE-2016-3081"], "published": "2024-01-01T00:00:00Z", "severity": v2["severity"]}
+        result = timeline.build_timeline("GHSA-low0-low0-low0", get=self._timeline_get(extra={"GHSA-low0-low0-low0": low}))
+        self.assertEqual(len(result["records"]), 3, "The low-scoring advisory links to the CVE, which links on to the GHSA.")
+        self.assertTrue(result["cvss_disagree"], "[!] 8.1 against 7.5 across trackers must be flagged.")
+        self.assertIn(7.5, result["cvss_scores"].values())
+
+    def test_timeline_fixed_versions_ignore_git_commit_ranges(self):
+        import timeline
+        record = {"affected": [
+            {"package": {"ecosystem": "Go", "name": "example.com/x"}, "ranges": [
+                {"type": "GIT", "events": [{"introduced": "0320310406f6b11cfd235d7a9b866cf1de483a1e"}, {"fixed": "bbbf43ec59e7bef3b07e9065dc9784c18a95d58b"}]},
+                {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.2.3"}]}]},
+            {"package": {"ecosystem": "npm", "name": "never-fixed"}, "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}]}]}]}
+        self.assertEqual(timeline.fixed_versions([record]), {("Go", "example.com/x"): ["1.2.3"]})
+
+    def test_timeline_cli_needs_no_warehouse_and_no_stream_download(self):
+        """--timeline must dispatch before the modification-stream staging and warehouse checks, and --json must
+        print one parseable array."""
+        import json
+        from types import SimpleNamespace
+        get = self._timeline_get()
+        def fake_requests_get(url, params=None, timeout=None):
+            result = get(url, params)
+            return SimpleNamespace(status_code=result.status, json=lambda: result.data)
+        buf = io.StringIO()
+        with patch.object(sys, "argv", ["top10ecosystems.py", "--timeline", "CVE-2016-3081", "--json"]), patch.object(sys, "stdout", buf), \
+             patch("requests.get", fake_requests_get), \
+             patch.object(top10ecosystems, "_stage_modification_stream", side_effect=AssertionError("stream must not be staged")), \
+             patch.object(top10ecosystems, "require_warehouse", side_effect=AssertionError("warehouse must not be required")):
+            with self.assertRaises(SystemExit) as raised:
+                top10ecosystems.main()
+        self.assertEqual(raised.exception.code, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["cve"], "CVE-2016-3081")
+        self.assertIn("events", parsed[0])
+        self.assertNotIn("\x1b[", buf.getvalue(), "JSON output must carry no color codes.")
+
+    def test_timeline_console_report_has_every_section_and_states_its_limits(self):
+        import datetime, re, timeline
+        today = datetime.date(2026, 10, 21)
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+        text = re.sub(chr(27) + r"\[[0-9;]*m", "", timeline.render_timeline(result, today))
+        for needle in ("TIMELINE  CVE-2016-3081", "[CISA KEV]", "[EPSS 96.1%]", "Records for this vulnerability (2 fetched)", "EXPLOITED", "REVIEWED",
+                       "TRACKERS", "FIXED VERSIONS", "REFERENCES", "CISA KEV    Apache Struts", "AT A GLANCE", "First publication -> KEV:  3,817 days",
+                       "Not shown: what changed at each MODIFIED date", "limited to the last 30 days"):
+            self.assertIn(needle, text)
+        self.assertLessEqual(max(len(line) for line in text.splitlines()), timeline.WIDTH + 4, "[!] Report lines must stay within the box width.")
+
+    # -------------------------------------------------------------------------
+    # --timeline TRIAGE SIGNALS: facts and what they usually mean; never a verdict
+    # -------------------------------------------------------------------------
+    def _signal_result(self, **over):
+        base = {"kev": None, "epss": None, "epss_series": [], "glance": {"first_publication": None, "withdrawn": []},
+                "references": {"counts": {}, "evidence": [], "fix": []}, "unfixed_packages": [], "fixed_versions": [],
+                "records": [], "trackers": [], "cvss_disagree": False, "cvss_scores": {}}
+        base.update(over)
+        return base
+
+    def _epss_series(self, *scores, start="2026-10-01"):
+        import datetime
+        first = datetime.date.fromisoformat(start)
+        return [{"date": (first + datetime.timedelta(days=i)).isoformat(), "score": s, "percentile": 0.5} for i, s in enumerate(scores)]
+
+    def _signal_ids(self, result, today=None):
+        import datetime, timeline_signals
+        return [s["id"] for s in timeline_signals.build_signals(result, today or datetime.date(2026, 10, 21))]
+
+    def test_signals_for_the_real_struts_record_name_each_finding_with_its_evidence(self):
+        import datetime
+        import timeline
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=datetime.date(2026, 10, 21))
+        by_id = {s["id"]: s for s in result["signals"]}
+        self.assertEqual(by_id["kev_listed"]["direction"], "raises")
+        self.assertIn("added 2026-10-08, 13 days ago", by_id["kev_listed"]["text"])
+        self.assertIn("10.5 years after first publication", by_id["kev_listed"]["text"])
+        self.assertIn("EPSS jumped +10.5 pts on 2026-09-22, 16 days before KEV listed it", by_id["epss_jump"]["text"])
+        self.assertIn("93.4% -> 96.1% (+2.7 pts)", by_id["epss_after_kev"]["text"])
+        self.assertIn("exploit-db.com", by_id["public_exploit"]["text"])
+        self.assertIn("99.9th percentile", by_id["epss_top"]["text"])
+        self.assertEqual(by_id["fix_available"]["direction"], "lowers")
+        self.assertEqual(by_id["kev_deadline"]["direction"], "context")
+        self.assertIn("passed 10 days ago", by_id["kev_deadline"]["text"])
+        directions = [s["direction"] for s in result["signals"]]
+        self.assertEqual(directions, sorted(directions, key=["raises", "lowers", "context"].index), "[!] RAISES first, then LOWERS, then CONTEXT.")
+
+    def test_signals_never_issue_a_verdict_a_tally_or_a_recommendation(self):
+        import datetime, re, timeline
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=datetime.date(2026, 10, 21))
+        text = re.sub(chr(27) + r"\[[0-9;]*m", "", timeline.render_timeline(result, datetime.date(2026, 10, 21))).upper()
+        for banned in ("ESCALATE", "VERDICT", "POSTURE", "RECOMMEND", "SHOULD ", "SIGNALS UP", "NET "):
+            self.assertNotIn(banned, text, f"[!] '{banned.strip()}' reads as a decision; the call belongs to the analyst or team.")
+        self.assertIn("THE JUDGMENT IS YOURS", text)
+
+    def test_signals_epss_jump_threshold_is_inclusive_at_ten_points(self):
+        import timeline_signals as sig
+        self.assertEqual(sig.EPSS_JUMP, 0.10)
+        just_under = self._signal_result(epss_series=self._epss_series(0.20, 0.289), epss={"score": 0.289, "percentile": 0.5, "window_start_date": "2026-10-01"})
+        at_threshold = self._signal_result(epss_series=self._epss_series(0.20, 0.30), epss={"score": 0.30, "percentile": 0.5, "window_start_date": "2026-10-01"})
+        self.assertNotIn("epss_jump", self._signal_ids(just_under))
+        self.assertIn("epss_jump", self._signal_ids(at_threshold))
+
+    def test_signals_epss_movement_without_kev_says_confirmation_is_missing(self):
+        import timeline_signals as sig
+        rising = self._signal_result(epss_series=self._epss_series(0.10, 0.12, 0.20), epss={"score": 0.20, "percentile": 0.8, "window_start_date": "2026-10-01"})
+        found = {s["id"]: s for s in sig.build_signals(rising, __import__("datetime").date(2026, 10, 21))}
+        self.assertEqual(found["epss_rising"]["direction"], "raises")
+        self.assertIn("not on the KEV list", found["epss_rising"]["text"])
+        falling = self._signal_result(epss_series=self._epss_series(0.40, 0.30, 0.20), epss={"score": 0.20, "percentile": 0.8, "window_start_date": "2026-10-01"})
+        self.assertIn("epss_falling", self._signal_ids(falling))
+        self.assertNotIn("epss_rising", self._signal_ids(falling))
+
+    def test_signals_low_flat_epss_with_no_kev_and_no_evidence_is_one_lowering_signal(self):
+        quiet = self._signal_result(epss_series=self._epss_series(0.004, 0.0041, 0.0042), epss={"score": 0.0042, "percentile": 0.3, "window_start_date": "2026-10-01"})
+        import timeline_signals as sig, datetime
+        found = sig.build_signals(quiet, datetime.date(2026, 10, 21))
+        self.assertEqual([(s["id"], s["direction"]) for s in found], [("no_exploit_signals", "lowers")])
+        with_evidence = self._signal_result(epss_series=quiet["epss_series"], epss=quiet["epss"], references={"counts": {"EVIDENCE": 1}, "evidence": ["https://www.exploit-db.com/exploits/1/"], "fix": []})
+        self.assertNotIn("no_exploit_signals", self._signal_ids(with_evidence), "[!] Exploit evidence means this is not an all-quiet record.")
+
+    def test_signals_after_kev_epss_can_fall_and_a_kev_older_than_the_window_is_flagged_as_unknowable(self):
+        kev = {"added": "2026-10-03", "due": None, "ransomware": "Unknown"}
+        fell = self._signal_result(kev=kev, epss_series=self._epss_series(0.90, 0.90, 0.90, 0.80, 0.70, start="2026-10-01"), epss={"score": 0.70, "percentile": 0.99, "window_start_date": "2026-10-01"})
+        ids = self._signal_ids(fell)
+        self.assertIn("epss_fell_after_kev", ids)
+        self.assertNotIn("epss_after_kev", ids)
+        old = self._signal_result(kev={"added": "2026-09-01", "due": None, "ransomware": "Unknown"}, epss_series=self._epss_series(0.9, 0.95, start="2026-10-01"), epss={"score": 0.95, "percentile": 0.99, "window_start_date": "2026-10-01"})
+        self.assertIn("kev_before_window", self._signal_ids(old))
+        self.assertNotIn("epss_after_kev", self._signal_ids(old))
+
+    def test_signals_kev_wording_distinguishes_an_old_flaw_from_a_recent_one_and_flags_ransomware(self):
+        import timeline_signals as sig, datetime
+        today = datetime.date(2026, 10, 21)
+        old = {s["id"]: s for s in sig.build_signals(self._signal_result(kev={"added": "2026-10-08", "due": None, "ransomware": "Known"}, glance={"first_publication": "2016-04-26", "withdrawn": []}), today)}
+        self.assertIn("years after first publication", old["kev_listed"]["text"])
+        self.assertIn("old flaw back in active use", old["kev_listed"]["meaning"])
+        self.assertIn("ransomware", old)
+        recent = {s["id"]: s for s in sig.build_signals(self._signal_result(kev={"added": "2026-10-08", "due": None, "ransomware": "Unknown"}, glance={"first_publication": "2026-09-30", "withdrawn": []}), today)}
+        self.assertNotIn("years after", recent["kev_listed"]["text"])
+        self.assertNotIn("ransomware", recent)
+
+    def test_signals_unfixed_packages_are_listed_only_when_no_fix_exists_anywhere(self):
+        import timeline
+        def pkg(eco, name, rtype, *events):
+            return {"package": {"ecosystem": eco, "name": name}, "ranges": [{"type": rtype, "events": list(events)}]}
+        records = [
+            {"affected": [pkg("npm", "never-fixed", "ECOSYSTEM", {"introduced": "0"}),
+                          pkg("PyPI", "bounded-no-fix", "SEMVER", {"introduced": "1.0"}, {"last_affected": "1.9"}),
+                          pkg("Go", "closed", "SEMVER", {"introduced": "0"}, {"fixed": "1.2.3"}),
+                          pkg("Maven", "mixed", "ECOSYSTEM", {"introduced": "0"}, {"fixed": "1.0"}, {"introduced": "2.0"}),
+                          pkg("Go", "git-only", "GIT", {"introduced": "0320310406f6b11cfd235d7a9b866cf1de483a1e"})]},
+            {"affected": [pkg("npm", "fixed-in-other-record", "ECOSYSTEM", {"introduced": "0"})]},
+            {"affected": [pkg("npm", "fixed-in-other-record", "ECOSYSTEM", {"introduced": "0"}, {"fixed": "3.1"})]},
+        ]
+        found = {(p["ecosystem"], p["package"]) for p in timeline.unfixed_packages(records)}
+        self.assertEqual(found, {("npm", "never-fixed"), ("PyPI", "bounded-no-fix")},
+                         "[!] Conservative: a package with a fix on any branch or in any record, or with only commit ranges, is not 'unfixed'.")
+
+    def test_signals_remediation_and_withdrawal(self):
+        import timeline_signals as sig, datetime
+        today = datetime.date(2026, 10, 21)
+        result = self._signal_result(unfixed_packages=[{"ecosystem": "npm", "package": "a"}], fixed_versions=[{"ecosystem": "Maven", "package": "b", "versions": ["1"]}],
+                                     glance={"first_publication": None, "withdrawn": ["GHSA-x"]}, records=[{"id": "GHSA-x", "modified": None}, {"id": "CVE-1", "modified": None}])
+        found = {s["id"]: s for s in sig.build_signals(result, today)}
+        self.assertEqual(found["no_fix"]["direction"], "raises")
+        self.assertIn("1 package:", found["no_fix"]["text"])
+        self.assertEqual(found["fix_available"]["direction"], "lowers")
+        self.assertIn("1 ecosystem:", found["fix_available"]["text"])
+        self.assertEqual(found["withdrawn"]["direction"], "lowers")
+        self.assertIn("1 other fetched record still active", found["withdrawn"]["text"])
+
+    def test_signals_context_for_new_recently_updated_widely_packaged_and_disputed_records(self):
+        import timeline_signals as sig, datetime
+        today = datetime.date(2026, 10, 21)
+        result = self._signal_result(
+            glance={"first_publication": "2026-10-18", "withdrawn": []},
+            records=[{"id": "CVE-9", "modified": "2026-10-20T08:00:00Z"}, {"id": "GHSA-9", "modified": "2026-08-01T00:00:00Z"}],
+            trackers=[{"tracker": t} for t in ("CVE", "GHSA", "DEBIAN", "UBUNTU", "BIT", "SUSE")],
+            cvss_disagree=True, cvss_scores={"CVE-9": 9.8, "GHSA-9": 7.5})
+        found = {s["id"]: s for s in sig.build_signals(result, today)}
+        self.assertIn("Published 3 days ago", found["fresh"]["text"])
+        self.assertIn("CVE-9", found["recently_updated"]["text"])
+        self.assertNotIn("GHSA-9", found["recently_updated"]["text"])
+        self.assertIn("6 trackers", found["widely_packaged"]["text"])
+        self.assertIn("highest 9.8 (CVE-9), lowest 7.5 (GHSA-9)", found["severity_disagreement"]["text"])
+        self.assertTrue(all(s["direction"] == "context" for s in found.values()), "[!] These point neither way, so none may be tagged RAISES or LOWERS.")
+        for due, wording in (("2026-10-25", "is in 4 days"), ("2026-10-21", "is today"), ("2026-10-01", "passed 20 days ago")):
+            kev_result = self._signal_result(kev={"added": "2026-09-01", "due": due, "ransomware": "Unknown"})
+            deadline = next(s for s in sig.build_signals(kev_result, today) if s["id"] == "kev_deadline")
+            self.assertIn(wording, deadline["text"])
+
+    def test_signals_block_renders_first_wraps_and_handles_an_empty_list(self):
+        import datetime, re, timeline
+        today = datetime.date(2026, 10, 21)
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+        text = re.sub(chr(27) + r"\[[0-9;]*m", "", timeline.render_timeline(result, today))
+        self.assertLess(text.index("TRIAGE SIGNALS"), text.index("Records for this vulnerability"), "[!] The signals are what's discussed in a meeting; they go first.")
+        self.assertIn("[RAISES]", text)
+        self.assertIn("[LOWERS]", text)
+        self.assertIn("[CONTEXT]", text)
+        self.assertLessEqual(max(len(line) for line in text.splitlines()), timeline.WIDTH + 4)
+        empty = "\n".join(timeline.render_signals([]))
+        self.assertIn("(no signals triggered)", empty)
+
+    def test_signals_carry_a_caution_that_the_weights_are_untested_guidelines(self):
+        """[POLICY] The thresholds have not been checked against real outcomes; the report must say so right under
+        the heading (also when there are no signals) and the JSON must carry the same text."""
+        import datetime, json, re, timeline, timeline_signals
+        today = datetime.date(2026, 10, 21)
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+        text = re.sub(chr(27) + r"\[[0-9;]*m", "", timeline.render_timeline(result, today))
+        lines = text.splitlines()
+        heading = next(i for i, line in enumerate(lines) if "TRIAGE SIGNALS" in line)
+        shown = " ".join(line.strip() for line in lines[heading + 1:heading + 4])
+        self.assertIn("[!] Caution:", shown, "[!] The caution must sit directly under the heading, before the first signal.")
+        self.assertIn("starting guesses", shown)
+        self.assertIn("guidelines for discussion, not calibrated findings", shown)
+        self.assertLess(heading, next(i for i, line in enumerate(lines) if line.strip().startswith("[RAISES]")))
+        self.assertIn("starting guesses", "\n".join(timeline.render_signals([])), "The caution also appears when nothing triggered.")
+        self.assertEqual(json.loads(json.dumps(result))["signals_caveat"], timeline_signals.CAVEAT)
+        banned = ("ESCALATE", "VERDICT", "POSTURE", "RECOMMEND")
+        self.assertFalse(any(word in timeline_signals.CAVEAT.upper() for word in banned), "The caution itself must not read as a decision.")
+
+    def test_signals_are_included_in_json_with_a_stable_shape(self):
+        import datetime, json, timeline
+        result = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=datetime.date(2026, 10, 21))
+        decoded = json.loads(json.dumps(result))
+        self.assertTrue(decoded["signals"])
+        for signal in decoded["signals"]:
+            self.assertEqual(set(signal), {"direction", "id", "text", "meaning"})
+            self.assertIn(signal["direction"], ("raises", "lowers", "context"))
+        self.assertEqual(len(decoded["epss_series"]), 30, "The EPSS series is exported so the signals can be audited.")
+
     def test_compare_snapshots_golden_master_deltas(self):
         """Validates the comparison engine's delta arithmetic and rank shifts."""
         file_base = os.path.join("src", "test", "resources", "threat_landscape_2026-05-18_app.json")
