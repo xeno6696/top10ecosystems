@@ -4295,6 +4295,8 @@ def main():
     parser.add_argument("--crosscheck-export", nargs='?', const=True, default=False, metavar="PATH", help="Export the cross-check dispatch list as 3 JSON files, one per ranking mode: default/epss/kev (optionally provide a base path). Always exports the FULL list, uncapped.")
     parser.add_argument("--crosscheck-limit", type=int, default=100, metavar="N", help="Cap console output to the top N rows (default 100). Use 0 for no cap. Never affects --crosscheck-export.")
     parser.add_argument("--priority-sort", action="store_true", help="Also render Sections VI/VII ranked by KEV -> EPSS -> CVSS and by EPSS -> CVSS, alongside the default CVSS ranking, and apply the KEV-first ranking to --trends.")
+    parser.add_argument("--timeline", nargs="+", metavar="ID", help="Dated history of one or more CVE/advisory IDs (published, reviewed, KEV, EPSS, per-tracker lag, fixes). Fetches live from OSV, CISA KEV and FIRST; needs no warehouse.")
+    parser.add_argument("--json", action="store_true", help="With --timeline: print the structured result as JSON instead of the console report.")
     args = parser.parse_args()
     
     if args.hunt_retracted:
@@ -4315,6 +4317,11 @@ def main():
     if args.compare:
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.report)
         return
+
+    if args.timeline:
+        # Live lookups only: no warehouse and no modification-stream download, so this runs before that staging.
+        import timeline
+        sys.exit(timeline.run(args.timeline, as_json=args.json))
         
     if args.report and not args.velocity and not args.compare:
         snapshots = load_html_snapshots_for_range("./output", args.layer, args.from_date, args.to)
