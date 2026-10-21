@@ -32,6 +32,7 @@ import heapq
 import html
 import io
 import json
+import math
 import os
 import random
 import re
@@ -1979,6 +1980,76 @@ def _landmark_repo_style(lm: dict, eco_colors: dict):
     return repo, color, ("#111111" if 0.299 * r + 0.587 * g + 0.114 * b > 0.55 else "#ffffff")
 
 
+LANDMARK_LIMIT = 12   # most landmarks plotted per report; any beyond this are listed in text under the key
+
+
+def kev_window_breakdown(db_path: str, start_date: str, end_date: str, registries: list):
+    """Accounts for EVERY KEV entry CISA added in [start_date, end_date], so the report can say nothing was silently
+    dropped: how many are in a charted registry (and so can be plotted), how many have OSV records only in other
+    ecosystems (distro or unclassified; listed in text), and how many aren't in OSV at all (proprietary products).
+    Returns None when the warehouse or its KEV table isn't available."""
+    if not db_path or not os.path.exists(db_path) or not _iso_date_or_none(start_date) or not _iso_date_or_none(end_date):
+        return None
+    charted_registries = set(registries or [])
+    conn = sqlite3.connect(db_path)
+    try:
+        kev_rows = conn.execute(
+            "SELECT cve_id, vulnerability_name, date_added FROM kev_catalog WHERE date_added BETWEEN ? AND ? ORDER BY date_added, cve_id",
+            (start_date[:10], end_date[:10])).fetchall()
+        ecosystems = {row[0]: set() for row in kev_rows}
+        has_record = set()
+        ids = list(ecosystems)
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            marks = ",".join("?" * len(chunk))
+            for cve_id, ecos_json in conn.execute(f"SELECT cve_alias, ecosystems FROM vulnerabilities WHERE cve_alias IN ({marks})", chunk):
+                has_record.add(cve_id)
+                try:
+                    ecosystems[cve_id].update(json.loads(ecos_json or "[]"))
+                except (TypeError, ValueError):
+                    pass
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    charted, other, missing = [], [], 0
+    for cve_id, name, added in kev_rows:
+        if cve_id not in has_record:
+            missing += 1
+        elif ecosystems[cve_id] & charted_registries:
+            charted.append(cve_id)
+        else:
+            other.append({"cve_id": cve_id, "name": (name or "").strip(), "added": added, "ecosystems": sorted(ecosystems[cve_id])})
+    return {"added": len(kev_rows), "charted": charted, "other": other, "not_in_osv": missing}
+
+
+def _landmark_footnotes(breakdown, hidden: list, start_date: str, end_date: str, listed: int = 15) -> str:
+    """HTML for under chart I's key: the accounting sentence, any charted-registry KEV CVEs beyond LANDMARK_LIMIT, and a
+    text-only list of KEV CVEs in other ecosystems (no repository color, so they stay off the plot)."""
+    def item(link_id, name, detail):
+        return (f'<li><a href="https://osv.dev/vulnerability/{html.escape(link_id)}" target="_blank" rel="noopener">{html.escape(link_id)}</a>'
+                f' -- "{html.escape(name or "unnamed")}" <span>({html.escape(detail)})</span></li>')
+
+    parts = []
+    if breakdown:
+        n = breakdown["added"]
+        other = breakdown["other"]
+        parts.append(
+            f'<p class="lm-key-title">CISA added {n} KEV {"entry" if n == 1 else "entries"} between {html.escape(start_date[:10])} and {html.escape(end_date[:10])}: '
+            f'{len(breakdown["charted"])} in charted registries, {len(other)} in other ecosystems{" (listed below)" if other else ""}, '
+            f'{breakdown["not_in_osv"]} not in OSV at all.</p>')
+    if hidden:
+        items = "".join(item(lm["cve_id"], lm["name"], f'{", ".join(lm["ecosystems"])}; EPSS {lm["epss"] * 100:.1f}%' if lm.get("epss") is not None else ", ".join(lm["ecosystems"])) for lm in hidden[:listed])
+        more = f' (+{len(hidden) - listed} more)' if len(hidden) > listed else ""
+        parts.append(f'<p class="lm-key-title">+{len(hidden)} more KEV-listed CVE{"" if len(hidden) == 1 else "s"} in charted registries, not plotted beyond the first {LANDMARK_LIMIT} (highest EPSS shown first){more}:</p><ul class="lm-key">{items}</ul>')
+    if breakdown and breakdown["other"]:
+        shown = breakdown["other"][:listed]
+        items = "".join(item(o["cve_id"], o["name"], f'{", ".join(o["ecosystems"])}; added to KEV {o["added"]}') for o in shown)
+        more = f' (+{len(breakdown["other"]) - listed} more)' if len(breakdown["other"]) > listed else ""
+        parts.append(f'<p class="lm-key-title">KEV-listed CVEs in other ecosystems (no repository color, so not on the chart){more}:</p><ul class="lm-key">{items}</ul>')
+    return "".join(parts)
+
+
 _LANDMARK_PILL_HEIGHT_PX = 22
 _LANDMARK_SLOT_STEP = 0.09
 _LANDMARK_SLOT_COUNT = 9
@@ -1989,7 +2060,7 @@ def _rects_overlap(a: tuple, b: tuple, margin: float = 0.0) -> bool:
     return not (a[2] + margin <= b[0] or b[2] + margin <= a[0] or a[3] + margin <= b[1] or b[3] + margin <= a[1])
 
 
-def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, alt: str, eco_colors: dict = None) -> str:
+def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, alt: str, eco_colors: dict = None, footnotes: str = "") -> str:
     """Saves fig as an embedded PNG and returns its HTML. With landmarks, each gets a dotted
     vertical line drawn into the PNG plus a clickable pill laid over the image at the same spot
     (hover for the KEV name/description/scores; click for the osv.dev record), and a plain-text
@@ -2071,7 +2142,7 @@ def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, 
     buf.seek(0)
     img = f'<img src="data:image/png;base64,{base64.b64encode(buf.read()).decode("utf-8")}" alt="{html.escape(alt)}" />'
     if not placed:
-        return img
+        return img + footnotes
 
     key_items = "".join(
         f'<li><span class="lm-swatch" style="background:{_landmark_repo_style(lm, eco_colors)[1]}"></span>'
@@ -2081,9 +2152,35 @@ def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, 
         for lm, _ in placed
     )
     return (f'<div class="chart-wrap">{img}{"".join(overlays)}</div>'
-            f'<p class="lm-key-title">Landmark advisories (dotted lines): KEV-listed CVEs with the highest EPSS this window that appear in a charted registry, '
-            f'placed at the day each was published or added to KEV. Each label is colored to match its repository in the ecosystem chart\'s key (Chart I). Hover a label for details; click to open the OSV record.</p>'
-            f'<ul class="lm-key">{key_items}</ul>')
+            f'<p class="lm-key-title">Landmark advisories (dotted lines): KEV-listed CVEs that appear in a charted registry, highest EPSS first, '
+            f"placed at the day each was published or added to KEV. Each label is colored to match its repository in Chart I's key. Hover a label for details; click to open the OSV record.</p>"
+            f'<ul class="lm-key">{key_items}</ul>{footnotes}')
+
+
+_DATE_LABEL_THIN_ABOVE = 20       # windows with more dates than this never label every date
+_DATE_LABEL_MIN_SPACING_PX = 48   # labels are kept at least this far apart (a rotated YYYY-MM-DD is about this wide)
+_PLOT_WIDTH_FRACTION = 0.85       # share of the figure width the plot area occupies, for estimating room per tick
+
+
+def _date_label_step(count: int, fig_width_px: float) -> int:
+    """Label every Nth date: 1 up to _DATE_LABEL_THIN_ABOVE dates; beyond that at least every other, and more
+    when the dates would otherwise sit closer than _DATE_LABEL_MIN_SPACING_PX. In a 12-inch figure that is every
+    other date for about a month and every third for about two."""
+    if count <= _DATE_LABEL_THIN_ABOVE:
+        return 1
+    per_tick = fig_width_px * _PLOT_WIDTH_FRACTION / count
+    return max(2, math.ceil(_DATE_LABEL_MIN_SPACING_PX / per_tick))
+
+
+def _thin_date_ticks(ax, dates):
+    """Keeps a tick mark (and gridline) for EVERY date but labels only every Nth, starting with the first, so a long
+    window's labels stop crowding each other while no date loses its mark."""
+    if not ax.has_data():
+        return
+    dates = list(dates)
+    step = _date_label_step(len(dates), ax.figure.get_figwidth() * ax.figure.dpi)
+    ax.set_xticks(range(len(dates)))
+    ax.set_xticklabels([d if i % step == 0 else "" for i, d in enumerate(dates)], rotation=30, ha="right")
 
 
 def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PATH):
@@ -2126,7 +2223,12 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
     has_deltas = len(dates) >= 2
 
     plotted_range = delta_dates if has_deltas else dates
-    landmarks = find_landmark_advisories(db_path, plotted_range[0], plotted_range[-1], registries=target_ecos) if plotted_range else []
+    all_landmarks = find_landmark_advisories(db_path, plotted_range[0], plotted_range[-1], top_n=1000, registries=target_ecos) if plotted_range else []
+    landmarks, hidden_landmarks = all_landmarks[:LANDMARK_LIMIT], all_landmarks[LANDMARK_LIMIT:]
+    landmark_footnotes = ""
+    if plotted_range:
+        landmark_footnotes = _landmark_footnotes(kev_window_breakdown(db_path, plotted_range[0], plotted_range[-1], target_ecos),
+                                                 hidden_landmarks, plotted_range[0], plotted_range[-1])
     eco_colors = {}
 
     def _deltas(series):
@@ -2154,10 +2256,10 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         ax1.tick_params(colors='#bbbbbb', labelsize=10)
         ax1.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
         ax1.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff') # Fixed line
-        mplplt.xticks(rotation=30, ha='right')
+        _thin_date_ticks(ax1, delta_dates if has_deltas else dates)
         mplplt.tight_layout()
 
-        chart1_html = _render_chart_with_landmarks(fig1, ax1, landmarks, delta_dates if has_deltas else dates, "Ecosystem Time Series Chart", eco_colors)
+        chart1_html = _render_chart_with_landmarks(fig1, ax1, landmarks, delta_dates if has_deltas else dates, "Ecosystem Time Series Chart", eco_colors, landmark_footnotes)
         mplplt.close(fig1)
 
         # Chart 2: Threat Profile Daily Breakdown (day-over-day delta)
@@ -2181,7 +2283,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         ax2.tick_params(colors='#bbbbbb', labelsize=10)
         ax2.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
         ax2.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff') # Fixed line
-        mplplt.xticks(rotation=30, ha='right')
+        _thin_date_ticks(ax2, delta_dates if has_deltas else dates)
         mplplt.tight_layout()
 
         chart2_html = _render_chart_with_landmarks(fig2, ax2, landmarks, delta_dates if has_deltas else dates, "Threat Mutation Breakdown Chart", eco_colors)
@@ -2220,7 +2322,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
             ax3.tick_params(colors='#bbbbbb', labelsize=10)
             ax3.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
             ax3.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff')
-            mplplt.xticks(rotation=30, ha='right')
+            _thin_date_ticks(ax3, kev_dates_x)
             mplplt.tight_layout()
 
             buf3 = io.BytesIO()
