@@ -1441,7 +1441,11 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertIn(f"background:{npm_color};", page, "[!] npm landmark (CVE-A) must use npm's chart color.")
         self.assertIn(f'class="lm-swatch" style="background:{npm_color}"', page)
         self.assertIn("npm, PyPI; placed at 2026-09-10", page, "[!] The key must name the repository in text, not only by color.")
-        self.assertNotIn("CVE-B", page, "[!] A distro-only CVE must not be a landmark on a chart of the major registries.")
+        import re
+        self.assertIsNone(re.search(r'<a class="lm[^>]*>CVE-B<', page), "[!] A distro-only CVE must not be a landmark on a chart of the major registries.")
+        other_list = page[page.index("KEV-listed CVEs in other ecosystems"):]
+        self.assertIn("CVE-B", other_list, "It is listed in text instead, so it isn't silently dropped.")
+        self.assertIn("Debian", other_list)
 
     def test_rects_overlap_respects_margin_and_touching_edges(self):
         overlap = top10ecosystems._rects_overlap
@@ -1712,6 +1716,113 @@ class TestThreatStreamScanner(unittest.TestCase):
             lock = pathlib.Path(tmp) / "requirements.lock"
             lock.write_text("# header\n\ncertifi==2026.10.19\ncharset_normalizer==3.5.2\nsix==1.17.0\n")
             self.assertEqual(env_info.lock_pins(lock), {"certifi": "2026.10.19", "charset-normalizer": "3.5.2", "six": "1.17.0"})
+
+    def test_report_date_label_step_widens_as_the_window_gets_longer(self):
+        step = top10ecosystems._date_label_step
+        for count, expected in ((10, 1), (20, 1), (21, 2), (30, 2), (45, 3), (63, 3), (120, 6)):
+            self.assertEqual(step(count, 1200), expected, f"[!] {count} dates in a 12-inch chart")
+        self.assertGreater(step(30, 600), step(30, 1200), "A narrower chart has less room per label, so it labels fewer dates.")
+
+    def test_report_keeps_every_tick_but_labels_only_every_nth_date(self):
+        def render(count):
+            dates = [f"2026-09-{d:02d}" if d <= 30 else f"2026-10-{d - 30:02d}" for d in range(1, count + 1)]
+            fig, ax = top10ecosystems.mplplt.subplots(figsize=(12, 6))
+            try:
+                ax.plot(dates, list(range(count)))
+                top10ecosystems._thin_date_ticks(ax, dates)
+                fig.canvas.draw()
+                return dates, list(ax.get_xticks()), [t.get_text() for t in ax.get_xticklabels()]
+            finally:
+                top10ecosystems.mplplt.close(fig)
+        dates, ticks, labels = render(31)
+        self.assertEqual(len(ticks), 31, "[!] Every date keeps its tick mark (and gridline).")
+        self.assertEqual([lab for lab in labels if lab], dates[::2], "A month is labelled every other date, starting with the first.")
+        self.assertEqual(sum(1 for lab in labels if not lab), 15)
+        dates, ticks, labels = render(63)
+        self.assertEqual(len(ticks), 63)
+        self.assertEqual([lab for lab in labels if lab], dates[::3], "Two months is labelled every third date so the labels no longer touch.")
+        dates, ticks, labels = render(12)
+        self.assertEqual(labels, dates, "A short window keeps every label.")
+
+    def test_report_date_label_thinning_leaves_an_empty_chart_alone(self):
+        fig, ax = top10ecosystems.mplplt.subplots()
+        try:
+            before = list(ax.get_xticks())
+            top10ecosystems._thin_date_ticks(ax, [f"2026-09-{d:02d}" for d in range(1, 29)])
+            self.assertEqual(list(ax.get_xticks()), before, "[!] An axis with no plotted data must not get ticks invented for it.")
+            self.assertFalse(ax.has_data())
+        finally:
+            top10ecosystems.mplplt.close(fig)
+
+    def test_kev_window_breakdown_accounts_for_every_entry_cisa_added(self):
+        import tempfile, top10ecosystems as t
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db = self._landmark_db(tmp)
+            result = t.kev_window_breakdown(db, "2026-09-01", "2026-09-30", ["npm", "PyPI", "Maven (Java)"])
+            self.assertEqual(result["added"], 3, "CVE-A, CVE-Z and CVE-B were added in September; CVE-C (October) and CVE-E (March) were not.")
+            self.assertEqual(result["charted"], ["CVE-A"])
+            self.assertEqual([(o["cve_id"], o["ecosystems"]) for o in result["other"]], [("CVE-B", ["Debian"])])
+            self.assertEqual(result["not_in_osv"], 1, "CVE-Z has no OSV record at all.")
+            self.assertEqual(len(result["charted"]) + len(result["other"]) + result["not_in_osv"], result["added"],
+                             "[!] Every KEV entry must land in exactly one bucket.")
+            self.assertIsNone(t.kev_window_breakdown(os.path.join(tmp, "missing.db"), "2026-09-01", "2026-09-30", []))
+            self.assertIsNone(t.kev_window_breakdown(db, "not-a-date", "2026-09-30", []))
+
+    def test_landmark_footnotes_state_the_accounting_and_list_what_is_off_the_chart(self):
+        import top10ecosystems as t
+        breakdown = {"added": 35, "charted": ["CVE-1", "CVE-2"], "not_in_osv": 24,
+                     "other": [{"cve_id": f"CVE-9-{i}", "name": "<b>Big</b> & Co", "added": "2026-10-0%d" % (i + 1), "ecosystems": ["Debian"]} for i in range(3)]}
+        hidden = [{"cve_id": "CVE-5-1", "name": "Extra", "epss": 0.5, "ecosystems": ["npm"]}, {"cve_id": "CVE-5-2", "name": "Extra2", "epss": None, "ecosystems": ["PyPI"]}]
+        text = t._landmark_footnotes(breakdown, hidden, "2026-09-18", "2026-10-19")
+        self.assertIn("CISA added 35 KEV entries between 2026-09-18 and 2026-10-19: 2 in charted registries, 3 in other ecosystems (listed below), 24 not in OSV at all.", text)
+        self.assertIn("+2 more KEV-listed CVEs in charted registries", text)
+        self.assertIn(f"first {t.LANDMARK_LIMIT}", text)
+        self.assertIn("EPSS 50.0%", text)
+        self.assertIn("&lt;b&gt;Big&lt;/b&gt; &amp; Co", text, "[!] KEV names must be HTML-escaped.")
+        self.assertNotIn("<b>Big", text)
+        self.assertIn('href="https://osv.dev/vulnerability/CVE-9-0"', text)
+        capped = t._landmark_footnotes(dict(breakdown, other=breakdown["other"] * 6), [], "2026-09-18", "2026-10-19", listed=5)
+        self.assertEqual(capped.count("<li>"), 5)
+        self.assertIn("(+13 more)", capped)
+        single = t._landmark_footnotes({"added": 1, "charted": [], "other": [], "not_in_osv": 1}, [], "2026-09-18", "2026-10-19")
+        self.assertIn("CISA added 1 KEV entry between", single)
+        self.assertNotIn("(listed below)", single, "Nothing is listed below, so the sentence must not point there.")
+        self.assertEqual(t._landmark_footnotes(None, [], "2026-09-18", "2026-10-19"), "")
+
+    def test_report_plots_up_to_the_limit_and_lists_the_rest_instead_of_dropping_them(self):
+        import contextlib, tempfile
+        def snap(day, npm):
+            return {"metadata": {"interval_to": day, "interval_from": "2026-04-18", "target_layer_filter": "app"},
+                    "leaderboard": {"npm": npm}, "threat_profile": {"Malware (New Entry)": npm}}
+        snaps = [snap("2026-09-01", 10), snap("2026-09-10", 30), snap("2026-09-20", 50), snap("2026-09-30", 80)]
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = os.path.join(tmp, "many.db")
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, published_date TEXT, cvss_score REAL, ecosystems TEXT)")
+            conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT, vulnerability_name TEXT, short_description TEXT, known_ransomware_use TEXT)")
+            conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL)")
+            for i in range(15):
+                conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?,?)", (f"GHSA-n{i}", f"CVE-2026-{1000 + i}", "2026-01-01", 7.0, '["npm"]'))
+                conn.execute("INSERT INTO kev_catalog VALUES (?,?,?,?,?)", (f"CVE-2026-{1000 + i}", f"2026-09-{12 + i:02d}", f"Charted {i}", "d", "Unknown"))
+                conn.execute("INSERT INTO epss_scores VALUES (?,?)", (f"CVE-2026-{1000 + i}", 0.99 - i * 0.01))
+            for i in range(2):
+                conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?,?)", (f"DEB-{i}", f"CVE-2026-{2000 + i}", "2026-01-01", 7.0, '["Debian"]'))
+                conn.execute("INSERT INTO kev_catalog VALUES (?,?,?,?,?)", (f"CVE-2026-{2000 + i}", "2026-09-15", f"Distro {i}", "d", "Unknown"))
+            conn.execute("INSERT INTO kev_catalog VALUES ('CVE-2026-3000', '2026-09-16', 'Proprietary', 'd', 'Unknown')")
+            conn.commit()
+            conn.close()
+            out = os.path.join(tmp, "report.html")
+            with contextlib.redirect_stdout(io.StringIO()):
+                top10ecosystems.generate_html_report(snaps, out, db_path=path)
+            with open(out, encoding="utf-8") as f:
+                page = f.read()
+        limit = top10ecosystems.LANDMARK_LIMIT
+        self.assertEqual(page.count('<a class="lm'), 2 * limit, "[!] The cap is per chart: LANDMARK_LIMIT labels on each of the two charts, not more.")
+        self.assertIn("+3 more KEV-listed CVEs in charted registries", page, "[!] Landmarks beyond the cap must be listed, not silently dropped.")
+        self.assertIn("CVE-2026-1014", page, "The lowest-EPSS charted CVE must still appear (in the overflow list).")
+        self.assertIn("15 in charted registries, 2 in other ecosystems (listed below), 1 not in OSV at all", page)
+        self.assertEqual(page.count("CISA added 18 KEV entries"), 1, "The accounting appears once, under chart I only.")
+        self.assertIn("Distro 0", page)
 
     def test_compare_snapshots_golden_master_deltas(self):
         """Validates the comparison engine's delta arithmetic and rank shifts."""
@@ -2599,6 +2710,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             ("CVE-B", "2026-09-22", "Beta Bypass", "Beta desc", "Unknown"),
             ("CVE-C", "2026-10-30", "Gamma Leak", "Gamma desc", "Unknown"),
             ("CVE-E", "2026-03-01", "Epsilon", "Epsilon desc", "Unknown"),
+            ("CVE-Z", "2026-09-15", "Zeta Proprietary Appliance", "Zeta desc", "Unknown"),
         ])
         conn.executemany("INSERT INTO epss_scores VALUES (?,?)",
                          [("CVE-A", 0.5), ("CVE-B", 0.9), ("CVE-C", 0.1), ("CVE-D", 0.99), ("CVE-E", 0.99)])
