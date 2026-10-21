@@ -54,6 +54,8 @@ import numpy as np
 import plotext as pltx
 import requests
 
+import chart_axes
+import kev_lead_time
 from osv_ecosystems import (
     KNOWN_CONTAINER_ECOSYSTEMS, KNOWN_REGISTRY_ECOSYSTEMS, MASTER_TRACKS,
     FALLBACK_ECOSYSTEM, OUTPUT_TRACKS,
@@ -1117,98 +1119,6 @@ def find_cross_ecosystem_cve_correlations(db_path: str, session_advisory_ids: se
     return len(qualifying), qualifying[:top_n]
 
 
-def _compute_kev_lead_time_stats(db_path: str, session_advisory_ids: set) -> dict:
-    """
-    For advisories in session_advisory_ids that are confirmed CISA KEV-catalog entries, computes
-    the lead time (days) between the CVE's earliest known OSV published_date (across all of its
-    constituent advisory records in scope, not just one) and kev_catalog.date_added -- "how much
-    warning did we actually have before this became actively exploited." CVE resolution reuses
-    the same approach as --crosscheck: cve_alias, falling back to a CVE pattern embedded in
-    advisory_id for ROOT-APP-* synthetic entries that carry no cve_alias.
-
-    Rows with a missing/sentinel published_date are excluded -- both OSV's own "1970-01-01"
-    default for absent data, and the literal "0001-01-01" placeholder some Debian-sourced records
-    carry upstream -- since including them would swamp the mean with multi-decade "lead times"
-    that are really just missing data, not real advance warning. Negative lead times (KEV added
-    before our earliest published_date, which can happen for a record OSV has since rewritten)
-    are excluded for the same reason: they don't represent a real lookback distance.
-
-    Returns None if there's no KEV overlap in scope, else {"mean_days", "median_days",
-    "sample_count"}.
-    """
-    if not session_advisory_ids:
-        return None
-
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cve_pattern = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
-    junk_dates = {"1970-01-01", "0001-01-01", None, ""}
-
-    try:
-        id_list = list(session_advisory_ids)
-        chunk_size = 500
-
-        earliest_published = {}
-        for i in range(0, len(id_list), chunk_size):
-            chunk = id_list[i:i + chunk_size]
-            placeholders = ",".join("?" * len(chunk))
-            cursor.execute(
-                f"SELECT advisory_id, cve_alias, published_date FROM vulnerabilities WHERE advisory_id IN ({placeholders})",
-                chunk
-            )
-            for advisory_id, cve_alias, published_date in cursor.fetchall():
-                cve_id = cve_alias
-                if not cve_id:
-                    match = cve_pattern.search(advisory_id or "")
-                    if match:
-                        cve_id = match.group(0).upper()
-                if not cve_id or published_date in junk_dates:
-                    continue
-                p_clean = published_date[:10]
-                if cve_id not in earliest_published or p_clean < earliest_published[cve_id]:
-                    earliest_published[cve_id] = p_clean
-
-        if not earliest_published:
-            return None
-
-        cve_ids = list(earliest_published.keys())
-        kev_dates = {}
-        for i in range(0, len(cve_ids), chunk_size):
-            chunk = cve_ids[i:i + chunk_size]
-            placeholders = ",".join("?" * len(chunk))
-            cursor.execute(f"SELECT cve_id, date_added FROM kev_catalog WHERE cve_id IN ({placeholders})", chunk)
-            for cve_id, date_added in cursor.fetchall():
-                if date_added:
-                    kev_dates[cve_id] = date_added
-    finally:
-        conn.close()
-
-    lead_days = []
-    for cve_id, p_clean in earliest_published.items():
-        date_added = kev_dates.get(cve_id)
-        if not date_added:
-            continue
-        try:
-            p_dt = datetime.date.fromisoformat(p_clean)
-            k_dt = datetime.date.fromisoformat(date_added[:10])
-        except ValueError:
-            continue
-        delta = (k_dt - p_dt).days
-        if delta >= 0:
-            lead_days.append(delta)
-
-    if not lead_days:
-        return None
-
-    lead_days.sort()
-    n = len(lead_days)
-    mid = n // 2
-    median = lead_days[mid] if n % 2 else (lead_days[mid - 1] + lead_days[mid]) / 2
-    return {
-        "mean_days": round(sum(lead_days) / n, 1),
-        "median_days": round(median, 1),
-        "sample_count": n
-    }
 
 
 _CVE_GRID_MAX_COLUMNS = 15
@@ -1864,7 +1774,7 @@ def generate_enterprise_threat_leaderboard(
         malware_vector_counts, export_profile_matrix,
         priority_sort_active=priority_sort_active,
         spatial_blast_radius=spatial_blast_radius,
-        kev_lead_time=_compute_kev_lead_time_stats(db_path, session_advisory_ids) if custom_export_arg else None,
+        kev_lead_time=kev_lead_time.compute_stats(db_path, session_advisory_ids, start_date.date().isoformat(), end_date.date().isoformat()) if custom_export_arg else None,
         spatial_dwell_cve=spatial_dwell_cve,
         ecosystem_epss_pools=ecosystem_epss_pools
     )
@@ -2157,30 +2067,13 @@ def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, 
             f'<ul class="lm-key">{key_items}</ul>{footnotes}')
 
 
-_DATE_LABEL_THIN_ABOVE = 20       # windows with more dates than this never label every date
-_DATE_LABEL_MIN_SPACING_PX = 48   # labels are kept at least this far apart (a rotated YYYY-MM-DD is about this wide)
-_PLOT_WIDTH_FRACTION = 0.85       # share of the figure width the plot area occupies, for estimating room per tick
-
-
-def _date_label_step(count: int, fig_width_px: float) -> int:
-    """Label every Nth date: 1 up to _DATE_LABEL_THIN_ABOVE dates; beyond that at least every other, and more
-    when the dates would otherwise sit closer than _DATE_LABEL_MIN_SPACING_PX. In a 12-inch figure that is every
-    other date for about a month and every third for about two."""
-    if count <= _DATE_LABEL_THIN_ABOVE:
-        return 1
-    per_tick = fig_width_px * _PLOT_WIDTH_FRACTION / count
-    return max(2, math.ceil(_DATE_LABEL_MIN_SPACING_PX / per_tick))
-
-
-def _thin_date_ticks(ax, dates):
-    """Keeps a tick mark (and gridline) for EVERY date but labels only every Nth, starting with the first, so a long
-    window's labels stop crowding each other while no date loses its mark."""
-    if not ax.has_data():
-        return
-    dates = list(dates)
-    step = _date_label_step(len(dates), ax.figure.get_figwidth() * ax.figure.dpi)
-    ax.set_xticks(range(len(dates)))
-    ax.set_xticklabels([d if i % step == 0 else "" for i, d in enumerate(dates)], rotation=30, ha="right")
+# The report helpers now live in chart_axes.py and kev_lead_time.py; the old private names stay as aliases.
+_date_label_step = chart_axes.date_label_step
+_thin_date_ticks = chart_axes.thin_date_ticks
+_compute_kev_lead_time_stats = kev_lead_time.compute_stats
+_kev_bucket_bar_html = kev_lead_time.bucket_bar_html
+_KEV_BUCKETS = kev_lead_time.BUCKETS
+_KEV_BUCKET_CSS = kev_lead_time.BUCKET_CSS
 
 
 def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PATH):
@@ -2289,58 +2182,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         chart2_html = _render_chart_with_landmarks(fig2, ax2, landmarks, delta_dates if has_deltas else dates, "Threat Mutation Breakdown Chart", eco_colors)
         mplplt.close(fig2)
 
-        # Chart 3: KEV Lead Time Trend -- NOT a delta chart like the other two. kev_lead_time
-        # is already a point-in-time distribution stat (as of that day's data: the mean days
-        # between a KEV-flagged CVE's earliest known publish and its KEV addition), so plotting
-        # it raw is correct -- diffing it day-over-day would just be noise on top of noise. Only
-        # snapshots actually carrying the field (requires --export, and
-        # postdate this chart being added) contribute a point; older snapshots are skipped, not
-        # zeroed, since 0 would misleadingly read as "instant lead time" rather than "no data."
-        kev_lead_points = [
-            (snap.get("metadata", {}).get("interval_to"), snap["kev_lead_time"]["mean_days"], snap["kev_lead_time"]["sample_count"])
-            for snap in snapshots
-            if snap.get("kev_lead_time")
-        ]
-
-        img_str_kev_lead = None
-        kev_lead_caption = ""
-        if kev_lead_points:
-            kev_dates_x = [p[0] for p in kev_lead_points]
-            kev_means_y = [p[1] for p in kev_lead_points]
-            sample_counts = [p[2] for p in kev_lead_points]
-            kev_lead_caption = f" (sample size ranged {min(sample_counts)}-{max(sample_counts)} KEV-confirmed CVEs across the window)"
-
-            fig3, ax3 = mplplt.subplots(figsize=(12, 5))
-            fig3.patch.set_facecolor('#1e1e1e')
-            ax3.set_facecolor('#1e1e1e')
-
-            ax3.plot(kev_dates_x, kev_means_y, marker='o', linewidth=2, color='#ff5555', label="Mean KEV Lead Time")
-
-            ax3.set_title("KEV Lead Time Trend (mean days: publish -> KEV addition)", color='#ffffff', fontsize=14, pad=15)
-            ax3.set_ylabel("Mean Lead Time (Days)", color='#bbbbbb')
-            ax3.set_xlabel("Snapshot Boundary Timeline", color='#bbbbbb')
-            ax3.tick_params(colors='#bbbbbb', labelsize=10)
-            ax3.grid(True, linestyle='--', alpha=0.15, color='#ffffff')
-            ax3.legend(facecolor='#1e1e1e', edgecolor='#333333', labelcolor='#ffffff')
-            _thin_date_ticks(ax3, kev_dates_x)
-            mplplt.tight_layout()
-
-            buf3 = io.BytesIO()
-            fig3.savefig(buf3, format='png', bbox_inches='tight', facecolor=fig3.get_facecolor())
-            buf3.seek(0)
-            img_str_kev_lead = base64.b64encode(buf3.read()).decode('utf-8')
-            mplplt.close(fig3)
-
-        # Conditional -- an older snapshot directory, or a window with zero KEV overlap, simply
-        # doesn't get the section, rather than rendering an empty/misleading one.
-        kev_lead_section = ""
-        if img_str_kev_lead:
-            kev_lead_section = f"""
-        <h2>III. KEV Lead Time Trend</h2>
-        <p>For advisories that later get confirmed as actively exploited (CISA KEV), the mean days between the CVE's earliest known publish date and its KEV catalog addition{kev_lead_caption} -- how much runway prioritization work actually had before each one became urgent.</p>
-        <div class="chart">
-            <img src="data:image/png;base64,{img_str_kev_lead}" alt="KEV Lead Time Trend Chart" />
-        </div>"""
+        kev_lead_section = kev_lead_time.build_section(snapshots)
 
         # Chart 4: CVE Active TTR Distribution (box plot, latest snapshot only). Distribution
         # shape is a point-in-time property, not something that gains meaning from being diffed
@@ -2491,7 +2333,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         .meta-box {{ background: #151515; padding: 15px 20px; border-radius: 6px; border: 1px solid #252525; margin-bottom: 30px; }}
         .chart {{ text-align: center; margin-top: 25px; background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
         .chart img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-{_LANDMARK_CSS}
+{_LANDMARK_CSS}{_KEV_BUCKET_CSS}
     </style>
 </head>
 <body>
