@@ -1855,6 +1855,40 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertTrue(any(e["kind"] == "EXPLOITED" for e in result["events"]))
         self.assertIn("OSV record CVE-2016-3081 unavailable", " | ".join(result["notes"]))
 
+    def test_timeline_reads_the_flat_epss_row_for_a_cve_scored_for_the_first_time(self):
+        """[REGRESSION] FIRST answers a CVE with history with a "time-series" list, but a CVE scored for the first time with one
+        flat row. parse_epss only knew the list, so a day-old CVE with a real EPSS score was reported as "Nothing found"."""
+        import timeline
+        flat = self._timeline_fixture("epss_CVE-2026-109618.json")
+        self.assertNotIn("time-series", flat["data"][0], "The saved real response is the flat shape.")
+        self.assertEqual(timeline.parse_epss(flat), [{"date": "2026-10-22", "score": 0.05307, "percentile": 0.92563}])
+        listed = {"data": [{"cve": "CVE-1", "time-series": [{"epss": "0.2", "percentile": "0.9", "date": "2026-10-02"},
+                                                             {"epss": "0.1", "percentile": "0.8", "date": "2026-10-01"}]}]}
+        self.assertEqual([p["date"] for p in timeline.parse_epss(listed)], ["2026-10-01", "2026-10-02"], "The list shape still works, oldest first.")
+        for empty in ({"data": []}, {}, None, {"data": [{"cve": "CVE-1"}]}, {"data": [{"epss": "x", "percentile": "1", "date": "d"}]}):
+            self.assertEqual(timeline.parse_epss(empty), [], f"[!] {empty!r} must read as no EPSS, not crash.")
+
+    def test_timeline_reports_a_cve_that_only_vendors_have_published(self):
+        import datetime, timeline
+        today = datetime.date(2026, 10, 22)
+        get = self._timeline_get(osv={}, epss=self._timeline_fixture("epss_CVE-2026-109618.json"))
+        result = timeline.build_timeline("CVE-2026-109618", get=get, today=today)
+        self.assertIsNotNone(result, "[!] A CVE with an EPSS score is not 'nothing found'.")
+        self.assertEqual(result["records"], [])
+        self.assertAlmostEqual(result["epss"]["score"], 0.05307)
+        self.assertTrue(any(e["kind"] == "SCORED" for e in result["events"]))
+        notes = " | ".join(result["notes"])
+        self.assertIn("OSV has no record under this CVE ID", notes)
+        self.assertIn("DEBIAN-CVE-2026-109618", notes, "The note points at a vendor ID to try.")
+        out = []
+        self.assertEqual(timeline.run(["CVE-2026-109618"], get=get, today=today, out=out.append), 0)
+        text = "\n".join(out)
+        self.assertIn("EPSS 5.3%", text)
+        self.assertIn("Fix:          unknown (no OSV records to read fixes from)", text, "[!] With no records the fix status is unknown, not 'none'.")
+        self.assertIn("Withdrawn:    unknown (no OSV records)", text)
+        with_records = timeline.build_timeline("CVE-2016-3081", get=self._timeline_get(), today=today)
+        self.assertNotIn("OSV has no record under this CVE ID", " | ".join(with_records["notes"]), "The note only appears when nothing was fetched.")
+
     def test_timeline_unknown_id_returns_nothing_and_a_nonzero_exit(self):
         import timeline
         self.assertIsNone(timeline.build_timeline("GHSA-0000-0000-0000", get=self._timeline_get(osv={})))
