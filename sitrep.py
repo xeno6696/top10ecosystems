@@ -34,6 +34,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 import requests
 
+import report_color
 import sitrep_progress
 import timeline
 from osv_ecosystems import clean_ecosystem_tag, get_artifact_layer
@@ -361,8 +362,82 @@ def _clip(text, limit=220):
     return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
-def _result(found=False, facts=None, events=None, refs=None, error=None):
-    return {"found": found, "facts": facts or [], "events": [e for e in (events or []) if e], "refs": refs or [], "error": error}
+def _result(found=False, facts=None, events=None, refs=None, error=None, reflinks=None):
+    return {"found": found, "facts": facts or [], "events": [e for e in (events or []) if e], "refs": refs or [], "reflinks": reflinks or [], "error": error}
+
+
+# What a record's references say they are, most useful to a responder first. cve.org and NVD tag them (in different spellings).
+CATEGORY_ORDER = ("vendor-advisory", "patch", "mitigation", "third-party-advisory", "government-resource", "exploit", "technical-description",
+                  "release-notes", "issue-tracking", "mailing-list", "product", "other", "untagged")
+MAX_REFERENCES_SHOWN = 30
+# Pages about this very CVE on sources sitrep already queries; listed as a count, not as to-dos.
+COVERED_PAGES = (("nvd.nist.gov", "/vuln/detail/"), ("www.cve.org", "/cverecord"), ("cve.mitre.org", ""), ("www.cisa.gov", "/known-exploited-vulnerabilities"),
+                 ("github.com", "/advisories/"), ("security-tracker.debian.org", "/tracker/"), ("ubuntu.com", "/security/"),
+                 ("access.redhat.com", "/security/cve"), ("api.osv.dev", ""), ("osv.dev", "/vulnerability/"), ("www.first.org", ""))
+
+
+def _normalize_tag(tag) -> str:
+    tag = str(tag).strip().lower().replace("_", "-").replace(" ", "-")
+    return "government-resource" if tag == "us-government-resource" else tag
+
+
+def _ref_key(url) -> str:
+    """The same page however it was written: scheme and fragment ignored, host lowercased, trailing slash dropped."""
+    parsed = urlparse(url.strip())
+    return f"{(parsed.hostname or '').lower()}{parsed.path.rstrip('/') or '/'}" + (f"?{parsed.query}" if parsed.query else "")
+
+
+def _https(url) -> str:
+    return "https://" + url.strip()[7:] if url.strip().lower().startswith("http://") else url.strip()
+
+
+def _covered(url) -> bool:
+    parsed = urlparse(url.strip())
+    return any((parsed.hostname or "").lower() == host and parsed.path.lower().startswith(prefix) for host, prefix in COVERED_PAGES)
+
+
+def _category(tags, url) -> str:
+    for category in CATEGORY_ORDER[:-2]:
+        if category in tags:
+            return category
+    if tags:
+        return "other"
+    parsed = urlparse(url)
+    path, host = parsed.path.lower(), (parsed.hostname or "").lower()
+    if "/commit/" in path or "/pull/" in path:
+        return "patch"
+    if "/issues/" in path or "bugzilla" in host:
+        return "issue-tracking"
+    if "oss-security" in path or host.startswith("lists."):
+        return "mailing-list"
+    return "untagged"
+
+
+def build_references(entries, followed) -> dict:
+    """A checklist of every page the records point at, one row per page however many sources listed it, grouped by what the records say
+    it is. status: read (sitrep fetched it, see LEADS), failed (it tried and could not), unread (left for the analyst). Pages about this
+    CVE on sources already queried are returned as `covered`, not as to-dos."""
+    seen = {}
+    for entry in entries:
+        for link in entry.get("reflinks", []):
+            url = str(link.get("url", "")).strip()
+            if not url.lower().startswith(("http://", "https://")):
+                continue
+            slot = seen.setdefault(_ref_key(url), {"url": _https(url), "tags": set(), "sources": []})
+            slot["tags"].update(_normalize_tag(t) for t in link.get("tags") or [])
+            if entry["label"] not in slot["sources"]:
+                slot["sources"].append(entry["label"])
+    fetched = {_ref_key(e["url"]): e for e in followed}
+    rows, covered = [], []
+    for key, slot in seen.items():
+        if _covered(slot["url"]):
+            covered.append(slot["url"])
+            continue
+        page = fetched.get(key)
+        rows.append({"url": slot["url"], "host": urlparse(slot["url"]).hostname, "tags": sorted(slot["tags"]), "category": _category(slot["tags"], slot["url"]),
+                     "sources": slot["sources"], "status": "unread" if not page else ("read" if page["status"] == "found" else "failed")})
+    rows.sort(key=lambda r: (CATEGORY_ORDER.index(r["category"]), -len(r["sources"]), r["url"]))
+    return {"references": rows, "covered": covered}
 
 
 def _cvss_label(key):
@@ -408,7 +483,9 @@ def parse_cve_org(cve, fetch):
         facts.append({"kind": "affected", "text": "; ".join(affected)})
     refs = [r["url"] for r in cna.get("references", []) if r.get("url")]
     refs += [r["url"] for adp in containers.get("adp", []) for r in adp.get("references", []) if r.get("url")]
-    return _result(True, facts, events, refs)
+    reflinks = [{"url": r["url"], "tags": r.get("tags", [])} for r in cna.get("references", []) if r.get("url")]
+    reflinks += [{"url": r["url"], "tags": r.get("tags", [])} for adp in containers.get("adp", []) for r in adp.get("references", []) if r.get("url")]
+    return _result(True, facts, events, refs, reflinks=reflinks)
 
 
 def parse_nvd(cve, fetch):
@@ -427,7 +504,8 @@ def parse_nvd(cve, fetch):
                 facts.append({"kind": "severity", "score": float(cvss["baseScore"]),
                               "text": f"{cvss['baseScore']} {cvss.get('baseSeverity', '')} ({_cvss_label(key)}, {str(score.get('type', '')).lower()}, scored by {score.get('source', 'unknown')})".replace("  ", " ")})
     events = [_event(item.get("published"), "declared", "NVD record published"), _event(item.get("lastModified"), "declared", "NVD record last modified")]
-    return _result(True, facts, events, [r["url"] for r in item.get("references", []) if r.get("url")])
+    references = [r for r in item.get("references", []) if r.get("url")]
+    return _result(True, facts, events, [r["url"] for r in references], reflinks=[{"url": r["url"], "tags": r.get("tags", [])} for r in references])
 
 
 def parse_redhat(cve, fetch):
@@ -789,13 +867,18 @@ SLOW_SECONDS = 10
 
 def slow_notes(entries, threshold=SLOW_SECONDS) -> list:
     """A note for each source that took long, so a slow one can be dropped with --sources core,-id."""
-    return [f"{e['label']} took {e['seconds']:.0f} s; --sources \"core,-{e['id']}\" skips it" for e in entries if e.get("seconds", 0) >= threshold]
+    slow = [e for e in entries if e.get("seconds", 0) >= threshold]
+    if len(slow) >= 3:      # several at once is the network or DNS on this machine, not several slow servers
+        low, high = min(e["seconds"] for e in slow), max(e["seconds"] for e in slow)
+        return [f"{len(slow)} sources ({', '.join(e['label'] for e in slow)}) each took {low:.0f}-{high:.0f} s in the same run; that usually means slow DNS or "
+                f"network on this machine, not slow sources"]
+    return [f"{e['label']} took {e['seconds']:.0f} s; --sources \"core,-{e['id']}\" skips it" for e in slow]
 
 
 def _query_source_inner(cve, source, fetch):
     url = source["url"].replace("{cve}", quote(cve))
     entry = {"id": source["id"], "label": source.get("label", source["id"]), "path": source["path"], "trust": source["trust"],
-             "url": url, "status": "error", "detail": "", "facts": [], "events": [], "refs": [], "lead": None}
+             "url": url, "status": "error", "detail": "", "facts": [], "events": [], "refs": [], "reflinks": [], "lead": None}
     _note("contacting", urlparse(url).hostname)
     response = fetch(url, source)
     _note("reading", "")
@@ -820,7 +903,8 @@ def _query_source_inner(cve, source, fetch):
     if parsed["error"]:
         entry["detail"] = parsed["error"]
         return entry
-    entry.update(status="found" if parsed["found"] else "not_found", facts=parsed["facts"], events=parsed["events"], refs=parsed["refs"], lead=parsed.get("lead"))
+    entry.update(status="found" if parsed["found"] else "not_found", facts=parsed["facts"], events=parsed["events"], refs=parsed["refs"], lead=parsed.get("lead"),
+                 reflinks=parsed.get("reflinks") or [{"url": u, "tags": []} for u in parsed["refs"]])
     entry["detail"] = "" if parsed["found"] else "answered, but nothing about this CVE"
     return entry
 
@@ -914,6 +998,7 @@ def build_sitrep(cve, sources, follow_hosts, fetch, db_path=None, today=None, wo
     if any(e["id"] == "osv" and e["status"] == "not_found" for e in entries) and not (reach and reach["records"]):
         notes.append("OSV has no record under this CVE ID and the warehouse holds none that mention it; try a vendor ID with --timeline if one is known")
     gaps = coverage_gaps(reach, sources, entries)
+    references = build_references(entries, followed)
     return {
         "cve": cve, "fetched_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "found": found, "gaps": gaps,
         "coverage": [{k: e.get(k) for k in ("id", "label", "path", "trust", "status", "detail", "url", "seconds")} for e in entries_all],
@@ -921,6 +1006,7 @@ def build_sitrep(cve, sources, follow_hosts, fetch, db_path=None, today=None, wo
         "severity_disagree": len(scores) > 1, "exploitation": [f for f in facts if f["kind"] == "exploitation"],
         "fixes": [f for f in facts if f["kind"] == "fix"], "affected": [f for f in facts if f["kind"] == "affected"],
         "details": [f for f in facts if f["kind"] == "detail"], "events": events, "leads": leads, "reach": reach, "notes": notes,
+        "references": references["references"], "references_covered": references["covered"],
     }
 
 
@@ -936,7 +1022,8 @@ def _wrap(prefix, text, width=WIDTH):
     return [prefix + lines[0]] + [pad + line for line in lines[1:]]
 
 
-def render_sitrep(result) -> str:
+def render_sitrep(result, color=False) -> str:
+    """The console report. With color=True the same text gets colour (see termcolor.py); nothing but escape codes is added."""
     rule = "=" * WIDTH
     out = [rule, f"  SITREP  {result['cve']}    (fetched {result['fetched_at'][:10]} {result['fetched_at'][11:16]} UTC)", rule]
     out += _wrap("  ", CAUTION)
@@ -994,13 +1081,27 @@ def render_sitrep(result) -> str:
         for lead in result["leads"]:
             out += _wrap("    ", f"{lead['title']}" + (f" - {lead['author']}" if lead["author"] else "") + f"  [{lead['label']}]")
             out.append(f"      {lead['url']}")
+    references = result["references"]
+    if references or result["references_covered"]:
+        out += ["", "  REFERENCES  what the records point at, by what they say it is: a checklist.   [ ] not read   [x] read above (see LEADS)   [!!] could not be fetched"]
+        category = None
+        for row in references[:MAX_REFERENCES_SHOWN]:
+            if row["category"] != category:
+                category = row["category"]
+                out.append(f"    {category}")
+            out += _wrap("      " + {"unread": "[ ]", "read": "[x]", "failed": "[!!]"}[row["status"]].ljust(5), f"{row['url']}  ({', '.join(row['sources'])})")
+        if len(references) > MAX_REFERENCES_SHOWN:
+            out.append(f"    +{len(references) - MAX_REFERENCES_SHOWN} more (see --json)")
+        if result["references_covered"]:
+            hosts = sorted({urlparse(u).hostname for u in result["references_covered"]})
+            out += _wrap("    ", f"Already queried above: {', '.join(hosts)} ({len(result['references_covered'])} link(s))")
     for note in result["notes"]:
         out += _wrap("  [!] ", note)
     out.append(rule)
-    return "\n".join(out)
+    return "\n".join(report_color.colorize_sitrep(out) if color else out)
 
 
-def run(ids, sources_expression=None, as_json=False, fetch=None, db_path=None, out=print, config=None, today=None, show_progress=False) -> int:
+def run(ids, sources_expression=None, as_json=False, fetch=None, db_path=None, out=print, config=None, today=None, show_progress=False, color=False) -> int:
     """CLI entry. show_progress: False (the default, for callers and tests), "auto" (a live status on stderr when it is a terminal), or a
     sitrep_progress.Progress. Exit code 0 when anything was found for at least one ID, 1 when nothing was, 2 for a bad request or config."""
     try:
@@ -1010,7 +1111,7 @@ def run(ids, sources_expression=None, as_json=False, fetch=None, db_path=None, o
         out(f"[-] sources configuration problem: {exc}")
         return 2
     fetch = fetch or make_fetcher()
-    progress = sitrep_progress.Progress.auto() if show_progress == "auto" else (show_progress if isinstance(show_progress, sitrep_progress.Progress) else None)
+    progress = sitrep_progress.Progress.auto(keep=True) if show_progress == "auto" else (show_progress if isinstance(show_progress, sitrep_progress.Progress) else None)
     results = []
     for raw in ids:
         try:
@@ -1020,7 +1121,7 @@ def run(ids, sources_expression=None, as_json=False, fetch=None, db_path=None, o
             continue
         results.append(result)
         if not as_json:
-            out(render_sitrep(result))
+            out(render_sitrep(result, color=color))
     if as_json and results:
         out(json.dumps(results, indent=2, default=str))
     if not results:

@@ -46,27 +46,28 @@ def ansi_ok(stream) -> bool:
 
 
 class Progress:
-    def __init__(self, stream=None, mode="live", clock=time.monotonic, interval=0.15, threaded=True, width=None):
+    def __init__(self, stream=None, mode="live", clock=time.monotonic, interval=0.15, threaded=True, width=None, keep=False):
         self.stream = stream if stream is not None else sys.stderr
-        self.mode, self.clock, self.interval, self.threaded = mode, clock, interval, threaded
+        self.mode, self.clock, self.interval, self.threaded, self.keep = mode, clock, interval, threaded, keep
         self.width = width
         self._rows = collections.OrderedDict()
         self._lock = threading.Lock()
         self._title, self._t0, self._drawn, self._stop, self._thread = "", None, 0, threading.Event(), None
 
     @classmethod
-    def auto(cls, disabled=False, stream=None):
-        """live on a terminal that can redraw, plain on one that cannot, otherwise off."""
+    def auto(cls, disabled=False, stream=None, keep=False):
+        """live on a terminal that can redraw, plain on one that cannot, otherwise off. keep=True leaves the finished block on screen
+        (a one-shot --sitrep); the default erases it (a --watch loop would otherwise fill the screen with one block per poll)."""
         stream = stream if stream is not None else sys.stderr
         if disabled:
-            return cls(stream, "off")
+            return cls(stream, "off", keep=keep)
         try:
             tty = stream.isatty()
         except (AttributeError, ValueError):
             tty = False
         if not tty:
-            return cls(stream, "off")
-        return cls(stream, "live" if ansi_ok(stream) else "plain")
+            return cls(stream, "off", keep=keep)
+        return cls(stream, "live" if ansi_ok(stream) else "plain", keep=keep)
 
     # ---- reporting (called from any thread) ----
     def begin(self, title):
@@ -151,13 +152,16 @@ class Progress:
                 pass
 
     def end(self, summary=""):
-        """Stop drawing, erase the live block, and leave one summary line."""
+        """Stop drawing, then either leave the block as it ended (keep) or erase it, and write one summary line."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=2)
             self._thread = None
         if self.mode == "live" and self._drawn:
-            self._write(f"\x1b[{self._drawn}A" + (CLEAR_LINE + "\n") * self._drawn + f"\x1b[{self._drawn}A")
+            if self.keep:
+                self._draw()          # the final state of every row (all finished, with their frozen times) stays on screen
+            else:
+                self._write(f"\x1b[{self._drawn}A" + (CLEAR_LINE + "\n") * self._drawn + f"\x1b[{self._drawn}A")
             self._drawn = 0
         if self.mode != "off" and summary:
             self._write(summary + "\n")
