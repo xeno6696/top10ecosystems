@@ -3132,95 +3132,142 @@ class TestThreatStreamScanner(unittest.TestCase):
     def _kev_lead_db(self, tmp):
         path = os.path.join(tmp, "kevlead.db")
         conn = sqlite3.connect(path)
-        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, published_date TEXT)")
+        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, published_date TEXT, ecosystems TEXT)")
         conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT)")
-        # (cve, published, KEV added): the first four are listed inside the 2026-09-18..2026-10-19 window
-        rows = [("CVE-A", "2026-09-25", "2026-10-01"), ("CVE-B", "2026-06-01", "2026-10-05"), ("CVE-C", "2025-01-01", "2026-10-10"),
-                ("CVE-D", "2015-01-01", "2026-10-12"),
-                ("CVE-E", "2022-01-01", "2023-01-01"),     # listed years ago, record merely touched recently
-                ("CVE-F", "1970-01-01", "2026-10-02"),     # OSV's "no date" sentinel
-                ("CVE-G", "2026-10-09", "2026-10-03")]     # KEV before publication (a rewritten record)
-        for cve, published, added in rows:
-            conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?)", ("GHSA-" + cve, cve, published))
+        advisories = [
+            ("GHSA-A", "CVE-A", "2026-09-25", ["npm"]),
+            ("GHSA-B", "CVE-B", "2026-06-01", ["PyPI"]),
+            ("GHSA-C", "CVE-C", "2025-01-01", ["Maven"]),                 # listed this period; its record was never touched since
+            ("GHSA-D", "CVE-D", "2015-01-01", ["npm"]),
+            ("DEB-E", "CVE-E", "2022-01-01", ["Debian"]),                 # not an application registry
+            ("GHSA-F", "CVE-F", "1970-01-01", ["npm"]),                   # OSV's "no date" sentinel
+            ("GHSA-G", "CVE-G", "2026-10-09", ["npm"]),                   # KEV before publication (a rewritten record)
+            ("ROOT-APP-CVE-2026-1234", "", "2026-08-01", ["npm"]),        # no alias: the CVE is only in the advisory id
+            ("GHSA-I", "CVE-I", "2026-03-01", ["npm"]),
+            ("DEB-I", "CVE-I", "2020-01-01", ["Debian"]),                 # older, but not an application-registry record
+            ("GHSA-J", "CVE-J", "2019-01-01", ["PyPI"]),
+            ("GHSA-K", "CVE-K", "2024-04-01", ["npm"])]
+        for advisory_id, cve, published, ecosystems in advisories:
+            conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?)", (advisory_id, cve, published, json.dumps(ecosystems)))
+        listed = {"CVE-A": "2026-10-01", "CVE-B": "2026-10-05", "CVE-C": "2026-10-10", "CVE-D": "2026-10-12", "CVE-E": "2026-10-03",
+                  "CVE-F": "2026-10-02", "CVE-G": "2026-10-03", "CVE-2026-1234": "2026-10-06", "CVE-I": "2026-10-14",
+                  "CVE-J": "2022-03-01", "CVE-K": "2024-05-10", "CVE-L": "2026-10-07"}   # CVE-L is in no advisory at all
+        for cve, added in listed.items():
             conn.execute("INSERT INTO kev_catalog VALUES (?,?)", (cve, added))
         conn.commit()
         conn.close()
-        return path, {"GHSA-" + r[0] for r in rows}
+        return path
 
-    def test_kev_lead_time_counts_only_entries_added_in_the_window_and_buckets_them(self):
-        import datetime, statistics, tempfile
+    def test_kev_lead_times_come_from_the_whole_warehouse_for_application_registries_only(self):
+        import datetime, tempfile
+        import kev_lead_time
         def days(a, b):
             return (datetime.date.fromisoformat(b) - datetime.date.fromisoformat(a)).days
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            db, ids = self._kev_lead_db(tmp)
-            scoped = top10ecosystems._compute_kev_lead_time_stats(db, ids, "2026-09-18", "2026-10-19")
-            unscoped = top10ecosystems._compute_kev_lead_time_stats(db, ids)
-        expected = sorted([days("2026-09-25", "2026-10-01"), days("2026-06-01", "2026-10-05"), days("2025-01-01", "2026-10-10"), days("2015-01-01", "2026-10-12")])
-        self.assertEqual(scoped["sample_count"], 4, "[!] CVE-E was listed in 2023, outside the window, so it must not count.")
-        self.assertAlmostEqual(scoped["mean_days"], statistics.mean(expected), places=1)
-        self.assertAlmostEqual(scoped["median_days"], statistics.median(expected), places=1)
-        self.assertGreater(scoped["mean_days"], 3 * scoped["median_days"], "A decade-old CVE pulls the mean far above the median.")
-        self.assertEqual(scoped["buckets"], {"under_30d": 1, "d30_to_1y": 1, "y1_to_3y": 1, "over_3y": 1})
-        self.assertEqual(sum(scoped["buckets"].values()), scoped["sample_count"])
-        self.assertEqual(unscoped["sample_count"], 5, "Without a window the old behavior stands: CVE-E (listed 2023) counts too.")
-        self.assertEqual(unscoped["buckets"]["y1_to_3y"], 2)
-        # CVE-F (1970 sentinel) and CVE-G (KEV before publication) are in the window yet never count, scoped or not
-        self.assertEqual(sum(unscoped["buckets"].values()), 5, "[!] The sentinel date and the negative lead time must be dropped.")
+            data = kev_lead_time.load_lead_times(self._kev_lead_db(tmp))
+        expected = sorted([("2026-10-01", days("2026-09-25", "2026-10-01")), ("2026-10-05", days("2026-06-01", "2026-10-05")),
+                           ("2026-10-10", days("2025-01-01", "2026-10-10")), ("2026-10-12", days("2015-01-01", "2026-10-12")),
+                           ("2026-10-06", days("2026-08-01", "2026-10-06")),
+                           ("2026-10-14", days("2026-03-01", "2026-10-14")),
+                           ("2022-03-01", days("2019-01-01", "2022-03-01")), ("2024-05-10", days("2024-04-01", "2024-05-10"))])
+        self.assertEqual(data.rows, expected)
+        self.assertEqual(data.kev_total, 12, "kev_total is the whole catalog, measurable or not.")
+        listed_for = {added for added, _ in data.rows}
+        self.assertIn("2026-10-10", listed_for, "[!] CVE-C was listed this period, so it counts even though its record was never touched.")
+        self.assertNotIn("2026-10-03", listed_for, "CVE-E (Debian only) and CVE-G (negative lead time) never count.")
+        self.assertNotIn("2026-10-02", listed_for, "The 1970 sentinel date never counts.")
+        self.assertNotIn("2026-10-07", listed_for, "A KEV entry with no advisory cannot be measured.")
+        self.assertIn(("2026-10-14", days("2026-03-01", "2026-10-14")), data.rows, "[!] The earliest date is taken across application-registry records only; the 2020 Debian record must not count.")
+        absent = kev_lead_time.load_lead_times(os.path.join(tempfile.gettempdir(), "no_such_warehouse_kev.db"))
+        self.assertEqual((absent.rows, absent.kev_total), ([], 0))
+        self.assertFalse(os.path.exists(os.path.join(tempfile.gettempdir(), "no_such_warehouse_kev.db")), "Reading a missing warehouse must not create one.")
 
-    def test_kev_lead_time_is_none_when_nothing_was_listed_in_the_window(self):
-        import tempfile
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            db, ids = self._kev_lead_db(tmp)
-            self.assertIsNone(top10ecosystems._compute_kev_lead_time_stats(db, ids, "2030-01-01", "2030-12-31"))
+    def test_kev_lead_time_summary_and_cumulative_points(self):
+        import statistics
+        import kev_lead_time
+        self.assertIsNone(kev_lead_time.summarize([]))
+        lead = [3, 10, 100, 400, 2000]
+        summary = kev_lead_time.summarize(lead)
+        self.assertEqual((summary["sample_count"], summary["median_days"]), (5, float(statistics.median(lead))))
+        self.assertAlmostEqual(summary["mean_days"], statistics.mean(lead), places=1)
+        self.assertEqual(summary["buckets"], {"under_30d": 2, "d30_to_1y": 1, "y1_to_3y": 1, "over_3y": 1})
+        self.assertEqual(sum(summary["buckets"].values()), summary["sample_count"])
+        self.assertEqual(kev_lead_time.summarize([29, 30, 364, 365, 1094, 1095])["buckets"], {"under_30d": 1, "d30_to_1y": 2, "y1_to_3y": 2, "over_3y": 1},
+                         "Bucket edges are inclusive at the lower bound.")
+        rows = [("2026-01-01", 500), ("2026-10-01", 6), ("2026-10-10", 600)]
+        points = kev_lead_time.cumulative_points(rows, "2026-10-01", ["2026-09-30", "2026-10-05", "2026-10-14"])
+        self.assertEqual([d for d, _ in points], ["2026-10-05", "2026-10-14"], "A day with nothing measured is skipped, not zeroed.")
+        self.assertEqual([p["sample_count"] for _, p in points], [1, 2], "Points are cumulative from the start day, and CVEs listed before it never count.")
+
+    def test_kev_quarter_bins_split_at_the_recording_start_and_hold_the_backfill_apart(self):
+        import kev_lead_time
+        rows = [("2022-03-01", 500), ("2023-02-01", 10), ("2026-04-10", 5), ("2026-05-01", 40), ("2026-10-02", 100)]
+        bins = kev_lead_time.quarter_bins(rows, "2026-04-18", "2026-10-19")
+        labels = [b["label"] for b in bins]
+        self.assertEqual(labels[0], "2021-22 backfill")
+        self.assertTrue(bins[0]["backfill"] and not any(b["backfill"] for b in bins[1:]))
+        self.assertEqual(labels[1], "2023-Q1")
+        for expected in ("2026-Q2 (to 04-17)", "2026-Q2 (from 04-18)", "2026-Q3", "2026-Q4 (to 10-19)"):
+            self.assertIn(expected, labels)
+        self.assertEqual(sum(len(b["lead_days"]) for b in bins), len(rows), "[!] Every CVE lands in exactly one bin.")
+        by_label = {b["label"]: b for b in bins}
+        self.assertEqual(by_label["2026-Q2 (to 04-17)"]["lead_days"], [5])
+        self.assertEqual(by_label["2026-Q2 (from 04-18)"]["lead_days"], [40])
+        self.assertEqual([b["label"] for b in bins if b["recorded"]], ["2026-Q2 (from 04-18)", "2026-Q3", "2026-Q4 (to 10-19)"])
+        unsplit = kev_lead_time.quarter_bins(rows, None, "2026-10-19")
+        self.assertIn("2026-Q2", [b["label"] for b in unsplit])
+        self.assertFalse(any(b["recorded"] for b in unsplit))
+        self.assertEqual(sum(len(b["lead_days"]) for b in unsplit), len(rows))
+        self.assertEqual(sum(len(b["lead_days"]) for b in kev_lead_time.quarter_bins(rows, "2026-04-18", "2026-05-02")), 4,
+                         "CVEs listed after the end date are left out.")
 
     def test_kev_bucket_bar_shows_shares_skips_empty_buckets_and_tolerates_old_exports(self):
         import re
-        bar = top10ecosystems._kev_bucket_bar_html({"under_30d": 17, "d30_to_1y": 13, "y1_to_3y": 0, "over_3y": 13})
+        import kev_lead_time
+        bar = kev_lead_time.bucket_bar_html({"under_30d": 17, "d30_to_1y": 13, "y1_to_3y": 0, "over_3y": 13})
         self.assertIn("Latest point (43 CVEs)", bar)
         self.assertIn("Under 30 days: 17 (40%)", bar)
         self.assertIn("1 to 3 years: 0 (0%)", bar, "The legend always lists every bucket, even an empty one.")
         widths = [float(w) for w in re.findall(r'<span style="width:([\d.]+)%', bar)]
         self.assertEqual(len(widths), 3, "Empty buckets get no segment in the bar.")
         self.assertAlmostEqual(sum(widths), 100.0, delta=0.3)
-        self.assertEqual(top10ecosystems._kev_bucket_bar_html(None), "", "Older snapshots have no buckets.")
-        self.assertEqual(top10ecosystems._kev_bucket_bar_html({}), "")
-        self.assertEqual(top10ecosystems._kev_bucket_bar_html({"under_30d": 0, "d30_to_1y": 0, "y1_to_3y": 0, "over_3y": 0}), "")
+        self.assertEqual(kev_lead_time.bucket_bar_html(None), "", "Older snapshots have no buckets.")
+        self.assertEqual(kev_lead_time.bucket_bar_html({}), "")
+        self.assertEqual(kev_lead_time.bucket_bar_html({"under_30d": 0, "d30_to_1y": 0, "y1_to_3y": 0, "over_3y": 0}), "")
 
-    def test_report_kev_lead_section_leads_with_the_median_and_explains_the_mean(self):
+    def test_report_kev_lead_section_has_both_views_and_states_its_scope(self):
         import contextlib, tempfile
-        def snap(day, n, kev):
-            data = {"metadata": {"interval_to": day, "interval_from": "2026-04-18", "target_layer_filter": "app"},
-                    "leaderboard": {"npm": n}, "threat_profile": {"Malware (New Entry)": n}}
-            if kev:
-                data["kev_lead_time"] = kev
-            return data
-        new_kev = lambda n, mean, median: {"mean_days": mean, "median_days": median, "sample_count": n,
-                                           "buckets": {"under_30d": n // 2, "d30_to_1y": n // 4, "y1_to_3y": n // 8, "over_3y": n - n // 2 - n // 4 - n // 8}}
-        snaps = [snap("2026-09-01", 10, new_kev(8, 400.0, 60.0)), snap("2026-09-10", 30, new_kev(16, 500.0, 70.0)),
-                 snap("2026-09-20", 50, new_kev(24, 600.0, 80.0)), snap("2026-09-30", 80, new_kev(32, 650.0, 90.0))]
-        old_format = [snap("2026-09-01", 10, {"mean_days": 300.0, "median_days": 150.0, "sample_count": 3}),
-                      snap("2026-09-30", 80, {"mean_days": 310.0, "median_days": 160.0, "sample_count": 4})]
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            pages = []
-            for name, group in (("new.html", snaps), ("old.html", old_format)):
-                out = os.path.join(tmp, name)
+        def snap(day):
+            return {"metadata": {"interval_to": day, "interval_from": "2026-04-18", "target_layer_filter": "app"},
+                    "leaderboard": {"npm": 5}, "threat_profile": {"Malware (New Entry)": 5}}
+        snaps = [snap("2026-10-05"), snap("2026-10-10"), snap("2026-10-14")]
+        def page_for(db_path, group):
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                out = os.path.join(tmp, "r.html")
                 with contextlib.redirect_stdout(io.StringIO()):
-                    top10ecosystems.generate_html_report(group, out, db_path=os.path.join(tmp, "absent.db"))
+                    top10ecosystems.generate_html_report(group, out, db_path=db_path)
                 with open(out, encoding="utf-8") as f:
-                    pages.append(f.read())
-        new_page, old_page = pages
-        self.assertIn("III. KEV Lead Time Trend", new_page)
-        self.assertIn("<strong>median</strong>", new_page)
-        self.assertIn("pull up", new_page, "[!] The page must say why the mean is shown lightly.")
-        self.assertIn("each point is based on 8-32 CVEs", new_page)
-        self.assertIn("cumulative from 2026-04-18", new_page)
-        self.assertIn("Scope and gaps.", new_page, "[!] The chart must say it is a supply-chain slice of recent KEV listings, not the whole catalog.")
-        self.assertIn("since 2026-04-18, so it describes recent listings", new_page)
-        self.assertIn('class="bucketbar"', new_page)
-        self.assertIn("Latest point (32 CVEs)", new_page, "The bucket bar describes the LATEST snapshot.")
-        self.assertIn("III. KEV Lead Time Trend", old_page, "Snapshots exported before buckets existed must still chart.")
-        self.assertNotIn('class="bucketbar"', old_page)
-        self.assertNotIn("Latest point (", old_page)
+                    return f.read()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db = self._kev_lead_db(tmp)
+            page = page_for(db, snaps)
+            import kev_lead_time
+            section = kev_lead_time.build_section(snaps, db)
+            self.assertEqual(kev_lead_time.build_section([], db), "")
+        self.assertIn("III. KEV Lead Time Trend", page)
+        for heading in ("<h3>Our recording period</h3>", "<h3>Lifetime view</h3>"):
+            self.assertIn(heading, page)
+        self.assertEqual(page.count('alt="KEV Lead Time, '), 2, "One chart per view.")
+        self.assertIn("<strong>Scope and gaps.</strong>", page, "[!] The chart must say it is a supply-chain slice of the catalog.")
+        self.assertIn("which is 8 of the 12 entries in CISA's catalog", page, "The page states how much of the catalog it can measure.")
+        self.assertIn("<strong>median</strong>", page)
+        self.assertIn("backfill", page)
+        self.assertIn("from 2026-04-18 through each snapshot", page)
+        self.assertIn('class="bucketbar"', page)
+        self.assertIn("Latest point (6 CVEs)", page, "Six measurable CVEs were listed from 2026-04-18 through 2026-10-14.")
+        self.assertEqual(section.count("<h3>"), 2)
+        self.assertNotIn("III. KEV Lead Time Trend", page_for(os.path.join(tempfile.gettempdir(), "no_such_warehouse_kev.db"), snaps),
+                         "No warehouse, no section, and no crash.")
 
     def test_triage_comparison_counts_queue_and_kev_reached_with_inclusive_thresholds(self):
         points = [(9.8, 0.95, True), (9.0, 0.10, False), (7.0, 0.01, True), (6.9, 0.009, True), (4.0, 0.5, False), (3.9, 0.0001, False)]
@@ -3267,6 +3314,9 @@ class TestThreatStreamScanner(unittest.TestCase):
                     return f.read()
         exact = page_for([snap({"triage_comparison": exported}), snap({"triage_comparison": exported})])
         self.assertIn("VI. What EPSS Adds", exact)
+        self.assertIn("(2026-04-18 to 2026-09-30, cumulative from the archive's first day)", exact,
+                      "[!] Section V must name the snapshot's real range (it starts at the archive's first day), not say 'this window'.")
+        self.assertNotIn("Every advisory this window", exact)
         self.assertIn("10 advisories with CVSS and EPSS data", exact, "[!] The section must use the exported (full-pool) counts, not the plotted sample.")
         self.assertIn("counted once even if it affects several", exact)
         self.assertNotIn("queue sizes are approximate", exact)
@@ -3278,18 +3328,78 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertNotIn("VI. What EPSS Adds", no_scatter, "No EPSS data at all: no section, no crash.")
 
     def test_kev_lead_time_and_axis_helpers_live_in_their_own_modules(self):
-        """The report helpers were moved out of top10ecosystems.py; the old private names must stay as aliases, and the
+        """The report helpers live outside top10ecosystems.py; the old private axis-helper names must stay as aliases, and the
         modules must import without the main script (so later work can use them on their own)."""
         import subprocess, sys
         import chart_axes, kev_lead_time
-        self.assertIs(top10ecosystems._compute_kev_lead_time_stats, kev_lead_time.compute_stats)
-        self.assertIs(top10ecosystems._kev_bucket_bar_html, kev_lead_time.bucket_bar_html)
         self.assertIs(top10ecosystems._thin_date_ticks, chart_axes.thin_date_ticks)
         self.assertIs(top10ecosystems._date_label_step, chart_axes.date_label_step)
         here = os.path.dirname(os.path.abspath(__file__))
-        result = subprocess.run([sys.executable, "-c", "import kev_lead_time, chart_axes; print(kev_lead_time.build_section([]) == '')"],
+        result = subprocess.run([sys.executable, "-c", "import kev_lead_time, chart_axes; print(kev_lead_time.build_section([], 'none.db') == '')"],
                                 cwd=here, capture_output=True, text=True, timeout=60)
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "True"), result.stderr)
+
+    def test_cvss_epss_trend_uses_every_advisory_once_per_band_and_skips_thin_bands(self):
+        import statistics
+        band7 = {f"B7-{i}": (7.0 + (i % 10) / 10, 0.001 * (i + 1), i == 3) for i in range(40)}
+        band5 = {f"B5-{i}": (5.5, 0.5, False) for i in range(5)}
+        pools = {"npm": dict(band7, **band5), "PyPI": {"B7-0": band7["B7-0"], "B7-1": band7["B7-1"]},
+                 "Debian": {f"D-{i}": (7.5, 0.9, True) for i in range(50)}}
+        trend = top10ecosystems._cvss_epss_trend(pools)
+        self.assertEqual([t["band"] for t in trend], [7], "A band under the minimum (5 advisories) gets no point, and Debian is not a charted registry.")
+        point = trend[0]
+        self.assertEqual(point["n"], 40, "[!] An advisory in two registries is one advisory.")
+        epss = sorted(v[1] for v in band7.values())
+        self.assertAlmostEqual(point["median_epss"], statistics.median(epss))
+        self.assertLessEqual(point["q1"], point["median_epss"])
+        self.assertLessEqual(point["median_epss"], point["q3"])
+        self.assertEqual(point["kev"], 1)
+        self.assertAlmostEqual(point["mean_cvss"], round(sum(v[0] for v in band7.values()) / 40, 2))
+        self.assertEqual([t["band"] for t in top10ecosystems._cvss_epss_trend(pools, min_n=3)], [5, 7])
+        self.assertEqual(top10ecosystems._cvss_epss_trend({}), [])
+        edge = {f"E-{i}": (10.0 if i % 2 else 9.9, 0.1, False) for i in range(40)}
+        self.assertEqual({t["band"]: t["n"] for t in top10ecosystems._cvss_epss_trend({"npm": edge}, min_n=1)}, {9: 20, 10: 20}, "9.9 is band 9; 10.0 is band 10.")
+
+    def test_scatter_sampling_reports_how_much_of_each_crowd_is_drawn(self):
+        cap = top10ecosystems._MAX_SCATTER_POINTS_PER_ECO
+        pools = {"npm": {f"N-{i}": (7.5, 0.01, i % 500 == 0) for i in range(cap + 50)},
+                 "PyPI": {**{f"P-{i}": (5.0, 0.02, False) for i in range(10)}, "JUNK": (0.0, 0.5, False), "NOEPSS": (7.0, None, False)},
+                 "Hex": {"H-JUNK": (0.0, 0.5, False)}}
+        sampling = top10ecosystems._scatter_sampling(pools)
+        self.assertEqual(sampling["npm"], {"population": cap + 50, "plotted": cap})
+        self.assertEqual(sampling["PyPI"], {"population": 10, "plotted": 10}, "Rows with no CVSS score or no EPSS never qualified.")
+        self.assertNotIn("Hex", sampling, "An ecosystem with nothing qualifying is left out.")
+
+    def test_report_scatter_calls_out_the_thinning_and_explains_the_trendline(self):
+        import contextlib, tempfile
+        def snap(extra):
+            data = {"metadata": {"interval_to": "2026-09-30", "interval_from": "2026-04-18", "target_layer_filter": "app"},
+                    "leaderboard": {"npm": 5}, "threat_profile": {"Malware (New Entry)": 5},
+                    "cvss_epss_pairs": {"npm": [[9.8, 0.9, 1], [7.5, 0.02, 0], [5.0, 0.001, 0], [8.0, 0.3, 0]]}}
+            data.update(extra)
+            return data
+        trend = [{"band": 7, "n": 40, "mean_cvss": 7.4, "median_epss": 0.005, "q1": 0.003, "q3": 0.009, "kev": 1},
+                 {"band": 9, "n": 40, "mean_cvss": 9.5, "median_epss": 0.008, "q1": 0.005, "q3": 0.02, "kev": 5}]
+        def page_for(snapshots):
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+                out = os.path.join(tmp, "r.html")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    top10ecosystems.generate_html_report(snapshots, out, db_path=os.path.join(tmp, "absent.db"))
+                with open(out, encoding="utf-8") as f:
+                    return f.read()
+        capped = page_for([snap({}), snap({"cvss_epss_trend": trend, "scatter_sampling": {"npm": {"population": 3068, "plotted": 1500}}})])
+        self.assertIn("<strong>Reading the dots.</strong>", capped)
+        self.assertIn("npm 1,500 of 3,068", capped)
+        self.assertIn("The stars therefore look denser against the crowd than they really are", capped, "[!] The page must say the stars are over-weighted.")
+        self.assertIn("The white line is the median EPSS in each one-point CVSS band across all advisories", capped)
+        self.assertIn("one dot per advisory per registry", capped)
+        self.assertNotIn("Every advisory", capped)
+        uncapped = page_for([snap({}), snap({"scatter_sampling": {"npm": {"population": 4, "plotted": 4}}})])
+        self.assertNotIn("Reading the dots", uncapped, "Nothing is thinned, so there is nothing to call out.")
+        self.assertNotIn("The white line", uncapped, "No trend in the snapshot, no trend note.")
+        old_export = page_for([snap({}), snap({})])
+        self.assertIn("<strong>Reading the dots.</strong>", old_export, "Snapshots exported before the sampling summary existed get the general caution.")
+        self.assertIn("randomly thinned", old_export)
 
     def test_landmark_advisories_degrade_to_empty_instead_of_failing(self):
         import tempfile
