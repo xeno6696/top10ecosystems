@@ -28,6 +28,7 @@ import re
 import sys
 import time
 
+import report_color
 import sitrep
 import sitrep_progress
 
@@ -267,8 +268,13 @@ def _wrap(prefix, text):
     return [prefix + lines[0]] + [pad + line for line in lines[1:]]
 
 
-def render_poll(record, alert=DEFAULT_ALERT) -> str:
-    """The console text for one poll: a quiet line when nothing changed, a banner when something did."""
+def render_poll(record, alert=DEFAULT_ALERT, color=False) -> str:
+    """The console text for one poll: a quiet line when nothing changed, a banner when something did. color=True adds colour only."""
+    plain = _render_poll_plain(record, alert)
+    return "\n".join(report_color.colorize_watch(plain.split("\n"))) if color else plain
+
+
+def _render_poll_plain(record, alert=DEFAULT_ALERT) -> str:
     when = record["polled_at"][:10] + " " + record["polled_at"][11:16] + " UTC"
     if record["baseline"]:
         known = f"{record['items']} item(s)" if record["found"] else "nothing found yet"
@@ -334,7 +340,7 @@ def exit_code(records) -> int:
 
 
 def run(ids, every=10.0, once=False, alert_expression=None, sources_expression=None, as_json=False, fetch=None, db_path=None, state_dir=STATE_DIR,
-        out=print, config=None, sleep=time.sleep, clock=None, max_polls=None, show_progress=False, bell=True, stderr=None) -> int:
+        out=print, config=None, sleep=time.sleep, clock=None, max_polls=None, show_progress=False, bell=True, stderr=None, color=False) -> int:
     """CLI entry. --once: one poll per ID and an exit code (0 quiet or baseline, 10 digest changes, 11 immediate changes, 2 bad request).
     Otherwise poll every `every` minutes until interrupted, printing only what changed, with a live countdown to the next poll."""
     stderr = stderr if stderr is not None else sys.stderr
@@ -368,7 +374,7 @@ def run(ids, every=10.0, once=False, alert_expression=None, sources_expression=N
                     if bell and any(c["immediate"] for c in record["changes"]):
                         stderr.write("\a")
                         stderr.flush()
-                    out(render_poll(record, alert))
+                    out(render_poll(record, alert, color=color))
             records = round_records
             polls += 1
             if once or (max_polls is not None and polls >= max_polls):

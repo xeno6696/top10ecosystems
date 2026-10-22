@@ -2447,7 +2447,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         import sitrep, tempfile
         buf = io.StringIO()
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-            args = ["top10ecosystems.py", "--sitrep", "CVE-2026-109618", "--sources", "core,-github_repos", "--json"]
+            args = ["top10ecosystems.py", "--sitrep", "CVE-2026-109618", "--sources", "core,-github_repos", "--json", "--no-color"]
             with patch.object(sys, "argv", args), patch.object(sys, "stdout", buf), \
                  patch.object(sitrep, "make_fetcher", return_value=self._sitrep_fetch()), \
                  patch.object(sitrep, "LOCAL_CONFIG", os.path.join(tmp, "none.json")), \
@@ -2595,6 +2595,288 @@ class TestThreatStreamScanner(unittest.TestCase):
                          ['NVD took 14 s; --sources "core,-nvd" skips it', 'Ubuntu took 10 s; --sources "core,-ubuntu" skips it'])
         self.assertEqual(sitrep.slow_notes([{"id": "kev", "label": "CISA KEV", "seconds": 9.9}]), [])
         self.assertFalse(any("took" in n for n in result["notes"]), "A fast run has no slowness note.")
+
+    def _coldfusion(self, extra=None):
+        """The saved real responses for CVE-2026-48282 (ColdFusion, a commercial product OSV never indexes), layered on the default fake network."""
+        cve = "CVE-2026-48282"
+        served = {f"https://cveawg.mitre.org/api/cve/{cve}": (200, self._sitrep_text(f"cve_org_{cve}.json")),
+                  f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve}": (200, self._sitrep_text(f"nvd_{cve}.json")),
+                  f"https://api.github.com/advisories?cve_id={cve}": (200, self._sitrep_text(f"github_advisories_{cve}.json"))}
+        served.update(extra or {})
+        return self._sitrep_fetch(extra=served)
+
+    def test_sitrep_references_become_a_checklist_one_row_per_page_grouped_by_what_the_records_say(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        selected, _ = sitrep.select_sources(sources, "core")
+        result = sitrep.build_sitrep("CVE-2026-48282", selected, follow, self._coldfusion())
+        adobe = "https://helpx.adobe.com/security/products/coldfusion/apsb26-68.html"
+        self.assertEqual([(r["url"], r["category"], r["status"]) for r in result["references"]], [(adobe, "vendor-advisory", "unread")],
+                         "[!] The Adobe bulletin is one row, however many sources listed it.")
+        self.assertEqual(result["references"][0]["sources"], ["cve.org", "NVD", "GitHub Advisories"])
+        self.assertEqual(result["references"][0]["tags"], ["vendor-advisory"], "cve.org's and NVD's spellings of the tag are normalized and merged.")
+        self.assertEqual(result["references"][0]["host"], "helpx.adobe.com")
+        self.assertEqual(sorted(urlparse_host for urlparse_host in (__import__("urllib.parse", fromlist=["urlparse"]).urlparse(u).hostname for u in result["references_covered"])),
+                         ["github.com", "nvd.nist.gov", "www.cisa.gov"], "Links to sources already queried are counted, not listed as to-dos.")
+        text = sitrep.render_sitrep(result)
+        flat = " ".join(text.split())
+        self.assertIn("REFERENCES what the records point at", flat)
+        self.assertIn("vendor-advisory [ ] " + adobe + " (cve.org, NVD, GitHub Advisories)", flat)
+        self.assertIn("Already queried above: github.com, nvd.nist.gov, www.cisa.gov (3 link(s))", flat)
+
+    def test_sitrep_checklist_marks_pages_it_read_and_pages_it_could_not_fetch(self):
+        import sitrep, tempfile
+        adobe = "https://helpx.adobe.com/security/products/coldfusion/apsb26-68.html"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        selected, _ = sitrep.select_sources(sources, "core")
+        follow = dict(follow, **{"helpx.adobe.com": {"label": "Adobe", "path": "vendor"}})
+        read = sitrep.build_sitrep("CVE-2026-48282", selected, follow, self._coldfusion({adobe: (200, "<title>Security update available for ColdFusion | APSB26-68</title>")}))
+        self.assertEqual(read["references"][0]["status"], "read")
+        self.assertIn("[x]  " + adobe, sitrep.render_sitrep(read))
+        self.assertEqual(read["leads"][0]["title"], "Security update available for ColdFusion | APSB26-68")
+        blocked = sitrep.build_sitrep("CVE-2026-48282", selected, follow, self._coldfusion({adobe: (403, "")}))
+        self.assertEqual(blocked["references"][0]["status"], "failed", "[!] Adobe answers 403 to non-browser clients; the checklist says so instead of hiding it.")
+        self.assertIn("[!!] " + adobe, sitrep.render_sitrep(blocked))
+        self.assertEqual(sitrep.build_sitrep("CVE-2026-48282", selected, {"www.openwall.com": follow["www.openwall.com"]}, self._coldfusion())["references"][0]["status"], "unread",
+                         "A host that is not on the follow list is never fetched.")
+
+    def test_sitrep_reference_helpers_normalize_tags_dedupe_pages_and_classify_untagged_links(self):
+        import sitrep
+        self.assertEqual(sitrep._normalize_tag("Vendor Advisory"), "vendor-advisory")
+        self.assertEqual(sitrep._normalize_tag("US Government Resource"), "government-resource")
+        self.assertEqual(sitrep._normalize_tag("third_party_advisory"), "third-party-advisory")
+        same = ["http://Example.org/a/b/", "https://example.org/a/b", "https://example.org/a/b#section"]
+        self.assertEqual(len({sitrep._ref_key(u) for u in same}), 1, "Scheme, host case, trailing slash and fragment do not make a different page.")
+        self.assertNotEqual(sitrep._ref_key("https://example.org/a?x=1"), sitrep._ref_key("https://example.org/a?x=2"))
+        self.assertEqual(sitrep._https("http://example.org/x"), "https://example.org/x")
+        self.assertTrue(sitrep._covered("https://nvd.nist.gov/vuln/detail/CVE-2026-1"))
+        self.assertTrue(sitrep._covered("https://github.com/advisories/GHSA-aaaa-bbbb-cccc"))
+        self.assertTrue(sitrep._covered("https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-1"))
+        self.assertFalse(sitrep._covered("https://nvd.nist.gov/products/cpe"), "Only pages about the CVE itself count as already queried.")
+        self.assertFalse(sitrep._covered("https://github.com/php/php-src/security/advisories/GHSA-w8hw-w9fx-j79w"))
+        category = sitrep._category
+        self.assertEqual(category({"vendor-advisory", "third-party-advisory"}, "https://x.example/"), "vendor-advisory", "The most useful tag wins.")
+        self.assertEqual(category({"x-refsource-confirm"}, "https://x.example/"), "other")
+        self.assertEqual(category(set(), "https://github.com/o/r/commit/abc123"), "patch")
+        self.assertEqual(category(set(), "https://github.com/o/r/pull/9"), "patch")
+        self.assertEqual(category(set(), "https://github.com/o/r/issues/4"), "issue-tracking")
+        self.assertEqual(category(set(), "https://bugzilla.example.org/show_bug.cgi?id=1"), "issue-tracking")
+        self.assertEqual(category(set(), "https://www.openwall.com/lists/oss-security/2026/10/21/6"), "mailing-list")
+        self.assertEqual(category(set(), "https://blog.example/post"), "untagged")
+        entries = [{"label": "A", "reflinks": [{"url": "http://x.example/p/", "tags": ["Patch"]}, {"url": "ftp://x.example/skip", "tags": []}, {"url": "mailto:a@b.c"}]},
+                   {"label": "B", "reflinks": [{"url": "https://x.example/p", "tags": ["Vendor Advisory"]}, {"url": "https://y.example/n", "tags": []}]}]
+        built = sitrep.build_references(entries, [])
+        self.assertEqual([(r["url"], r["category"], r["sources"]) for r in built["references"]],
+                         [("https://x.example/p/", "vendor-advisory", ["A", "B"]), ("https://y.example/n", "untagged", ["B"])],
+                         "Tags merge across sources, ftp/mailto links are ignored, http is shown as https, and the better-tagged and more-listed pages come first.")
+        many = [{"label": "A", "reflinks": [{"url": f"https://p{i}.example/x", "tags": []} for i in range(40)]}]
+        result_like = {"references": sitrep.build_references(many, [])["references"], "references_covered": []}
+        self.assertEqual(len(result_like["references"]), 40)
+
+    def test_sitrep_checklist_is_capped_in_the_console_but_complete_in_json(self):
+        import sitrep, tempfile
+        refs = [{"url": f"https://p{i:02d}.example/x", "tags": []} for i in range(40)]
+        record = json.dumps({"cveMetadata": {"state": "PUBLISHED"}, "containers": {"cna": {"references": refs}}})
+        source = {"id": "cve_org", "label": "cve.org", "kind": "builtin", "parser": "cve_org", "url": "https://records.example/{cve}", "path": "upstream", "trust": "primary"}
+        fetch = lambda url, src=None: sitrep.Fetch(200, record, {}, url, None)
+        result = sitrep.build_sitrep("CVE-2026-1111", [source], {}, fetch)
+        self.assertEqual(len(result["references"]), 40, "The JSON carries every reference.")
+        text = sitrep.render_sitrep(result)
+        self.assertEqual(sum(1 for line in text.split("\n") if line.startswith("      [ ]  https://")), sitrep.MAX_REFERENCES_SHOWN,
+                         "Exactly the cap is listed (the legend line also contains a '[ ]').")
+        self.assertIn("+10 more (see --json)", text)
+
+    def test_sitrep_parsers_hand_back_tagged_references(self):
+        import sitrep
+        adobe = "https://helpx.adobe.com/security/products/coldfusion/apsb26-68.html"
+        cve_org = sitrep.parse_cve_org("CVE-2026-48282", sitrep.Fetch(200, self._sitrep_text("cve_org_CVE-2026-48282.json"), {}, "u", None))
+        tags = {link["url"]: link["tags"] for link in cve_org["reflinks"]}
+        self.assertEqual(tags[adobe], ["vendor-advisory"])
+        self.assertEqual(tags["https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2026-48282"], ["government-resource"], "ADP references are included with their tags.")
+        nvd = sitrep.parse_nvd("CVE-2026-48282", sitrep.Fetch(200, self._sitrep_text("nvd_CVE-2026-48282.json"), {}, "u", None))
+        self.assertEqual({link["url"]: link["tags"] for link in nvd["reflinks"]}[adobe], ["Vendor Advisory"])
+        github = sitrep.parse_github_advisories("CVE-2026-48282", sitrep.Fetch(200, self._sitrep_text("github_advisories_CVE-2026-48282.json"), {}, "u", None))
+        self.assertIn(adobe, github["refs"])
+        self.assertEqual(github["reflinks"], [], "Sources that give plain URL lists leave tagging to the engine, which treats them as untagged links.")
+        self.assertIn("(unreviewed)", " ".join(f["text"] for f in github["facts"]), "The unreviewed GitHub advisory is labelled as such.")
+
+    def test_sitrep_says_when_several_sources_are_slow_at_once_it_is_probably_the_network(self):
+        import sitrep
+        entries = [{"id": i, "label": i.upper(), "seconds": s} for i, s in (("osv", 11.4), ("nvd", 12.0), ("ubuntu", 42.0), ("kev", 0.3))]
+        notes = sitrep.slow_notes(entries)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("3 sources (OSV, NVD, UBUNTU) each took 11-42 s in the same run", notes[0])
+        self.assertIn("slow DNS or network on this machine", notes[0])
+        self.assertNotIn("--sources", notes[0], "[!] Telling you to skip each source would blame the wrong thing.")
+        self.assertEqual(len(sitrep.slow_notes(entries[:2])), 2, "One or two slow sources still get their own note.")
+
+    def test_sitrep_color_only_adds_escape_codes_and_marks_speakers_status_alarms_and_clocks(self):
+        import datetime, sitrep, termcolor, tempfile
+        paint = termcolor.paint
+        extra = dict(self._watch_variant("kev_listed"), **self._watch_variant("cve_org_changed"))
+        arch = "https://security.archlinux.org/CVE-2026-109618.json"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        selected, _ = sitrep.select_sources(sources, "core")
+        result = sitrep.build_sitrep("CVE-2026-109618", selected, follow, self._sitrep_fetch(extra=extra, fail={arch: (None, "", {}, arch, "ReadTimeout: slow")}),
+                                     today=datetime.datetime(2026, 10, 23, 12, 0, tzinfo=datetime.timezone.utc))
+        plain, colored = sitrep.render_sitrep(result), sitrep.render_sitrep(result, color=True)
+        self.assertNotIn("\x1b", plain, "Plain output carries no escape codes.")
+        self.assertEqual(termcolor.strip(colored), plain, "[!] Colour must only add escape codes: stripping them gives back the plain report exactly.")
+        for speaker in ("CISA-ADP SSVC:", "CISA KEV:", "Red Hat rating:", "Ubuntu priority:", "EPSS"):
+            self.assertIn(paint(speaker, "cyan"), colored, f"The speaker '{speaker}' is teal.")
+        self.assertIn(paint("LISTED", "red", "bold"), colored)
+        self.assertIn(paint("Exploitation poc", "yellow"), colored)
+        self.assertIn(paint("sources disagree, shown side by side:", "yellow"), colored)
+        self.assertIn(paint("[ok]", "green"), colored)
+        self.assertIn(paint("[--]", "dim"), colored)
+        self.assertIn(paint("[!!]", "red"), colored, "A source that failed is red.")
+        self.assertIn(paint("[cve.org]", "dim"), colored, "The source tag at the end of a line recedes.")
+        self.assertIn(paint("header", "yellow"), colored, "A time on a clock that is not the source's own is flagged yellow.")
+        self.assertIn(paint("declared", "dim"), colored)
+        for key in ("SEVERITY", "EXPLOIT", "TIMELINE", "SOURCES"):
+            self.assertIn(paint(key, "bold"), colored)
+        self.assertIn("\x1b[1m  SITREP  CVE-2026-109618", colored, "The title line is bold.")
+        self.assertIn("\x1b[2m  This lists what each source publishes", colored, "The caution paragraph is dimmed.")
+        self.assertTrue(colored.split("\n")[0].startswith("\x1b[2m====="), "Rules are dim.")
+        for no_teal in ("9.2 CRITICAL", "Important"):
+            self.assertNotIn(paint(no_teal, "cyan"), colored, "Values stay plain; only the speaker is teal.")
+
+    def test_sitrep_checklist_marks_and_category_headings_are_colored(self):
+        import sitrep, termcolor, tempfile
+        adobe = "https://helpx.adobe.com/security/products/coldfusion/apsb26-68.html"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        selected, _ = sitrep.select_sources(sources, "core")
+        follow = dict(follow, **{"helpx.adobe.com": {"label": "Adobe", "path": "vendor"}})
+        for served, mark, style in (((200, "<title>APSB26-68</title>"), "[x]", "green"), ((403, ""), "[!!]", "red")):
+            result = sitrep.build_sitrep("CVE-2026-48282", selected, follow, self._coldfusion({adobe: served}))
+            plain, colored = sitrep.render_sitrep(result), sitrep.render_sitrep(result, color=True)
+            self.assertEqual(termcolor.strip(colored), plain)
+            self.assertIn(termcolor.paint(mark, style) + (" " * (5 - len(mark))) + adobe, colored)
+            self.assertIn("    " + termcolor.paint("vendor-advisory", "bold"), colored)
+        unread = sitrep.build_sitrep("CVE-2026-48282", selected, {}, self._coldfusion())
+        self.assertIn("      [ ]  " + adobe, sitrep.render_sitrep(unread, color=True), "An unread box is left plain.")
+
+    def test_sitrep_run_colors_only_when_asked_and_json_is_never_colored(self):
+        import sitrep, termcolor, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            config = self._sitrep_config(tmp)
+        out = []
+        sitrep.run(["CVE-2026-109618"], fetch=self._sitrep_fetch(), config=config, out=out.append)
+        self.assertNotIn("\x1b", "\n".join(out), "The default is plain text.")
+        colored = []
+        sitrep.run(["CVE-2026-109618"], fetch=self._sitrep_fetch(), config=config, out=colored.append, color=True)
+        self.assertIn("\x1b[36m", "\n".join(colored))
+        self.assertEqual(termcolor.strip("\n".join(colored)), "\n".join(out))
+        as_json = []
+        sitrep.run(["CVE-2026-109618"], fetch=self._sitrep_fetch(), config=config, out=as_json.append, color=True, as_json=True)
+        self.assertNotIn("\x1b", as_json[0], "[!] --json is never colored, whatever else is set.")
+        json.loads(as_json[0])
+
+    def test_termcolor_decides_from_the_terminal_the_environment_and_the_flag(self):
+        import termcolor
+        class Stream(io.StringIO):
+            def __init__(self, tty):
+                super().__init__()
+                self.tty = tty
+            def isatty(self):
+                return self.tty
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NO_COLOR", None)
+            os.environ.pop("TERM", None)
+            with patch("sitrep_progress.ansi_ok", return_value=True):
+                self.assertTrue(termcolor.use_color(Stream(True)))
+                self.assertFalse(termcolor.use_color(Stream(False)), "[!] A pipe or file never gets colour.")
+                self.assertFalse(termcolor.use_color(Stream(True), disabled=True), "--no-color wins.")
+                with patch.dict(os.environ, {"NO_COLOR": "1"}):
+                    self.assertFalse(termcolor.use_color(Stream(True)), "NO_COLOR is honoured.")
+                with patch.dict(os.environ, {"TERM": "dumb"}):
+                    self.assertFalse(termcolor.use_color(Stream(True)))
+            with patch("sitrep_progress.ansi_ok", return_value=False):
+                self.assertFalse(termcolor.use_color(Stream(True)), "A terminal that cannot show escape codes gets plain text.")
+            self.assertFalse(termcolor.use_color(object()), "A stream with no isatty is not a terminal.")
+
+    def test_termcolor_paint_spans_keeps_the_text_and_skips_overlaps(self):
+        import termcolor
+        line = "hello world"
+        painted = termcolor.paint_spans(line, [(6, 11, ("bold",)), (0, 5, ("red",)), (3, 8, ("green",)), (4, 4, ("dim",))])
+        self.assertEqual(termcolor.strip(painted), line)
+        self.assertIn(termcolor.paint("hello", "red"), painted)
+        self.assertIn(termcolor.paint("world", "bold"), painted)
+        self.assertNotIn("\x1b[32m", painted, "A span that overlaps an earlier one is dropped, never nested.")
+        self.assertEqual(termcolor.paint_spans(line, []), line)
+        self.assertEqual(termcolor.paint("", "red"), "", "Nothing to paint, no codes.")
+        self.assertEqual(termcolor.paint("x"), "x")
+
+    def test_watch_color_marks_the_banner_the_classes_and_what_should_recede(self):
+        import watch, termcolor
+        paint = termcolor.paint
+        changes = [
+            {"key": "k1", "class": "exploitation", "kind": "changed", "text": "CISA KEV: LISTED - PHP ...", "was": "CISA KEV: not listed (catalog 2026.10.21)", "source": "kev",
+             "label": "CISA KEV", "immediate": True, "first_seen": "2026-10-23T09:12:00Z", "when": None, "clock": None},
+            {"key": "k2", "class": "fix", "kind": "new", "text": "Arch advisories: ASA-1", "was": None, "source": "arch", "label": "Arch Linux", "immediate": False,
+             "first_seen": "2026-10-23T09:12:00Z", "when": None, "clock": None}]
+        record = {"cve": "CVE-2026-1", "polled_at": "2026-10-22T18:27:00Z", "poll": 4, "baseline": False, "items": 53, "changes": changes,
+                  "notes": ["NVD has failed 3 polls in a row"], "previous_poll": "2026-10-22T18:17:00Z", "found": True}
+        plain, colored = watch.render_poll(record), watch.render_poll(record, color=True)
+        self.assertEqual(termcolor.strip(colored), plain, "[!] Colour adds codes and nothing else.")
+        self.assertIn(paint("!! IMMEDIATE", "red", "bold"), colored)
+        self.assertIn(paint("digest", "dim", "bold"), colored)
+        self.assertIn(paint("EXPLOITATION", "cyan", "bold"), colored)
+        self.assertIn(paint("FIX", "cyan", "bold"), colored)
+        self.assertIn("\x1b[2m(was: CISA KEV", colored)
+        self.assertIn(paint("[!]", "yellow") + " NVD has failed", colored)
+        quiet = dict(record, changes=[], notes=[])
+        self.assertEqual(watch.render_poll(quiet, color=True), paint(watch.render_poll(quiet), "dim"), "A quiet poll is one dim line.")
+        base = dict(record, baseline=True, changes=[], notes=[])
+        self.assertTrue(watch.render_poll(base, color=True).startswith("\x1b[2m"))
+        self.assertEqual(termcolor.strip(watch.render_poll(base, color=True)), watch.render_poll(base))
+
+    def test_sitrep_progress_can_leave_the_finished_block_on_screen_and_only_the_one_shot_command_does(self):
+        import sitrep, sitrep_progress, termcolor, tempfile, watch
+        def finished_run(keep):
+            now = [0.0]
+            stream = io.StringIO()
+            progress = sitrep_progress.Progress(stream, "live", clock=lambda: now[0], threaded=False, width=100, keep=keep)
+            progress.begin("CVE-2026-1: asking 2 sources")
+            progress.add("a", "cve.org")
+            progress.add("b", "OSV")
+            progress.update("a", "contacting", "cveawg.mitre.org")
+            progress._draw()
+            now[0] = 2.0
+            progress.finish("a", "ok", "found")
+            now[0] = 3.5
+            progress.finish("b", "nothing", "no record for this CVE")
+            before = len(stream.getvalue())
+            progress.end("  asked 2 sources in 3.5 s")
+            return stream.getvalue()[before:]
+        kept = finished_run(True)
+        plain = termcolor.strip(kept)
+        self.assertTrue(kept.startswith("\x1b[3A"), "The last redraw goes over the live block...")
+        self.assertIn("[ok] cve.org", plain)
+        self.assertIn("[--] OSV", plain)
+        self.assertIn("3.5 s", plain, "...so the finished rows, with their frozen times, stay on screen.")
+        self.assertNotIn("\x1b[2K\n\x1b[2K\n", kept, "[!] Nothing is erased.")
+        self.assertTrue(plain.rstrip().endswith("asked 2 sources in 3.5 s"))
+        erased = finished_run(False)
+        self.assertIn("\x1b[2K\n\x1b[2K\n\x1b[2K\n", erased, "Without keep the block is wiped, as a --watch loop needs.")
+        self.assertNotIn("[ok] cve.org", termcolor.strip(erased))
+        self.assertTrue(sitrep_progress.Progress.auto(stream=io.StringIO(), keep=True).keep)
+        self.assertFalse(sitrep_progress.Progress.auto(stream=io.StringIO()).keep, "The default erases.")
+        asked = []
+        def fake_auto(**kwargs):
+            asked.append(kwargs)
+            return sitrep_progress.Progress(io.StringIO(), "off")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            config = self._sitrep_config(tmp)
+            with patch.object(sitrep_progress.Progress, "auto", fake_auto):
+                sitrep.run(["CVE-2026-109618"], fetch=self._sitrep_fetch(), config=config, out=lambda *_: None, show_progress="auto")
+                watch.run(["CVE-2026-109618"], once=True, fetch=self._sitrep_fetch(), config=config, state_dir=os.path.join(tmp, "s"), out=lambda *_: None,
+                          show_progress="auto", stderr=io.StringIO())
+        self.assertEqual(asked, [{"keep": True}, {}], "[!] --sitrep keeps its block on screen; --watch does not, or every poll would add one.")
 
     def test_sitrep_followed_links_keep_the_fragment_the_record_pointed_at(self):
         import sitrep
