@@ -248,6 +248,35 @@ Exit code: `0` something was found, `1` nothing was, `2` bad ID or configuration
 
 ---
 
+## 👁 Watching a CVE (`--watch`)
+
+OSV, KEV and the other sources keep only their latest state, so a change is visible only if something remembered the last state. `--watch` polls `--sitrep` on a schedule, compares each poll with a stored baseline, and tells you what is new or different.
+
+```bash
+python top10ecosystems.py --watch CVE-2026-109618                    # poll every 10 minutes until Ctrl-C
+python top10ecosystems.py --watch CVE-2026-109618 CVE-2026-109619 --every 5
+python top10ecosystems.py --watch CVE-2026-109618 --once --json      # one poll, exit code 0 / 10 / 11 (scriptable)
+python top10ecosystems.py --watch CVE-2026-109618 --alert exploitation,disclosure,fix
+```
+
+The first poll records a **baseline** and never alerts. After that, only changes are printed (a quiet `no change` line otherwise), with a live countdown to the next poll on a terminal. State lives in `output/watch/<CVE>.json` (the baseline and when *we* first saw each item) and `<CVE>.history.jsonl` (every poll that had changes); delete the files to start over.
+
+**What counts as a change.** Anything worth a row on the `--sitrep` timeline is: a new event, or the same event with a new time ("CVE record last updated"). Also: the CVE record's state, severity scores, fix statements, and CISA's SSVC assessment when their text changes; a source that starts answering; a new warehouse record, and the first one in an app registry. Deliberately *not* changes: the GitHub repository count growing by the minute (it counts when the first repository appears, then each time the count at least doubles), EPSS drifting by less than a point (the baseline keeps the last *reported* value, so slow growth accumulates until it counts), KEV staying "not listed", and a source that times out (its last good values are kept, and it is noted as degraded after three failed polls in a row). Nothing is ever reported as "gone".
+
+**Alert tiers.** Each change has a class: `exploitation` (KEV listing, SSVC, EPSS, public repositories, exploitation events), `disclosure` (the CVE record's state, upstream/records/OSV events, written-up pages with a date), `exposure` (new warehouse records or sources answering), `severity`, `fix`, and `records` (updated timestamps, undated linked pages). `exploitation` and `disclosure` are **immediate** by default: a terminal bell and an `!! IMMEDIATE` banner. The rest are listed under `digest`. `--alert` chooses the immediate classes.
+
+**First seen by us.** Every change shows when the watcher first saw it. That is the honest "ingested" clock, so over a few days the history answers which channel told *you* first, whatever the channels' own timestamps say.
+
+**Cost.** A poll is a full `--sitrep` (10 to 35 seconds). Slow or rate-limited sources (`github_repos`, `github_oldest`, `suse`, `amazon`, `oracle`) have `"watch_every": 3` in `sitrep_sources.json`: they are asked on every third poll and keep their last values in between. `--every` has a one-minute floor because the sources are rate limited.
+
+**Not built yet (TODO): notifications when nobody is watching.** Alerts reach only the terminal (a bell and a banner). The planned next step is sending the diff somewhere: email first (SMTP settings and recipients in a git-ignored local file, credentials from environment variables, one message per poll with immediate changes and the digest in the body, plus a `--test-notify` that sends a harmless sample), and a generic `on_change` command hook that receives the poll record as JSON for toast, Slack or Teams. See the `TODO(notify)` note in `watch.py`.
+
+**A source that failed at baseline** and answers later is filled into the baseline silently (with a note), because a late answer cannot be told from a new one and a flaky network must not look like news.
+
+**Exit codes with `--once`:** `0` baseline or no change, `10` digest-only changes, `11` immediate changes, `2` bad request. `--json` prints one array of poll records.
+
+---
+
 ## 📊 Historical Trend Charting (`--velocity` / `--report`)
 
 Two related but separate tools for looking at churn over time instead of a single window:

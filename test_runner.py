@@ -2746,6 +2746,370 @@ class TestThreatStreamScanner(unittest.TestCase):
         json.loads(out[0])
         self.assertIn("[ok] cve.org", stderr_free.getvalue())
 
+    # --watch: poll --sitrep repeatedly and report what changed, with a baseline, noise rules and immediate/digest tiers
+
+    KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+
+    def _watch_run(self, tmp, extra=None, fail=None, cadence=False, **kwargs):
+        """One `watch.run(..., once=True)` against the saved responses, with `extra` URL->(status, text) overrides. Returns (code, parsed JSON of the poll).
+        Every source is asked on every poll unless `cadence` keeps the shipped watch_every (slow sources every 3rd poll)."""
+        import watch
+        out = []
+        sources, follow = self._sitrep_config(tmp)
+        if not cadence:
+            sources = [{k: v for k, v in source.items() if k != "watch_every"} for source in sources]
+        kwargs.setdefault("alert_expression", None)
+        code = watch.run(["CVE-2026-109618"], once=True, as_json=True, fetch=self._sitrep_fetch(extra=extra, fail=fail), config=(sources, follow),
+                         state_dir=os.path.join(tmp, "state"), out=out.append, stderr=io.StringIO(), **kwargs)
+        return code, json.loads(out[0])[0]
+
+    def _watch_variant(self, name):
+        """Altered copies of the saved real responses, for the 'something changed' polls."""
+        cve = "CVE-2026-109618"
+        if name == "kev_listed":
+            return {self.KEV_URL: (200, json.dumps({"catalogVersion": "2026.10.23", "vulnerabilities": [{
+                "cveID": cve, "vulnerabilityName": "PHP Out-of-Bounds Memory Corruption", "dateAdded": "2026-10-23", "dueDate": "2026-11-13",
+                "knownRansomwareCampaignUse": "Unknown"}]}))}
+        if name == "ssvc_poc":
+            record = json.loads(self._sitrep_text(f"cve_org_{cve}.json"))
+            for adp in record["containers"]["adp"]:
+                for metric in adp.get("metrics", []):
+                    for option in metric.get("other", {}).get("content", {}).get("options", []):
+                        if "Exploitation" in option:
+                            option["Exploitation"] = "poc"
+            return {f"https://cveawg.mitre.org/api/cve/{cve}": (200, json.dumps(record))}
+        if name == "record_updated":
+            record = json.loads(self._sitrep_text(f"cve_org_{cve}.json"))
+            record["cveMetadata"]["dateUpdated"] = "2026-10-23T09:00:00.000Z"
+            return {f"https://cveawg.mitre.org/api/cve/{cve}": (200, json.dumps(record))}
+        if name == "cve_org_changed":
+            ssvc, updated = self._watch_variant("ssvc_poc"), self._watch_variant("record_updated")
+            record = json.loads(next(iter(ssvc.values()))[1])
+            record["cveMetadata"] = json.loads(next(iter(updated.values()))[1])["cveMetadata"]
+            return {f"https://cveawg.mitre.org/api/cve/{cve}": (200, json.dumps(record))}
+        if name.startswith("epss_"):
+            score = name.split("_")[1]
+            series = [{"epss": "0.053070000", "percentile": "0.925630000", "date": "2026-10-22"}, {"epss": score, "percentile": "0.97", "date": "2026-10-23"}]
+            return {f"https://api.first.org/data/v1/epss?cve={cve}&scope=time-series": (200, json.dumps({"data": [{"cve": cve, "time-series": series}]}))}
+        if name.startswith("repos_"):
+            data = json.loads(self._sitrep_text(f"github_repos_{cve}.json"))
+            data["total_count"] = int(name.split("_")[1])
+            return {f"https://api.github.com/search/repositories?q={cve}&per_page=5": (200, json.dumps(data))}
+        raise AssertionError(name)
+
+    def test_watch_first_poll_is_a_silent_baseline_and_an_identical_second_poll_is_quiet(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            code, first = self._watch_run(tmp)
+            self.assertEqual(code, 0)
+            self.assertTrue(first["baseline"])
+            self.assertEqual(first["changes"], [], "[!] The first poll records a baseline; it never alerts.")
+            self.assertGreater(first["items"], 30)
+            state_path = os.path.join(tmp, "state", "CVE-2026-109618.json")
+            state = json.load(open(state_path, encoding="utf-8"))
+            self.assertEqual((state["polls"], len(state["baseline"])), (1, first["items"]))
+            self.assertEqual(state["baseline"]["exploitation|kev"]["value"], "not listed")
+            self.assertEqual(state["baseline"]["exploitation|epss"]["value"], 5.3)
+            self.assertTrue(all("first_seen" in v for v in state["baseline"].values()))
+            code, second = self._watch_run(tmp)
+            self.assertEqual(code, 0, "[!] Nothing changed, so nothing is reported and the exit code is quiet.")
+            self.assertEqual((second["baseline"], second["changes"], second["poll"]), (False, [], 2))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "state", "CVE-2026-109618.history.jsonl")), "History records only polls that had changes.")
+
+    def test_watch_reports_what_changed_by_class_and_only_the_exploitation_and_disclosure_changes_are_immediate(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            at = lambda hour, minute: (lambda: __import__("datetime").datetime(2026, 10, 23, hour, minute, tzinfo=__import__("datetime").timezone.utc))
+            self._watch_run(tmp, clock=at(9, 0))
+            baseline = json.load(open(os.path.join(tmp, "state", "CVE-2026-109618.json"), encoding="utf-8"))["baseline"]
+            extra = {}
+            for variant in ("kev_listed", "cve_org_changed", "epss_0.083070000", "repos_900"):
+                extra.update(self._watch_variant(variant))
+            code, record = self._watch_run(tmp, extra=extra, clock=at(9, 12))
+            self.assertEqual(code, 11, "An immediate-class change gives exit code 11.")
+            by_key = {c["key"]: c for c in record["changes"]}
+            self.assertEqual(by_key["exploitation|kev"]["kind"], "changed")
+            self.assertIn("LISTED", by_key["exploitation|kev"]["text"])
+            self.assertIn("Exploitation poc", by_key["exploitation|ssvc"]["text"])
+            self.assertIn("Exploitation none", by_key["exploitation|ssvc"]["was"])
+            self.assertEqual(by_key["exploitation|epss"]["class"], "exploitation")
+            self.assertEqual(by_key["exploitation|repos"]["class"], "exploitation")
+            self.assertTrue(by_key["exploitation|kev"]["immediate"] and by_key["exploitation|ssvc"]["immediate"])
+            kev_event = [c for c in record["changes"] if c["kind"] == "new" and "KEV catalog" in c["text"]][0]
+            self.assertEqual((kev_event["class"], kev_event["when"][:10], kev_event["immediate"]), ("exploitation", "2026-10-23", True), "The KEV addition is a new timeline event.")
+            updated = [c for c in record["changes"] if c["kind"] == "updated"][0]
+            self.assertEqual((updated["text"], updated["class"], updated["immediate"]), ("CVE record last updated", "records", False),
+                             "[!] 'Last updated' changes are digest, not immediate.")
+            self.assertEqual(updated["was"], "2026-10-21T16:07:52Z")
+            old = baseline["event|cve_org|CVE ID reserved"]["first_seen"]
+            state = json.load(open(os.path.join(tmp, "state", "CVE-2026-109618.json"), encoding="utf-8"))
+            self.assertEqual(state["baseline"]["event|cve_org|CVE ID reserved"]["first_seen"], old, "First-seen times of unchanged items are kept.")
+            self.assertEqual(state["baseline"][kev_event["key"]]["first_seen"], "2026-10-23T09:12:00Z", "A new item is stamped when WE first saw it.")
+            self.assertEqual(old[:16], "2026-10-23T09:00", "...while an old one keeps the time of the first poll.")
+            history = [json.loads(line) for line in open(os.path.join(tmp, "state", "CVE-2026-109618.history.jsonl"), encoding="utf-8")]
+            self.assertEqual(len(history), 1)
+            self.assertEqual(len(history[0]["changes"]), len(record["changes"]))
+            code, again = self._watch_run(tmp, extra=extra)
+            self.assertEqual((code, again["changes"]), (0, []), "The same new state seen again is not a change.")
+
+    def test_watch_noise_rules_epss_needs_a_point_repositories_need_to_double_and_growth_accumulates(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._watch_run(tmp)
+            small = dict(self._watch_variant("epss_0.058000000"), **self._watch_variant("repos_600"))
+            code, record = self._watch_run(tmp, extra=small)
+            self.assertEqual((code, record["changes"]), (0, []), "[!] EPSS 5.3 -> 5.8 and repositories 461 -> 600 are noise.")
+            code, record = self._watch_run(tmp, extra=dict(self._watch_variant("epss_0.064000000"), **self._watch_variant("repos_700")))
+            keys = {c["key"] for c in record["changes"]}
+            self.assertIn("exploitation|epss", keys, "The baseline keeps the value last REPORTED, so 5.3 -> 6.4 (1.1 points) now counts even though each step was small.")
+            self.assertNotIn("exploitation|repos", keys)
+            code, record = self._watch_run(tmp, extra=self._watch_variant("repos_950"))
+            self.assertIn("exploitation|repos", {c["key"] for c in record["changes"]}, "461 -> 950 is more than double the last reported count.")
+
+    def test_watch_a_new_source_answering_and_a_new_warehouse_record_are_exposure_changes(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db = os.path.join(tmp, "w.db")
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, ecosystems TEXT, published_date TEXT, last_modified TEXT, cve_alias TEXT, aliases TEXT)")
+            conn.execute("INSERT INTO vulnerabilities VALUES ('DEBIAN-CVE-2026-109618','php8.4','[\"Debian\"]','2026-10-21','2026-10-22','CVE-2026-109618','')")
+            conn.commit()
+            arch_url = "https://security.archlinux.org/CVE-2026-109618.json"
+            _, first = self._watch_run(tmp, extra={arch_url: (404, "")}, db_path=db)
+            self.assertTrue(first["baseline"])
+            conn.execute("INSERT INTO vulnerabilities VALUES ('GHSA-aaaa-bbbb-cccc','laravel/framework','[\"Packagist (PHP)\"]','2026-10-23','2026-10-23','CVE-2026-109618','')")
+            conn.commit()
+            conn.close()
+            code, record = self._watch_run(tmp, db_path=db)
+            by_key = {c["key"]: c for c in record["changes"]}
+            self.assertEqual(by_key["coverage|arch"]["class"], "exposure")
+            self.assertEqual(by_key["coverage|arch"]["text"], "Arch Linux now has an entry for this CVE")
+            self.assertIn("warehouse record GHSA-aaaa-bbbb-cccc (Packagist (PHP))", [c["text"] for c in record["changes"]])
+            self.assertEqual(by_key["reach|layer|app"]["class"], "exposure", "[!] The first app-registry record is its own change.")
+            self.assertTrue(by_key["reach|layer|app"]["text"].endswith("Packagist (PHP)"))
+            self.assertFalse(any(c["immediate"] for c in record["changes"] if c["class"] == "exposure"), "Exposure changes are digest by default.")
+            lead = [c for c in record["changes"] if c["key"].startswith("lead|")]
+            self.assertTrue(lead and not lead[0]["immediate"], "[!] An undated page that merely appears is digest: it has no timeline row of its own.")
+            self.assertEqual(code, 10, "Digest-only changes give exit code 10.")
+            code, record = self._watch_run(tmp, db_path=db, alert_expression="exposure")
+            self.assertEqual((code, record["changes"]), (0, []), "Already reported, so not a change again.")
+
+    def test_watch_failed_sources_keep_their_last_good_values_and_are_flagged_after_three_polls(self):
+        import tempfile
+        nvd = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2026-109618"
+        down = {nvd: (503, "", {}, nvd, None)}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            _, first = self._watch_run(tmp)
+            state_path = os.path.join(tmp, "state", "CVE-2026-109618.json")
+            before = json.load(open(state_path, encoding="utf-8"))["baseline"]
+            nvd_keys = [k for k, v in before.items() if v["source"] == "nvd"]
+            self.assertTrue(nvd_keys)
+            for poll_number in (2, 3, 4):
+                code, record = self._watch_run(tmp, fail=down)
+                self.assertEqual((code, record["changes"]), (0, []), "[!] A source that times out is not a retraction.")
+                flagged = [n for n in record["notes"] if "NVD has failed 3 polls in a row" in n]
+                self.assertEqual(bool(flagged), poll_number == 4)
+            after = json.load(open(state_path, encoding="utf-8"))
+            self.assertTrue(all(k in after["baseline"] and after["baseline"][k]["value"] == before[k]["value"] for k in nvd_keys), "Last good NVD values are kept.")
+            self.assertEqual(after["failures"]["nvd"], 3)
+            code, record = self._watch_run(tmp)
+            self.assertEqual((code, record["changes"]), (0, []), "NVD coming back with the same answer is not a change.")
+            self.assertEqual(json.load(open(state_path, encoding="utf-8"))["failures"]["nvd"], 0, "A success resets the failure count.")
+
+    def test_watch_a_source_that_timed_out_at_baseline_is_filled_in_silently_when_it_first_answers(self):
+        """[REGRESSION] Found in the first live trial: Ubuntu stalled during CVE-2026-109619's baseline poll, so when it answered on poll 2 the
+        watcher reported six 'new' Ubuntu changes although Ubuntu had known the CVE all along. A source that has never answered is filled
+        into the baseline silently (with a note); real changes from it are reported afterwards."""
+        import tempfile
+        ubuntu = "https://ubuntu.com/security/cves/CVE-2026-109618.json"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            state_path = os.path.join(tmp, "state", "CVE-2026-109618.json")
+            _, first = self._watch_run(tmp, fail={ubuntu: (None, "", {}, ubuntu, "ReadTimeout: slow")})
+            state = json.load(open(state_path, encoding="utf-8"))
+            self.assertNotIn("ubuntu", state["answered"])
+            self.assertIn("cve_org", state["answered"])
+            self.assertFalse([k for k in state["baseline"] if "ubuntu" in k], "The baseline has nothing from the source that never answered.")
+            code, second = self._watch_run(tmp)
+            self.assertEqual((code, second["changes"]), (0, []), "[!] A late first answer is not news.")
+            self.assertTrue(any("Ubuntu answered for the first time" in n and "without alerting" in n for n in second["notes"]))
+            state = json.load(open(state_path, encoding="utf-8"))
+            self.assertIn("ubuntu", state["answered"])
+            self.assertTrue([k for k in state["baseline"] if k.startswith("severity|ubuntu")], "Its current state is now in the baseline.")
+            data = json.loads(self._sitrep_text("ubuntu_CVE-2026-109618.json"))
+            data["priority"] = "medium"
+            code, third = self._watch_run(tmp, extra={ubuntu: (200, json.dumps(data))})
+            self.assertEqual([c["key"] for c in third["changes"] if c["source"] == "ubuntu"], ["severity|ubuntu|Ubuntu priority"],
+                             "A real change from it is reported once it has a baseline.")
+            self.assertIn("critical", third["changes"][0]["was"])
+            arch = "https://security.archlinux.org/CVE-2026-109618.json"
+            with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp2:
+                self._watch_run(tmp2, extra={arch: (404, "")})
+                _, later = self._watch_run(tmp2)
+                self.assertIn("coverage|arch", [c["key"] for c in later["changes"]], "A source that ANSWERED 'nothing' at baseline and later has an entry is still a change.")
+
+    def test_watch_slow_sources_are_asked_every_nth_poll_and_their_values_are_kept_in_between(self):
+        import watch, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, _ = self._sitrep_config(tmp)
+            selected, _ = __import__("sitrep").select_sources(sources, "core")
+            self.assertEqual([s["id"] for s in watch.due_sources(selected, 1)], [s["id"] for s in selected if s.get("watch_every", 1) == 1])
+            self.assertEqual(len(watch.due_sources(selected, 0)), len(selected), "The first poll asks everything.")
+            self.assertEqual(len(watch.due_sources(selected, 3)), len(selected))
+            _, first = self._watch_run(tmp, cadence=True)
+            _, second = self._watch_run(tmp, cadence=True)
+            self.assertIn("github_repos", first["asked"])
+            self.assertNotIn("github_repos", second["asked"], "[!] A watch_every: 3 source is skipped on poll 2.")
+            self.assertNotIn("github_oldest", second["asked"])
+            self.assertEqual(second["changes"], [], "Skipped sources do not read as removals.")
+            state = json.load(open(os.path.join(tmp, "state", "CVE-2026-109618.json"), encoding="utf-8"))
+            self.assertIn("exploitation|repos", state["baseline"], "Their baseline items survive the skipped polls.")
+            _, third = self._watch_run(tmp, cadence=True)
+            _, fourth = self._watch_run(tmp, cadence=True)
+            self.assertIn("github_repos", fourth["asked"], "...and are asked again on the third poll after the baseline (poll index 3).")
+            self.assertNotIn("github_repos", third["asked"])
+
+    def test_watch_every_timeline_event_of_the_report_is_a_digest_item(self):
+        import sitrep, watch, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        result = sitrep.build_sitrep("CVE-2026-109618", sources, follow, self._sitrep_fetch())
+        items = watch.build_items(result)
+        self.assertTrue(result["events"])
+        for event in result["events"]:
+            self.assertIn(f"event|{event['source']}|{event['text']}", items, f"[!] A timeline row must be watchable: {event['text']}")
+        classes = {i["class"] for i in items.values()}
+        self.assertTrue({"exploitation", "disclosure", "exposure", "severity", "fix", "records"} >= classes)
+        self.assertEqual(items["exploitation|kev"]["value"], "not listed")
+        self.assertEqual(items["exploitation|repos"]["value"], 443)
+        classify = lambda path, text: watch._event_class({"path": path, "text": text})
+        self.assertEqual(classify("exploitation", "added to the CISA KEV catalog"), "exploitation")
+        self.assertEqual(classify("upstream", "CVE record published by php"), "disclosure")
+        self.assertEqual(classify("records", "NVD record last modified"), "records")
+        self.assertEqual(classify("distro", "Ubuntu notice USN-1 published"), "fix")
+        self.assertEqual(classify("community", "oss-security: a post"), "disclosure")
+
+    def test_watch_state_files_survive_corruption_without_losing_the_old_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._watch_run(tmp)
+            path = os.path.join(tmp, "state", "CVE-2026-109618.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            code, record = self._watch_run(tmp)
+            self.assertTrue(record["baseline"], "A corrupt state file starts a new baseline instead of crashing or alerting.")
+            self.assertTrue(any("unreadable" in n and "corrupt" in n for n in record["notes"]))
+            self.assertTrue([n for n in os.listdir(os.path.join(tmp, "state")) if ".corrupt-" in n], "[!] The unreadable file is moved aside, not deleted.")
+            self.assertEqual(code, 0)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"cve": "CVE-2026-109618", "baseline": "nope"}, f)
+            _, record = self._watch_run(tmp)
+            self.assertTrue(record["baseline"])
+            self.assertFalse(os.path.exists(path + ".tmp"), "Writes are atomic: no temp file is left behind.")
+
+    def test_watch_alert_classes_and_the_polling_interval_are_validated(self):
+        import watch, sitrep, tempfile
+        self.assertEqual(watch.parse_alert(None), ("exploitation", "disclosure"))
+        self.assertEqual(watch.parse_alert("fix, severity"), ("fix", "severity"))
+        with self.assertRaises(sitrep.ConfigError):
+            watch.parse_alert("exploitation,bogus")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            out = []
+            config = self._sitrep_config(tmp)
+            self.assertEqual(watch.run(["CVE-2026-109618"], once=True, alert_expression="bogus", config=config, state_dir=tmp, out=out.append, fetch=self._sitrep_fetch()), 2)
+            self.assertIn("unknown alert class", out[0])
+            out = []
+            self.assertEqual(watch.run(["CVE-2026-109618"], every=0.2, config=config, state_dir=tmp, out=out.append, fetch=self._sitrep_fetch()), 2)
+            self.assertIn("at least 1 minute", out[0], "[!] Polling faster than the sources allow is refused.")
+            out = []
+            self.assertEqual(watch.run(["not-a-cve"], once=True, config=config, state_dir=tmp, out=out.append, fetch=self._sitrep_fetch(), stderr=io.StringIO()), 2)
+            self.assertIn("is not a CVE ID", out[0])
+            _, record = self._watch_run(tmp, alert_expression="fix")
+            code, record = self._watch_run(tmp, extra=self._watch_variant("kev_listed"), alert_expression="fix")
+            self.assertEqual(code, 10, "With --alert fix, a KEV listing is no longer immediate.")
+            self.assertFalse(any(c["immediate"] for c in record["changes"]))
+
+    def test_watch_loop_polls_on_a_schedule_prints_only_changes_rings_the_bell_and_stops_cleanly(self):
+        import watch, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            config = self._sitrep_config(tmp)
+            sleeps, out = [], []
+            err = io.StringIO()
+            code = watch.run(["CVE-2026-109618"], every=2, max_polls=3, config=config, state_dir=os.path.join(tmp, "s"), out=out.append, fetch=self._sitrep_fetch(),
+                             sleep=sleeps.append, stderr=err)
+            self.assertEqual(code, 0)
+            self.assertEqual(sum(sleeps), 240, "Two gaps of two minutes between three polls.")
+            text = "\n".join(out)
+            self.assertIn("Watching CVE-2026-109618 every 2 minute(s)", text)
+            self.assertIn("baseline recorded", text)
+            self.assertEqual(text.count("no change"), 2)
+            self.assertNotIn("\a", err.getvalue(), "No bell when nothing changed.")
+            out2, err2 = [], io.StringIO()
+            state_dir = os.path.join(tmp, "s")
+            watch.run(["CVE-2026-109618"], every=1, max_polls=1, config=config, state_dir=state_dir, out=out2.append, fetch=self._sitrep_fetch(extra=self._watch_variant("kev_listed")),
+                      sleep=lambda s: None, stderr=err2)
+            self.assertIn("\a", err2.getvalue(), "[!] An immediate change rings the terminal bell.")
+            self.assertIn("!! IMMEDIATE", "\n".join(out2))
+            self.assertIn("EXPLOITATION", "\n".join(out2))
+            interrupted = []
+            def interrupt(seconds):
+                raise KeyboardInterrupt
+            code = watch.run(["CVE-2026-109618"], every=1, config=config, state_dir=state_dir, out=interrupted.append, fetch=self._sitrep_fetch(), sleep=interrupt, stderr=io.StringIO())
+            self.assertEqual(code, 0)
+            self.assertIn("Stopped. State is kept", interrupted[-1])
+            live_err = io.StringIO()
+            live_err.isatty = lambda: True
+            sleeps = []
+            with patch("sitrep_progress.ansi_ok", return_value=True):
+                watch.run(["CVE-2026-109618"], every=1, max_polls=2, config=config, state_dir=state_dir, out=lambda *_: None, fetch=self._sitrep_fetch(), sleep=sleeps.append, stderr=live_err)
+            self.assertIn("next poll in 00:59", live_err.getvalue(), "On a terminal the countdown to the next poll is shown in place.")
+            self.assertEqual(len(sleeps), 60)
+
+    def test_watch_json_output_and_cli_dispatch_need_no_warehouse_or_stream(self):
+        import sitrep, tempfile
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            state = os.path.join(tmp, "state")
+            args = ["top10ecosystems.py", "--watch", "CVE-2026-109618", "--once", "--json", "--no-progress", "--alert", "exploitation"]
+            import watch as watch_module
+            real_poll = watch_module.poll
+            with patch.object(sys, "argv", args), patch.object(sys, "stdout", buf), \
+                 patch.object(sitrep, "make_fetcher", return_value=self._sitrep_fetch()), \
+                 patch.object(sitrep, "LOCAL_CONFIG", os.path.join(tmp, "none.json")), \
+                 patch.object(watch_module, "STATE_DIR", state), \
+                 patch.object(watch_module, "poll", lambda *a, **k: real_poll(*a, **dict(k, state_dir=state))), \
+                 patch.object(top10ecosystems, "DB_PATH", os.path.join(tmp, "no_warehouse.db")), \
+                 patch.object(top10ecosystems, "_stage_modification_stream", side_effect=AssertionError("stream must not be staged")), \
+                 patch.object(top10ecosystems, "require_warehouse", side_effect=AssertionError("warehouse must not be required")):
+                with self.assertRaises(SystemExit) as raised:
+                    top10ecosystems.main()
+        self.assertEqual(raised.exception.code, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertEqual((parsed[0]["cve"], parsed[0]["baseline"]), ("CVE-2026-109618", True))
+        self.assertNotIn("\x1b[", buf.getvalue())
+
+    def test_watch_console_text_for_a_baseline_a_quiet_poll_and_an_alert(self):
+        import watch
+        base = {"cve": "CVE-2026-1", "polled_at": "2026-10-22T18:27:00Z", "poll": 1, "baseline": True, "items": 53, "changes": [], "notes": [], "previous_poll": None, "found": True}
+        self.assertIn("baseline recorded at 2026-10-22 18:27 UTC (53 item(s))", watch.render_poll(base))
+        quiet = dict(base, baseline=False, poll=4)
+        self.assertIn("poll 4 at 2026-10-22 18:27 UTC: no change.", watch.render_poll(quiet))
+        changes = [
+            {"key": "k1", "class": "exploitation", "kind": "changed", "text": "CISA KEV: LISTED - PHP ...", "was": "CISA KEV: not listed (catalog 2026.10.21)", "source": "kev", "label": "CISA KEV",
+             "immediate": True, "first_seen": "2026-10-23T09:12:00Z", "when": None, "clock": None},
+            {"key": "k2", "class": "fix", "kind": "new", "text": "Arch advisories: ASA-1", "was": None, "source": "arch", "label": "Arch Linux", "immediate": False,
+             "first_seen": "2026-10-23T09:12:00Z", "when": None, "clock": None},
+            {"key": "k3", "class": "exploitation", "kind": "new", "text": "added to the CISA KEV catalog", "was": None, "source": "kev", "label": "CISA KEV", "immediate": True,
+             "first_seen": "2026-10-23T09:12:00Z", "when": "2026-10-23", "clock": "declared"}]
+        alert = dict(quiet, changes=changes, previous_poll="2026-10-22T18:17:00Z", notes=["NVD has failed 3 polls in a row"])
+        text = watch.render_poll(alert)
+        for expected in ("WATCH  CVE-2026-1   3 change(s) since 2026-10-22 18:17 UTC", "2 immediate", "!! IMMEDIATE", "digest", "EXPLOITATION  changed: CISA KEV: LISTED",
+                         "(was: CISA KEV: not listed (catalog 2026.10.21))", "first seen by us 09:12 UTC", "(event time 2026-10-23", "[!] NVD has failed 3 polls in a row"):
+            self.assertIn(" ".join(expected.split()), " ".join(text.split()), expected)
+        self.assertLess(text.index("!! IMMEDIATE"), text.index("digest"), "Immediate changes come first.")
+        self.assertEqual(watch.exit_code([alert]), 11)
+        self.assertEqual(watch.exit_code([dict(alert, changes=[changes[1]])]), 10)
+        self.assertEqual(watch.exit_code([quiet]), 0)
+
     # --timeline TRIAGE SIGNALS: facts and what they usually mean; never a verdict
     # -------------------------------------------------------------------------
     def _signal_result(self, **over):
