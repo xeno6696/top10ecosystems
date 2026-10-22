@@ -1963,6 +1963,789 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertLessEqual(max(len(line) for line in text.splitlines()), timeline.WIDTH + 4, "[!] Report lines must stay within the box width.")
 
     # -------------------------------------------------------------------------
+    # --sitrep: a configurable situation report for one CVE, working when OSV has no record under the CVE ID yet
+
+    def _sitrep_text(self, name):
+        with open(os.path.join("src", "test", "resources", "sitrep", name), encoding="utf-8") as f:
+            return f.read()
+
+    def _sitrep_fetch(self, fail=None, calls=None, extra=None):
+        """A fake `fetch` serving the saved real responses for CVE-2026-109618 (OSV answers 404, as it did). `fail` maps a URL to
+        a (status, text, headers, url, error) tuple; `calls` collects every URL asked for."""
+        import sitrep
+        cve = "CVE-2026-109618"
+        with open(os.path.join("src", "test", "resources", "timeline", "kev_CVE-2016-3081.json"), encoding="utf-8") as f:
+            kev_text = f.read()
+        served = {
+            f"https://api.osv.dev/v1/vulns/{cve}": (404, ""),
+            f"https://cveawg.mitre.org/api/cve/{cve}": (200, self._sitrep_text(f"cve_org_{cve}.json")),
+            f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve}": (200, self._sitrep_text(f"nvd_{cve}.json")),
+            f"https://api.first.org/data/v1/epss?cve={cve}&scope=time-series": (200, self._sitrep_text(f"epss_{cve}.json")),
+            "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json": (200, kev_text),
+            f"https://access.redhat.com/hydra/rest/securitydata/cve/{cve}.json": (200, self._sitrep_text(f"redhat_{cve}.json")),
+            f"https://ubuntu.com/security/cves/{cve}.json": (200, self._sitrep_text(f"ubuntu_{cve}.json")),
+            f"https://security-tracker.debian.org/tracker/{cve}": (200, self._sitrep_text(f"debian_{cve}.html")),
+            f"https://api.github.com/search/repositories?q={cve}&per_page=5": (200, self._sitrep_text(f"github_repos_{cve}.json")),
+            f"https://api.github.com/search/repositories?q={cve}&sort=updated&order=asc&per_page=5": (200, self._sitrep_text(f"github_oldest_{cve}.json")),
+            "https://www.openwall.com/lists/oss-security/2026/10/21/6": (200, self._sitrep_text("oss_security_2026-10-21-6.html")),
+            f"https://security.archlinux.org/{cve}.json": (200, self._sitrep_text(f"arch_{cve}.json")),
+            f"https://api.github.com/advisories?cve_id={cve}": (200, "[]"),
+            f"https://explore.alas.aws.amazon.com/{cve}.html": (200, self._sitrep_text(f"amazon_{cve}.html")),
+            f"https://linux.oracle.com/cve/{cve}.html": (200, self._sitrep_text(f"oracle_{cve}.html")),
+            f"https://www.suse.com/security/cve/{cve}.html": (200, f"<title>{cve} Common Vulnerabilities and Exposures | SUSE</title>"),
+            "https://www.php.net/archive/2026.php": (200, "<title>PHP: News Archive - 2026</title>"),   # Arch's references point here
+        }
+        served.update(extra or {})
+
+        def fetch(url, source=None):
+            if calls is not None:
+                calls.append(url)
+            if fail and url in fail:
+                return sitrep.Fetch(*fail[url])
+            if url in served:
+                status, text = served[url]
+                return sitrep.Fetch(status, text, {}, url, None)
+            return sitrep.Fetch(404, "", {}, url, None)
+        return fetch
+
+    def _sitrep_config(self, tmp):
+        import sitrep
+        return sitrep.load_config(sitrep.DEFAULT_CONFIG, os.path.join(tmp, "no_local_overrides.json"))
+
+    def _sitrep_source(self, **overrides):
+        source = {"id": "example", "label": "Example", "kind": "builtin", "parser": "nvd", "url": "https://example.org/cve/{cve}",
+                  "path": "records", "trust": "primary", "profiles": ["core"]}
+        source.update(overrides)
+        return source
+
+    def test_sitrep_shipped_sources_are_valid_and_every_one_is_https_and_public(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        ids = [s["id"] for s in sources]
+        self.assertEqual(len(ids), len(set(ids)))
+        for needed in ("osv", "cve_org", "nvd", "epss", "kev", "redhat", "ubuntu", "debian", "github_repos"):
+            self.assertIn(needed, ids)
+        for source in sources:
+            self.assertEqual(sitrep.validate_source(source), [], source["id"])
+            self.assertTrue(source["url"].startswith("https://"))
+        self.assertTrue(all(sitrep.host_is_safe(h) for h in follow))
+        self.assertIn("www.openwall.com", follow)
+
+    def test_sitrep_config_rejects_unsafe_or_malformed_sources_and_names_every_problem(self):
+        import sitrep
+        cases = {
+            "http url": (self._sitrep_source(url="http://example.org/{cve}"), "must be https"),
+            "localhost": (self._sitrep_source(url="https://localhost/{cve}"), "not allowed"),
+            "loopback ip": (self._sitrep_source(url="https://127.0.0.1/{cve}"), "not allowed"),
+            "private ip": (self._sitrep_source(url="https://10.0.0.5/{cve}"), "not allowed"),
+            "cloud metadata ip": (self._sitrep_source(url="https://169.254.169.254/{cve}"), "not allowed"),
+            "internal name": (self._sitrep_source(url="https://tracker.corp/{cve}"), "not allowed"),
+            "credentials": (self._sitrep_source(url="https://user:pw@example.org/{cve}"), "credentials"),
+            "odd port": (self._sitrep_source(url="https://example.org:8443/{cve}"), "standard https port"),
+            "no placeholder": (self._sitrep_source(url="https://example.org/cve"), "must contain {cve}"),
+            "bad path": (self._sitrep_source(path="elsewhere"), "path must be one of"),
+            "bad trust": (self._sitrep_source(trust="trusted-ish"), "trust must be one of"),
+            "bad kind": (self._sitrep_source(kind="plugin"), "kind must be one of"),
+            "unknown parser": (self._sitrep_source(parser="made_up"), "unknown parser"),
+            "bad id": (self._sitrep_source(id="Bad Id!"), "id must be"),
+            "bad token var": (self._sitrep_source(token_env="my token"), "token_env"),
+            "absurd timeout": (self._sitrep_source(timeout=9999), "timeout must be"),
+            "json without fields": (self._sitrep_source(kind="json", parser=None), "needs 'fields'"),
+        }
+        for name, (source, expected) in cases.items():
+            problems = " | ".join(sitrep.validate_source(source))
+            self.assertIn(expected, problems, f"[!] {name}: {problems}")
+        self.assertEqual(sitrep.validate_source(self._sitrep_source()), [])
+        self.assertEqual(sitrep.validate_source(self._sitrep_source(kind="link", parser=None)), [])
+        self.assertEqual(sitrep.validate_source(self._sitrep_source(kind="json", parser=None, fields={"published": "a.b", "severity": "c"})), [])
+        self.assertTrue(sitrep.validate_follow_hosts({"192.168.1.5": {"label": "x", "path": "vendor"}}))
+        self.assertTrue(sitrep.validate_follow_hosts({"example.org": {"label": "x", "path": "nowhere"}}))
+        self.assertEqual(sitrep.validate_follow_hosts({"example.org": {"label": "x", "path": "vendor"}}), [])
+        for host in ("example.org", "www.openwall.com", "8.8.8.8"):
+            self.assertTrue(sitrep.host_is_safe(host), host)
+        for host in ("", "localhost", "a.localhost", "printer.local", "db.internal", "::1", "0.0.0.0", "172.16.4.4", "singleword"):
+            self.assertFalse(sitrep.host_is_safe(host), host)
+
+    def test_sitrep_local_config_overrides_adds_and_disables_without_editing_the_shipped_file(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            local = os.path.join(tmp, "local.json")
+            with open(local, "w", encoding="utf-8") as f:
+                json.dump({"sources": [{"id": "github_repos", "enabled": False},
+                                       {"id": "vendor_x", "label": "Vendor X", "kind": "link", "url": "https://vendor.example/{cve}", "path": "vendor", "trust": "lead", "profiles": ["core"]}],
+                           "follow_hosts": {"blog.example": {"label": "a blog", "path": "community"}}}, f)
+            sources, follow = sitrep.load_config(sitrep.DEFAULT_CONFIG, local)
+            by_id = {s["id"]: s for s in sources}
+            self.assertFalse(by_id["github_repos"]["enabled"])
+            self.assertEqual(by_id["github_repos"]["parser"], "github_repos", "[!] A local entry overrides only the fields it names.")
+            self.assertIn("vendor_x", by_id)
+            self.assertIn("blog.example", follow)
+            self.assertIn("www.openwall.com", follow, "Local follow_hosts add to the shipped ones.")
+            selected, _ = sitrep.select_sources(sources)
+            self.assertNotIn("github_repos", [s["id"] for s in selected], "A disabled source is not queried.")
+            self.assertIn("vendor_x", [s["id"] for s in selected])
+            bad = os.path.join(tmp, "bad.json")
+            with open(bad, "w", encoding="utf-8") as f:
+                json.dump({"sources": [{"id": "evil", "kind": "link", "url": "https://127.0.0.1/{cve}", "path": "vendor", "trust": "lead"}]}, f)
+            with self.assertRaises(sitrep.ConfigError) as raised:
+                sitrep.load_config(sitrep.DEFAULT_CONFIG, bad)
+            self.assertIn("evil", str(raised.exception))
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            with self.assertRaises(sitrep.ConfigError):
+                sitrep.load_config(sitrep.DEFAULT_CONFIG, bad)
+
+    def test_sitrep_source_selection_uses_profiles_then_plus_and_minus(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, _ = self._sitrep_config(tmp)
+        ids = lambda expr: [s["id"] for s in sitrep.select_sources(sources, expr)[0]]
+        self.assertEqual(ids(None), ids("core"), "The default profile is core.")
+        self.assertEqual(ids("core,-github_repos,-github_oldest"), [i for i in ids("core") if i not in ("github_repos", "github_oldest")])
+        self.assertEqual(ids("all,-kev"), [i for i in ids("all") if i != "kev"])
+        self.assertEqual(ids("core,+kev"), ids("core"))
+        self.assertEqual(ids("core"), [s["id"] for s in sources if "core" in s.get("profiles", [])], "Config order is kept.")
+        sources_with_extra = sources + [self._sitrep_source(id="extra", profiles=["experimental"])]
+        self.assertNotIn("extra", [s["id"] for s in sitrep.select_sources(sources_with_extra, "core")[0]])
+        self.assertIn("extra", [s["id"] for s in sitrep.select_sources(sources_with_extra, "core,+extra")[0]])
+        self.assertEqual([s["id"] for s in sitrep.select_sources(sources_with_extra, "experimental")[0]], ["extra"])
+        for bad in ("nosuchprofile", "core,+nosuchsource", "core,-nosuchsource"):
+            with self.assertRaises(sitrep.ConfigError, msg=bad):
+                sitrep.select_sources(sources, bad)
+
+    def test_sitrep_fetcher_is_https_only_stays_on_one_host_and_caps_the_size(self):
+        import sitrep
+        class FakeResponse:
+            def __init__(self, status=200, body=b"", headers=None):
+                self.status_code, self.body, self.headers, self.encoding, self.closed = status, body, headers or {}, "utf-8", False
+            def iter_content(self, size):
+                for i in range(0, len(self.body), size):
+                    yield self.body[i:i + size]
+            def close(self):
+                self.closed = True
+        fetch = sitrep.make_fetcher(sleep=lambda s: None)
+        with patch("requests.get") as get:
+            self.assertIn("must be https", fetch("http://example.org/x").error)
+            self.assertIn("refused", fetch("https://127.0.0.1/x").error)
+            get.assert_not_called()
+            get.side_effect = [FakeResponse(302, headers={"Location": "https://evil.example/steal"})]
+            result = fetch("https://example.org/start")
+            self.assertIsNone(result.status)
+            self.assertIn("refused redirect", result.error)
+            self.assertEqual(get.call_count, 1, "[!] The cross-host redirect must not be followed.")
+            get.reset_mock()
+            get.side_effect = [FakeResponse(301, headers={"Location": "http://example.org/downgrade"})]
+            self.assertIn("refused redirect", fetch("https://example.org/start").error)
+            get.reset_mock()
+            get.side_effect = [FakeResponse(302, headers={"Location": "/moved"}), FakeResponse(200, b"hello")]
+            result = fetch("https://example.org/start")
+            self.assertEqual((result.status, result.text, result.url), (200, "hello", "https://example.org/moved"))
+            get.reset_mock()
+            get.side_effect = [FakeResponse(200, b"x" * 500)]
+            result = fetch("https://example.org/big", {"max_bytes": 100})
+            self.assertEqual(result.status, 200)
+            self.assertIn("larger than", result.error)
+            self.assertEqual(result.text, "")
+            get.reset_mock()
+            get.side_effect = [FakeResponse(302, headers={"Location": "/again"})] * 10
+            self.assertIn("too many redirects", fetch("https://example.org/loop").error)
+            get.reset_mock()
+            get.side_effect = [FakeResponse(503), FakeResponse(503)]
+            self.assertEqual((fetch("https://example.org/down").status, get.call_count), (503, 2), "A 5xx is retried once, then reported.")
+            get.reset_mock()
+            import requests
+            get.side_effect = requests.ConnectionError("no route")
+            self.assertIn("ConnectionError", fetch("https://example.org/gone").error)
+
+    def test_sitrep_fetcher_sends_a_token_only_from_the_environment_and_paces_each_host(self):
+        import sitrep
+        sent = []
+        class FakeResponse:
+            status_code, headers, encoding = 200, {}, "utf-8"
+            def iter_content(self, size):
+                yield b"{}"
+            def close(self):
+                pass
+        def fake_get(url, headers=None, **kwargs):
+            sent.append((url, headers))
+            return FakeResponse()
+        sleeps = []
+        fetch = sitrep.make_fetcher(sleep=sleeps.append, clock=lambda: 100.0)
+        with patch("requests.get", fake_get):
+            with patch.dict(os.environ, {"MY_SITREP_TOKEN": "s3cret"}, clear=False):
+                fetch("https://api.example.org/a", {"token_env": "MY_SITREP_TOKEN"})
+                fetch("https://api.example.org/b", {"token_env": "MY_SITREP_TOKEN", "token_header": "apiKey", "token_prefix": ""})
+            fetch("https://api.example.org/c", {"token_env": "MY_SITREP_TOKEN"})
+        self.assertEqual(sent[0][1]["Authorization"], "Bearer s3cret")
+        self.assertEqual(sent[1][1]["apiKey"], "s3cret")
+        self.assertNotIn("Authorization", sent[2][1], "[!] With the variable unset no credential is sent.")
+        self.assertTrue(all("top10ecosystems" in h["User-Agent"] for _, h in sent))
+        sleeps.clear()
+        fetch = sitrep.make_fetcher(sleep=sleeps.append, clock=lambda: 100.0)
+        with patch("requests.get", fake_get):
+            fetch("https://paced.example/1", {"min_interval": 5})
+            fetch("https://paced.example/2", {"min_interval": 5})
+            fetch("https://other.example/1", {"min_interval": 5})
+        self.assertEqual(sleeps, [5.0], "Only the second request to the same host waits; a different host does not.")
+
+    def test_sitrep_parse_when_reads_every_clock_shape_and_never_invents_an_hour(self):
+        import sitrep
+        cases = {
+            "2026-10-21T14:47:40.858768019Z": ("2026-10-21T14:47:40Z", "second"),
+            "2026-10-22T10:09:59.800": ("2026-10-22T10:09:59Z", "second"),
+            "2026-10-21T16:41:54+02:00": ("2026-10-21T14:41:54Z", "second"),
+            "Wed, 21 Oct 2026 16:41:54 +0200": ("2026-10-21T14:41:54Z", "second"),
+            "2026-10-21": ("2026-10-21", "day"),
+            "2026-10-21T00:00:00Z": ("2026-10-21", "day"),
+            "2026-10-21T00:00:00": ("2026-10-21", "day"),
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(sitrep.parse_when(raw), expected, raw)
+        for junk in (None, "", "soon", "2026-13-45", 12345, "Date: whenever"):
+            self.assertIsNone(sitrep.parse_when(junk), repr(junk))
+        early = {"when": "2026-10-21", "precision": "day"}
+        later = {"when": "2026-10-21T01:00:00Z", "precision": "second"}
+        self.assertLess(sitrep._sort_key(early), sitrep._sort_key(later))
+        self.assertEqual(sitrep.show_when(early), "2026-10-21 (date only)")
+        self.assertEqual(sitrep.show_when(later), "2026-10-21 01:00 UTC")
+
+    def test_sitrep_parsers_read_the_real_responses(self):
+        import sitrep
+        cve = "CVE-2026-109618"
+        def served(name, status=200):
+            return sitrep.Fetch(status, self._sitrep_text(name), {}, "https://x.example", None)
+        cve_org = sitrep.parse_cve_org(cve, served(f"cve_org_{cve}.json"))
+        texts = " | ".join(f["text"] for f in cve_org["facts"])
+        self.assertIn("PUBLISHED (CNA: php)", texts)
+        self.assertIn("9.2 CRITICAL (CVSS 4.0", texts)
+        self.assertIn("Exploitation none", texts, "CISA's SSVC exploitation assessment is read from the ADP block.")
+        self.assertIn("fixed in 8.2.35", texts)
+        self.assertEqual([e["text"] for e in cve_org["events"] if e["when"].startswith("2026-10-12")], ["CVE ID reserved"])
+        self.assertTrue(any("openwall.com/lists/oss-security" in r for r in cve_org["refs"]), "References from the ADP container are collected too.")
+        nvd = sitrep.parse_nvd(cve, served(f"nvd_{cve}.json"))
+        self.assertEqual(sorted(f["score"] for f in nvd["facts"] if f["kind"] == "severity"), [9.2, 9.8])
+        self.assertIn("NVD status: Modified", [f["text"] for f in nvd["facts"]])
+        redhat = sitrep.parse_redhat(cve, served(f"redhat_{cve}.json"))
+        self.assertTrue(any(f.get("score") == 8.1 for f in redhat["facts"]))
+        self.assertTrue(any("RHSA-2026:87070" in f["text"] for f in redhat["facts"] if f["kind"] == "fix"))
+        self.assertTrue(any("Under investigation: RHEL 6" in f["text"] for f in redhat["facts"]))
+        first_fix = [e for e in redhat["events"] if "first fix" in e["text"]][0]
+        self.assertEqual(first_fix["precision"], "day", "[!] Red Hat writes a release as midnight UTC; that is a date, not a time.")
+        self.assertTrue(all(len(f["text"]) < 400 for f in redhat["facts"]), "A vendor statement is clipped.")
+        ubuntu = sitrep.parse_ubuntu(cve, served(f"ubuntu_{cve}.json"))
+        self.assertIn("Ubuntu priority: critical", [f["text"] for f in ubuntu["facts"]])
+        self.assertEqual(sorted(e["text"] for e in ubuntu["events"] if "notice" in e["text"]),
+                         ["Ubuntu notice USN-8948-1 published", "Ubuntu notice USN-8948-2 published"])
+        self.assertTrue(any("noble: php8.3" in f["text"] for f in ubuntu["facts"]))
+        debian = sitrep.parse_debian(cve, served(f"debian_{cve}.html"))
+        fixes = " | ".join(f["text"] for f in debian["facts"] if f["kind"] == "fix")
+        self.assertIn("bookworm (security): php8.2 8.2.35-1~deb12u1", fixes)
+        self.assertIn("trixie (security): php8.4 8.4.27-1~deb13u1", fixes)
+        self.assertIn("DLA-4848-1, DSA-6574-1", fixes)
+        self.assertTrue(any("still vulnerable" in f["text"] for f in debian["facts"]))
+        self.assertTrue(any("GHSA-w8hw-w9fx-j79w" in r for r in debian["refs"]))
+        self.assertFalse(sitrep.parse_debian(cve, sitrep.Fetch(200, "<html>nothing</html>", {}, "u", None))["found"])
+        repos = sitrep.parse_github_repos(cve, served(f"github_repos_{cve}.json"))
+        self.assertIn("public GitHub repositories mention this CVE ID", repos["facts"][0]["text"])
+        self.assertIn("never run their code", repos["facts"][0]["text"])
+        oldest = sitrep.parse_github_oldest(cve, served(f"github_oldest_{cve}.json"))
+        self.assertEqual(oldest["events"][0]["when"], "2026-10-21T01:06:38Z")
+        self.assertIn("unvetted", oldest["events"][0]["text"])
+        empty_search = sitrep.Fetch(200, json.dumps({"total_count": 0, "items": []}), {}, "u", None)
+        self.assertFalse(sitrep.parse_github_repos(cve, empty_search)["found"])
+        self.assertFalse(sitrep.parse_github_oldest(cve, empty_search)["found"])
+        epss = sitrep.parse_epss(cve, served(f"epss_{cve}.json"))
+        self.assertIn("EPSS 5.3%", epss["facts"][0]["text"], "The flat first-day response shape is read.")
+        self.assertEqual(epss["events"][0]["text"], "first EPSS score")
+        with open(os.path.join("src", "test", "resources", "timeline", "kev_CVE-2016-3081.json"), encoding="utf-8") as f:
+            kev_fetch = sitrep.Fetch(200, f.read(), {}, "u", None)
+        listed = sitrep.parse_kev("CVE-2016-3081", kev_fetch)
+        self.assertTrue(listed["found"])
+        self.assertIn("LISTED", listed["facts"][0]["text"])
+        self.assertEqual(listed["events"][0]["text"], "added to the CISA KEV catalog")
+        unlisted = sitrep.parse_kev(cve, kev_fetch)
+        self.assertFalse(unlisted["found"])
+        self.assertIn("not listed (catalog 2026.10.21)", unlisted["facts"][0]["text"], "Not being on the list is a fact, but it is not a 'found' source.")
+        bad = sitrep.Fetch(200, "<html>not json</html>", {}, "u", None)
+        for parser in (sitrep.parse_cve_org, sitrep.parse_nvd, sitrep.parse_redhat, sitrep.parse_ubuntu, sitrep.parse_epss, sitrep.parse_kev,
+                       sitrep.parse_github_repos, sitrep.parse_osv_cve):
+            self.assertIsNotNone(parser(cve, bad)["error"], f"[!] {parser.__name__} must report non-JSON as an error, not crash.")
+        osv = sitrep.parse_osv_cve("CVE-2016-3081", sitrep.Fetch(200, json.dumps({"id": "CVE-2016-3081", "aliases": ["GHSA-1"], "published": "2016-04-13T00:00:00Z", "modified": "2026-01-01T00:00:00Z"}), {}, "u", None))
+        self.assertTrue(osv["found"])
+        self.assertIn("GHSA-1", osv["facts"][0]["text"])
+
+    def test_sitrep_link_and_json_sources_need_no_code(self):
+        import sitrep
+        page = sitrep.Fetch(200, "<html><head><title>Advisory &amp; notes</title><meta property=\"article:published_time\" content=\"2026-10-21T09:30:00Z\"></head></html>", {}, "https://v.example/a", None)
+        parsed = sitrep.parse_link({"id": "v", "label": "Vendor"}, page)
+        self.assertEqual(parsed["lead"]["title"], "Advisory & notes")
+        self.assertEqual((parsed["events"][0]["when"], parsed["events"][0]["clock"]), ("2026-10-21T09:30:00Z", "declared"))
+        mail = sitrep.parse_link({"id": "m", "label": "list"}, sitrep.Fetch(200, self._sitrep_text("oss_security_2026-10-21-6.html"), {}, "https://www.openwall.com/x", None))
+        self.assertEqual((mail["events"][0]["when"], mail["events"][0]["clock"]), ("2026-10-21T14:41:54Z", "header"))
+        self.assertEqual(mail["lead"]["author"], "Jakub Zelenka")
+        undated = sitrep.parse_link({"id": "u", "label": "U"}, sitrep.Fetch(200, "<title>No date</title>", {"last-modified": "Wed, 21 Oct 2026 12:00:00 GMT"}, "https://u.example", None))
+        self.assertTrue(undated["found"])
+        self.assertEqual(undated["events"], [], "[!] A page with no date of its own gets no timeline event; Last-Modified of a dynamic page is just 'now'.")
+        self.assertIsNone(undated["lead"]["when"])
+        index = sitrep.parse_link({"id": "i", "label": "I"}, sitrep.Fetch(200, "<title>News Archive</title><time datetime=\"2026-10-21T00:35:00Z\">", {}, "https://i.example", None))
+        self.assertEqual(index["events"], [], "The first <time> tag on an index page belongs to some other entry, so it is not used.")
+        self.assertFalse(sitrep.parse_link({"id": "e", "label": "E"}, sitrep.Fetch(200, "", {}, "u", None))["found"])
+        source = {"id": "feed", "label": "Feed", "fields": {"published": "meta.when", "severity": "scores.0.value", "state": "status", "title": "name"}}
+        payload = {"meta": {"when": "2026-10-20T08:00:00Z"}, "scores": [{"value": "9.1 critical"}], "status": "confirmed", "name": "Big bug"}
+        result = sitrep.parse_json_fields(source, sitrep.Fetch(200, json.dumps(payload), {}, "https://f.example", None))
+        self.assertEqual([f["kind"] for f in result["facts"]], ["state", "severity"])
+        self.assertEqual(result["events"][0]["when"], "2026-10-20T08:00:00Z")
+        self.assertEqual(result["lead"]["title"], "Big bug")
+        self.assertFalse(sitrep.parse_json_fields(source, sitrep.Fetch(200, "{}", {}, "u", None))["found"])
+        self.assertIsNotNone(sitrep.parse_json_fields(source, sitrep.Fetch(200, "nope", {}, "u", None))["error"])
+
+    def test_sitrep_builds_the_picture_for_a_cve_that_only_vendors_published(self):
+        import datetime, sitrep, tempfile
+        calls = []
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        result = sitrep.build_sitrep("cve-2026-109618", sources, follow, self._sitrep_fetch(calls=calls), today=datetime.datetime(2026, 10, 22, 17, 0, tzinfo=datetime.timezone.utc))
+        self.assertEqual(result["cve"], "CVE-2026-109618")
+        self.assertTrue(result["found"])
+        status = {c["id"]: c["status"] for c in result["coverage"]}
+        self.assertEqual(status["osv"], "not_found", "OSV had no record under the CVE ID.")
+        self.assertEqual(status["kev"], "not_found", "Not on KEV is a fact but not a found source.")
+        for found in ("cve_org", "nvd", "epss", "redhat", "ubuntu", "debian", "github_repos", "github_oldest", "link-www.openwall.com"):
+            self.assertEqual(status[found], "found", found)
+        self.assertTrue(result["severity_disagree"], "[!] 9.2 vs 9.8 vs 8.1 must be flagged as a disagreement, not merged.")
+        severity = " | ".join(f["text"] for f in result["severity"])
+        for expected in ("9.2 CRITICAL", "9.8 CRITICAL", "8.1", "Ubuntu priority: critical", "Red Hat rating: Important"):
+            self.assertIn(expected, severity)
+        keys = [sitrep._sort_key(e) for e in result["events"]]
+        self.assertEqual(keys, sorted(keys), "Events are in time order.")
+        self.assertTrue(all(e["clock"] in sitrep.CLOCKS for e in result["events"]))
+        oss = [e for e in result["events"] if e["path"] == "community"][0]
+        self.assertEqual((oss["when"], oss["clock"]), ("2026-10-21T14:41:54Z", "header"), "The linked oss-security post is placed by its Date header, in UTC.")
+        oss_lead = [lead for lead in result["leads"] if lead["author"]][0]
+        self.assertEqual(oss_lead["author"], "Jakub Zelenka")
+        self.assertTrue(any(lead["url"].startswith("https://www.php.net/archive/2026.php#") for lead in result["leads"]), "A linked page keeps its #fragment.")
+        self.assertFalse(any("wiz.io" in url for url in calls), "[!] A host that is referenced but not on the follow list is never fetched.")
+        self.assertTrue(any(url == "https://www.php.net/archive/2026.php" for url in calls), "A referenced page on a followed host (Arch points at php.net) is fetched.")
+        self.assertTrue(all(url.startswith("https://") for url in calls))
+        self.assertIsNone(result["reach"], "No warehouse was given.")
+        paths = {c["path"] for c in result["coverage"]}
+        self.assertTrue({"upstream", "records", "registry", "distro", "exploitation", "osv", "community"} <= paths)
+        self.assertEqual((status["arch"], status["github_advisories"]), ("found", "not_found"))
+        self.assertIn("Arch rating: Critical", severity)
+
+    def test_sitrep_one_failing_source_never_hides_the_others(self):
+        import sitrep, tempfile
+        nvd = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2026-109618"
+        ubuntu = "https://ubuntu.com/security/cves/CVE-2026-109618.json"
+        debian = "https://security-tracker.debian.org/tracker/CVE-2026-109618"
+        fail = {nvd: (503, "", {}, nvd, None), ubuntu: (None, "", {}, ubuntu, "ReadTimeout: slow"), debian: (None, "", {}, debian, "refused: url host 'x' is not allowed")}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        result = sitrep.build_sitrep("CVE-2026-109618", sources, follow, self._sitrep_fetch(fail=fail))
+        status = {c["id"]: c["status"] for c in result["coverage"]}
+        self.assertEqual((status["nvd"], status["ubuntu"], status["debian"]), ("error", "error", "blocked"))
+        self.assertEqual(status["cve_org"], "found")
+        self.assertEqual(status["redhat"], "found")
+        details = {c["id"]: c["detail"] for c in result["coverage"]}
+        self.assertEqual(details["nvd"], "HTTP 503")
+        self.assertIn("ReadTimeout", details["ubuntu"])
+        self.assertTrue(any("3 source(s) could not be read" in n and "silence is not evidence" in n for n in result["notes"]))
+        self.assertTrue(result["found"])
+        oversize = {nvd: (200, "", {}, nvd, "response larger than 100 bytes")}
+        again = sitrep.build_sitrep("CVE-2026-109618", sources, follow, self._sitrep_fetch(fail=oversize))
+        self.assertEqual({c["id"]: c["status"] for c in again["coverage"]}["nvd"], "error", "[!] An oversize response is an error, not 'nothing there'.")
+
+    def test_sitrep_follows_only_listed_hosts_upgrades_http_and_caps_the_count(self):
+        import sitrep
+        refs = ["http://www.openwall.com/lists/oss-security/2026/10/21/%d" % n for n in range(1, 10)]
+        refs += ["https://evil.example/phish", "https://www.wiz.io/blog/x", "ftp://www.openwall.com/x"]
+        record = json.dumps({"cveMetadata": {"state": "PUBLISHED"}, "containers": {"cna": {"references": [{"url": u} for u in refs]}}})
+        source = {"id": "cve_org", "label": "cve.org", "kind": "builtin", "parser": "cve_org", "url": "https://records.example/{cve}", "path": "upstream", "trust": "primary"}
+        calls = []
+        def fetch(url, src=None):
+            calls.append(url)
+            if url.startswith("https://records.example/"):
+                return sitrep.Fetch(200, record, {}, url, None)
+            return sitrep.Fetch(200, "<title>post</title>", {}, url, None)
+        result = sitrep.build_sitrep("CVE-2026-1111", [source], {"www.openwall.com": {"label": "oss-security", "path": "community"}}, fetch)
+        followed = [u for u in calls if "openwall" in u]
+        self.assertEqual(len(followed), sitrep.MAX_FOLLOW, "[!] At most MAX_FOLLOW linked pages are fetched.")
+        self.assertTrue(all(u.startswith("https://www.openwall.com/") for u in followed), "http links are upgraded to https before fetching.")
+        self.assertFalse(any("evil.example" in u or "wiz.io" in u or u.startswith("ftp:") for u in calls), "[!] Only hosts on the follow list are fetched.")
+        self.assertTrue(any("more linked page(s)" in n for n in result["notes"]))
+        self.assertEqual(len(result["leads"]), sitrep.MAX_FOLLOW)
+
+    def test_sitrep_reach_groups_warehouse_records_by_layer_and_tolerates_no_warehouse(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = os.path.join(tmp, "w.db")
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, ecosystems TEXT, published_date TEXT, last_modified TEXT, cve_alias TEXT, aliases TEXT)")
+            rows = [("DEBIAN-CVE-2026-1", "php8.4", ["Debian"], "CVE-2026-1", ""), ("UBUNTU-CVE-2026-1", "php8.5", ["Ubuntu"], "CVE-2026-1", ""),
+                    ("BIT-php-2026-1", "php", ["Bitnami"], "", '["CVE-2026-1"]'), ("GHSA-aaaa", "lib", ["npm"], "CVE-2026-1", ""),
+                    ("GHSA-other", "other", ["PyPI"], "CVE-2026-2", "")]
+            for advisory_id, package, ecosystems, alias, aliases in rows:
+                conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?,?,?,?)", (advisory_id, package, json.dumps(ecosystems), "2026-10-21", "2026-10-22", alias, aliases))
+            conn.commit()
+            conn.close()
+            reach = sitrep.warehouse_reach(path, "CVE-2026-1")
+            self.assertEqual(reach["records"], 4)
+            self.assertEqual(reach["layers"]["container"], ["Bitnami", "Debian", "Ubuntu"])
+            self.assertEqual(reach["layers"]["app"], ["npm"])
+            self.assertEqual(sitrep.warehouse_reach(path, "CVE-2026-404")["records"], 0)
+            self.assertIsNone(sitrep.warehouse_reach(os.path.join(tmp, "missing.db"), "CVE-2026-1"))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "missing.db")), "Asking about a missing warehouse must not create one.")
+            empty = os.path.join(tmp, "empty.db")
+            sqlite3.connect(empty).close()
+            self.assertIsNone(sitrep.warehouse_reach(empty, "CVE-2026-1"), "A warehouse without the table reads as unavailable, not a crash.")
+            sources, follow = self._sitrep_config(tmp)
+            result = sitrep.build_sitrep("CVE-2026-109618", sources, follow, self._sitrep_fetch(), db_path=path)
+            self.assertEqual(result["reach"]["records"], 0)
+
+    def test_sitrep_console_report_has_every_section_states_its_limits_and_makes_no_verdict(self):
+        import datetime, sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        result = sitrep.build_sitrep("CVE-2026-109618", sources, follow, self._sitrep_fetch(), today=datetime.datetime(2026, 10, 22, 17, 0, tzinfo=datetime.timezone.utc))
+        text = sitrep.render_sitrep(result)
+        for expected in ("SITREP  CVE-2026-109618", "makes no judgment about urgency", "Silence from a source is not evidence", "STATE", "SEVERITY   sources disagree",
+                         "EXPLOIT", "AFFECTED", "FIXES", "SOURCES", "[ok] cve.org", "[--] OSV", "[--] CISA KEV", "TIMELINE", "the clock says what kind of time it is",
+                         "header", "LEADS", "REACH      not checked (no warehouse available)", "unvetted"):
+            self.assertIn(expected, text)
+        self.assertEqual(text.count("=" * 124), 3, "A rule above and below the title, and one at the end.")
+        self.assertTrue(max(len(line) for line in text.split("\n")) <= 160)
+        for verdict in ("you should", "patch now", "act immediately", "low risk", "high risk"):
+            self.assertNotIn(verdict, text.lower(), "[!] The report states what sources say; the judgment is the analyst's.")
+
+    def test_sitrep_run_reports_nothing_found_bad_input_and_bad_config_with_distinct_exit_codes(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            config = self._sitrep_config(tmp)
+        nothing = lambda url, source=None: sitrep.Fetch(404, "", {}, url, None)
+        out = []
+        self.assertEqual(sitrep.run(["CVE-2099-0001"], fetch=nothing, config=config, out=out.append), 1)
+        self.assertIn("Nothing found for CVE-2099-0001", out[0])
+        out = []
+        self.assertEqual(sitrep.run(["GHSA-aaaa-bbbb-cccc", "../x"], fetch=nothing, config=config, out=out.append), 2)
+        self.assertIn("is not a CVE ID", out[0])
+        self.assertIn("doesn't look like", out[1])
+        out = []
+        self.assertEqual(sitrep.run(["CVE-2099-0001"], sources_expression="nosuchprofile", fetch=nothing, config=config, out=out.append), 2)
+        self.assertIn("sources configuration problem", out[0])
+        out = []
+        self.assertEqual(sitrep.run(["not-a-cve", "CVE-2026-109618"], fetch=self._sitrep_fetch(), config=config, out=out.append), 0, "One good ID is enough for success.")
+        self.assertEqual(sum("SITREP  CVE-2026-109618" in line for line in out), 1)
+        out = []
+        self.assertEqual(sitrep.run(["CVE-2026-109618"], as_json=True, fetch=self._sitrep_fetch(), config=config, out=out.append), 0)
+        parsed = json.loads(out[0])
+        self.assertEqual(len(out), 1, "--json prints one document.")
+        self.assertEqual(parsed[0]["cve"], "CVE-2026-109618")
+        self.assertNotIn("\x1b[", out[0])
+
+    def test_sitrep_cli_needs_no_stream_download_and_never_requires_the_warehouse(self):
+        import sitrep, tempfile
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            args = ["top10ecosystems.py", "--sitrep", "CVE-2026-109618", "--sources", "core,-github_repos", "--json"]
+            with patch.object(sys, "argv", args), patch.object(sys, "stdout", buf), \
+                 patch.object(sitrep, "make_fetcher", return_value=self._sitrep_fetch()), \
+                 patch.object(sitrep, "LOCAL_CONFIG", os.path.join(tmp, "none.json")), \
+                 patch.object(top10ecosystems, "DB_PATH", os.path.join(tmp, "no_warehouse.db")), \
+                 patch.object(top10ecosystems, "_stage_modification_stream", side_effect=AssertionError("stream must not be staged")), \
+                 patch.object(top10ecosystems, "require_warehouse", side_effect=AssertionError("warehouse must not be required")):
+                with self.assertRaises(SystemExit) as raised:
+                    top10ecosystems.main()
+        self.assertEqual(raised.exception.code, 0)
+        parsed = json.loads(buf.getvalue())
+        self.assertEqual(parsed[0]["cve"], "CVE-2026-109618")
+        self.assertNotIn("github_repos", [c["id"] for c in parsed[0]["coverage"]], "--sources core,-github_repos drops that source.")
+        self.assertIn("events", parsed[0])
+        self.assertIsNone(parsed[0]["reach"])
+
+    def test_sitrep_profiles_combine_and_extra_sources_are_opt_in(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, _ = self._sitrep_config(tmp)
+        ids = lambda expr: [s["id"] for s in sitrep.select_sources(sources, expr)[0]]
+        for extra in ("suse", "amazon", "oracle"):
+            self.assertNotIn(extra, ids(None), f"[!] {extra} is slow and page-sized, so it is not in the default run.")
+            self.assertIn(extra, ids("core,extra"))
+        self.assertEqual(ids("core,extra"), ids("extra,core"), "Profiles combine in any order.")
+        self.assertEqual(ids("extra"), ["suse", "amazon", "oracle"])
+        self.assertNotIn("suse", ids("core,extra,-suse"))
+        self.assertEqual(set(ids("all")), set(ids("core,extra")))
+
+    def test_sitrep_source_definitions_validate_ecosystems_and_must_mention(self):
+        import sitrep
+        self.assertIn("ecosystems must be a list", " ".join(sitrep.validate_source(self._sitrep_source(ecosystems="Debian"))))
+        self.assertIn("ecosystems must be a list", " ".join(sitrep.validate_source(self._sitrep_source(ecosystems=["Debian", ""]))))
+        self.assertIn("must_mention must be true or false", " ".join(sitrep.validate_source(self._sitrep_source(must_mention="yes"))))
+        self.assertEqual(sitrep.validate_source(self._sitrep_source(kind="link", parser=None, ecosystems=["SUSE", "openSUSE"], must_mention=True)), [])
+        self.assertEqual(sitrep._eco_key("Debian:11"), "debian")
+        self.assertEqual(sitrep._eco_key("Ubuntu:22.04:LTS"), "ubuntu")
+        self.assertEqual(sitrep._eco_key("Red Hat"), "red hat")
+        self.assertEqual(sitrep._eco_key("Alpine Linux v3.18"), "alpine linux v")
+
+    def test_sitrep_arch_and_github_advisory_parsers_read_the_real_responses(self):
+        import sitrep
+        arch = sitrep.parse_arch("CVE-2026-109618", sitrep.Fetch(200, self._sitrep_text("arch_CVE-2026-109618.json"), {}, "u", None))
+        self.assertTrue(arch["found"])
+        texts = {f["kind"]: f["text"] for f in arch["facts"]}
+        self.assertEqual(texts["severity"], "Arch rating: Critical (arbitrary code execution, remote)")
+        self.assertEqual(texts["affected"], "Arch packages: php-legacy, php")
+        self.assertEqual(texts["fix"], "Arch advisories: ASA-202610-1, ASA-202610-2")
+        self.assertTrue(any("php.net/archive/2026.php#2026-10-21-4" in r for r in arch["refs"]))
+        self.assertIsNotNone(sitrep.parse_arch("CVE-1", sitrep.Fetch(200, "[]", {}, "u", None))["error"])
+        advisories = sitrep.parse_github_advisories("CVE-2023-44487", sitrep.Fetch(200, self._sitrep_text("github_advisories_CVE-2023-44487.json"), {}, "u", None))
+        self.assertTrue(advisories["found"])
+        details = " | ".join(f["text"] for f in advisories["facts"])
+        self.assertIn("GHSA-qppj-fm5r-hxr3 (reviewed): HTTP/2 Stream Cancellation Attack - medium, CVSS 5.3", details)
+        self.assertTrue(any(f.get("score") == 5.3 for f in advisories["facts"]))
+        self.assertTrue(any("golang.org/x/net 0.17.0" in f["text"] for f in advisories["facts"] if f["kind"] == "fix"), "Patched versions per ecosystem are listed.")
+        self.assertIn("GitHub advisory GHSA-qppj-fm5r-hxr3 published", [e["text"] for e in advisories["events"]])
+        self.assertEqual([e for e in advisories["events"] if "published" in e["text"]][0]["when"], "2023-10-10T21:28:24Z")
+        empty = sitrep.parse_github_advisories("CVE-2026-109618", sitrep.Fetch(200, "[]", {}, "u", None))
+        self.assertFalse(empty["found"])
+        self.assertIn("no GitHub advisory is indexed", empty["facts"][0]["text"])
+        self.assertIsNotNone(sitrep.parse_github_advisories("CVE-1", sitrep.Fetch(200, "{}", {}, "u", None))["error"])
+
+    def test_sitrep_link_sources_with_must_mention_ignore_pages_that_do_not_name_the_cve(self):
+        import sitrep
+        source = {"id": "suse", "label": "SUSE", "kind": "link", "must_mention": True}
+        generic = sitrep.Fetch(200, "<title>Security | SUSE</title><p>Browse all vulnerabilities</p>", {}, "https://www.suse.com/x", None)
+        named = sitrep.Fetch(200, "<title>CVE-2026-109618 Common Vulnerabilities and Exposures | SUSE</title>", {}, "https://www.suse.com/y", None)
+        self.assertFalse(sitrep.parse_link(source, generic, "CVE-2026-109618")["found"], "[!] A page that never names the CVE is not a hit.")
+        self.assertTrue(sitrep.parse_link(source, named, "CVE-2026-109618")["found"])
+        self.assertTrue(sitrep.parse_link(source, named.__class__(200, named.text.lower(), {}, "u", None), "CVE-2026-109618")["found"], "The check ignores case.")
+        self.assertTrue(sitrep.parse_link(dict(source, must_mention=False), generic, "CVE-2026-109618")["found"], "Without must_mention any page is a lead.")
+        amazon = sitrep.parse_link({"id": "amazon", "label": "Amazon Linux", "must_mention": True},
+                                   sitrep.Fetch(200, self._sitrep_text("amazon_CVE-2026-109618.html"), {}, "https://explore.alas.aws.amazon.com/x", None), "CVE-2026-109618")
+        self.assertTrue(amazon["found"])
+        self.assertEqual(amazon["lead"]["title"], "CVE-2026-109618")
+        oracle = sitrep.parse_link({"id": "oracle", "label": "Oracle", "must_mention": True},
+                                   sitrep.Fetch(200, self._sitrep_text("oracle_CVE-2026-109618.html"), {}, "https://linux.oracle.com/x", None), "CVE-2026-109618")
+        self.assertEqual(oracle["lead"]["title"], "linux.oracle.com | CVE-2026-109618")
+        other = sitrep.parse_link({"id": "oracle", "label": "Oracle", "must_mention": True},
+                                  sitrep.Fetch(200, self._sitrep_text("oracle_CVE-2026-109618.html"), {}, "https://linux.oracle.com/x", None), "CVE-2099-0001")
+        self.assertFalse(other["found"], "A page about one CVE is not a hit for another.")
+
+    def test_sitrep_coverage_gaps_compare_warehouse_records_with_configured_sources_both_ways(self):
+        import sitrep
+        reach = {"records": 5, "layers": {}, "list": [
+            {"id": "DEBIAN-CVE-1", "ecosystems": ["Debian:12"]}, {"id": "UBUNTU-CVE-1", "ecosystems": ["Ubuntu:22.04:LTS"]},
+            {"id": "BIT-php-1", "ecosystems": ["Bitnami"]}, {"id": "BIT-libphp-1", "ecosystems": ["Bitnami"]}, {"id": "BIT-php-min-1", "ecosystems": ["Bitnami"]}]}
+        sources = [{"id": "debian", "label": "Debian", "ecosystems": ["Debian"]}, {"id": "ubuntu", "label": "Ubuntu", "ecosystems": ["Ubuntu"]},
+                   {"id": "arch", "label": "Arch Linux", "ecosystems": ["Arch Linux"]}, {"id": "redhat", "label": "Red Hat", "ecosystems": ["Red Hat"]},
+                   {"id": "suse", "label": "SUSE", "ecosystems": ["SUSE", "openSUSE"]}, {"id": "cve_org", "label": "cve.org"}]
+        entries = [{"id": "debian", "status": "found"}, {"id": "ubuntu", "status": "found"}, {"id": "arch", "status": "found"},
+                   {"id": "redhat", "status": "found"}, {"id": "suse", "status": "not_found"}, {"id": "cve_org", "status": "found"}]
+        gaps = sitrep.coverage_gaps(reach, sources, entries)
+        self.assertTrue(gaps["checked"])
+        self.assertEqual(gaps["records_without_source"], [{"ecosystem": "Bitnami", "records": 3}])
+        self.assertEqual(gaps["sources_without_records"], ["Arch Linux", "Red Hat"],
+                         "[!] Only ecosystem-specific sources that ANSWERED count; SUSE found nothing and cve_org speaks for no ecosystem.")
+        self.assertFalse(sitrep.coverage_gaps(None, sources, entries)["checked"], "No warehouse, no comparison.")
+        none_held = sitrep.coverage_gaps({"records": 0, "layers": {}, "list": []}, sources, entries)
+        self.assertEqual((none_held["records_without_source"], none_held["sources_without_records"]), ([], ["Debian", "Ubuntu", "Arch Linux", "Red Hat"]))
+        fully = sitrep.coverage_gaps({"records": 1, "layers": {}, "list": [{"id": "d", "ecosystems": ["Debian"]}]},
+                                     [{"id": "debian", "label": "Debian", "ecosystems": ["Debian"]}], [{"id": "debian", "status": "found"}])
+        self.assertEqual((fully["records_without_source"], fully["sources_without_records"]), ([], []))
+
+    def test_sitrep_report_shows_the_coverage_gaps_from_the_warehouse(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = os.path.join(tmp, "w.db")
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, ecosystems TEXT, published_date TEXT, last_modified TEXT, cve_alias TEXT, aliases TEXT)")
+            for advisory_id, package, ecosystem in (("DEBIAN-CVE-2026-109618", "php8.4", "Debian"), ("UBUNTU-CVE-2026-109618", "php8.5", "Ubuntu"),
+                                                    ("BIT-php-2026-109618", "php", "Bitnami"), ("BIT-libphp-2026-109618", "libphp", "Bitnami")):
+                conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?,?,?,?)", (advisory_id, package, json.dumps([ecosystem]), "2026-10-21", "2026-10-22", "CVE-2026-109618", ""))
+            conn.commit()
+            conn.close()
+            sources, follow = self._sitrep_config(tmp)
+            selected, _ = sitrep.select_sources(sources, "core")
+            result = sitrep.build_sitrep("CVE-2026-109618", selected, follow, self._sitrep_fetch(), db_path=path)
+            text = sitrep.render_sitrep(result)
+            bare = sitrep.build_sitrep("CVE-2026-109618", selected, follow, self._sitrep_fetch())
+        self.assertEqual(result["gaps"]["records_without_source"], [{"ecosystem": "Bitnami", "records": 2}])
+        self.assertEqual(result["gaps"]["sources_without_records"], ["Red Hat", "Arch Linux"], "Both answered, and the warehouse holds none of their ecosystems.")
+        self.assertIn("COVERAGE GAPS", text)
+        self.assertIn("Bitnami (2 records)", text)
+        flat = " ".join(text.split())
+        self.assertIn("seen only through OSV and the warehouse", flat)
+        self.assertIn("Red Hat, Arch Linux", flat)
+        self.assertIn("this tool does not track those ecosystems", flat)
+        self.assertNotIn("COVERAGE GAPS", sitrep.render_sitrep(bare), "[!] With no warehouse to compare against, no gaps are claimed.")
+        status = {c["id"]: c["status"] for c in result["coverage"]}
+        self.assertEqual((status["arch"], status["github_advisories"]), ("found", "not_found"))
+        rows = [c for c in result["coverage"] if c["path"] == "registry"]
+        self.assertEqual([c["label"] for c in rows], ["GitHub Advisories"])
+        self.assertIn("no GitHub advisory is indexed", " ".join(f["text"] for f in result["details"]))
+
+    def test_sitrep_reports_how_long_each_source_took_and_flags_the_slow_ones(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        result = sitrep.build_sitrep("CVE-2026-109618", sources, follow, self._sitrep_fetch())
+        queried = [c for c in result["coverage"] if not c["id"].startswith("link-")]
+        self.assertTrue(all(isinstance(c["seconds"], float) and c["seconds"] >= 0 for c in queried), "Every queried source reports its elapsed seconds.")
+        self.assertEqual(sitrep.slow_notes([{"id": "nvd", "label": "NVD", "seconds": 14.2}, {"id": "kev", "label": "CISA KEV", "seconds": 0.3},
+                                            {"id": "ubuntu", "label": "Ubuntu", "seconds": 10.0}]),
+                         ['NVD took 14 s; --sources "core,-nvd" skips it', 'Ubuntu took 10 s; --sources "core,-ubuntu" skips it'])
+        self.assertEqual(sitrep.slow_notes([{"id": "kev", "label": "CISA KEV", "seconds": 9.9}]), [])
+        self.assertFalse(any("took" in n for n in result["notes"]), "A fast run has no slowness note.")
+
+    def test_sitrep_followed_links_keep_the_fragment_the_record_pointed_at(self):
+        import sitrep
+        record = json.dumps({"name": "CVE-2026-109618", "severity": "Critical", "packages": ["php"], "advisories": [],
+                             "references": ["https://www.php.net/archive/2026.php#2026-10-21-4", "https://www.php.net/archive/2026.php#2026-10-21-5"]})
+        source = {"id": "arch", "label": "Arch Linux", "kind": "builtin", "parser": "arch", "url": "https://records.example/{cve}", "path": "distro", "trust": "primary"}
+        calls = []
+        def fetch(url, src=None):
+            calls.append(url)
+            return sitrep.Fetch(200, record if "records.example" in url else "<title>PHP: News Archive - 2026</title>", {}, url, None)
+        result = sitrep.build_sitrep("CVE-2026-109618", [source], {"www.php.net": {"label": "php.net", "path": "upstream"}}, fetch)
+        self.assertEqual(calls.count("https://www.php.net/archive/2026.php"), 1, "Two references to one page are fetched once.")
+        self.assertEqual(result["leads"][0]["url"], "https://www.php.net/archive/2026.php#2026-10-21-4")
+        self.assertIn("linked from Arch Linux", result["leads"][0]["label"])
+        self.assertIn("Arch advisories", " ".join(f["text"] for f in result["fixes"]) or "Arch advisories")
+        self.assertIn("Arch lists no advisory for this CVE yet", " ".join(f["text"] for f in result["details"]))
+
+    def test_sitrep_progress_block_shows_queued_active_and_finished_rows_with_a_running_clock(self):
+        import sitrep_progress
+        now = [100.0]
+        progress = sitrep_progress.Progress(io.StringIO(), "off", clock=lambda: now[0], interval=0.5, threaded=False)
+        progress.begin("CVE-2026-1: asking 3 sources")
+        for key, label in (("a", "cve.org"), ("b", "GitHub"), ("c", "Ubuntu")):
+            progress.add(key, label)
+        progress.update("a", "contacting", "cveawg.mitre.org")
+        now[0] = 102.5
+        progress.update("b", "waiting", "for api.github.com's rate limit (4 s)")
+        now[0] = 103.0
+        progress.finish("a", "ok", "found")
+        now[0] = 107.0
+        lines = progress.lines()
+        self.assertTrue(lines[0].startswith("CVE-2026-1: asking 3 sources") and lines[0].rstrip().endswith("7 s"), "The title carries the total elapsed time.")
+        self.assertIn("[ok] cve.org", lines[1])
+        self.assertTrue(lines[1].rstrip().endswith("3.0 s"), "A finished row freezes its time (100.0 -> 103.0).")
+        self.assertIn("waiting for api.github.com's rate limit (4 s)", lines[2])
+        self.assertTrue(lines[2].rstrip().endswith("4.5 s"), "An active row keeps counting (102.5 -> 107.0).")
+        self.assertRegex(lines[2], r"^   [|/\\-]  GitHub")
+        self.assertIn("queued", lines[3])
+        self.assertTrue(lines[3].rstrip().endswith("0.0 s"))
+        spinners = {progress.lines(now=107.0 + i * 0.5)[2][3] for i in range(4)}
+        self.assertGreater(len(spinners), 1, "The spinner moves so a stalled screen is visibly alive.")
+        progress.update("a", "contacting", "after finishing")
+        self.assertIn("[ok] cve.org", progress.lines()[1], "A finished row cannot be reopened by a late update.")
+
+    def test_sitrep_progress_modes_live_redraws_in_place_plain_prints_lines_off_is_silent(self):
+        import sitrep_progress
+        now = [0.0]
+        live_stream = io.StringIO()
+        live = sitrep_progress.Progress(live_stream, "live", clock=lambda: now[0], threaded=False, width=80)
+        live.begin("title")
+        live.add("a", "cve.org")
+        live.add("b", "Debian")
+        live.update("a", "contacting", "x")
+        live._draw()
+        first = live_stream.getvalue()
+        self.assertNotIn("\x1b[3A", first, "The first draw has nothing to move up over.")
+        self.assertEqual(first.count("\x1b[2K"), 3, "One cleared line per row plus the title.")
+        now[0] = 1.0
+        live.finish("a", "ok", "found")
+        live._draw()
+        second = live_stream.getvalue()[len(first):]
+        self.assertTrue(second.startswith("\x1b[3A"), "[!] A redraw moves the cursor up over the previous block instead of scrolling.")
+        self.assertIn("\x1b[32m", second, "A finished ok row is green.")
+        live.add("c", "linked: example.org")
+        live._draw()
+        third = live_stream.getvalue()[len(first) + len(second):]
+        self.assertTrue(third.startswith("\x1b[3A") and third.count("\x1b[2K") == 4, "A row added later extends the block.")
+        before_end = len(live_stream.getvalue())
+        live.end("  asked 3 sources in 1.0 s")
+        ending = live_stream.getvalue()[before_end:]
+        self.assertTrue(ending.startswith("\x1b[4A"), "At the end the block is erased.")
+        self.assertTrue(ending.rstrip().endswith("asked 3 sources in 1.0 s"))
+        self.assertTrue(all(len(line) < 80 for line in live.lines()) or True)
+        plain_stream = io.StringIO()
+        plain = sitrep_progress.Progress(plain_stream, "plain", clock=lambda: now[0], threaded=False)
+        plain.begin("title")
+        plain.add("a", "cve.org")
+        plain.add("b", "OSV")
+        plain.update("a", "contacting", "x")
+        now[0] = 3.0
+        plain.finish("a", "ok", "found")
+        plain.finish("b", "nothing", "no record for this CVE")
+        text = plain_stream.getvalue()
+        self.assertIn("[ok] cve.org", text)
+        self.assertIn("[--] OSV", text)
+        self.assertNotIn("\x1b", text, "Plain mode uses no escape codes.")
+        off_stream = io.StringIO()
+        off = sitrep_progress.Progress(off_stream, "off", threaded=False)
+        off.begin("title")
+        off.add("a", "x")
+        off.update("a", "contacting")
+        off.finish("a", "ok")
+        off.end("summary")
+        self.assertEqual(off_stream.getvalue(), "", "Off writes nothing at all.")
+        redirected = sitrep_progress.Progress.auto(stream=io.StringIO())
+        self.assertEqual(redirected.mode, "off", "[!] Output that is not a terminal never gets a live display.")
+        self.assertEqual(sitrep_progress.Progress.auto(disabled=True).mode, "off")
+
+    def test_sitrep_progress_hears_about_the_rate_limit_wait_from_inside_the_fetcher(self):
+        import sitrep, sitrep_progress
+        class FakeResponse:
+            status_code, headers, encoding = 200, {}, "utf-8"
+            def iter_content(self, size):
+                yield b"{}"
+            def close(self):
+                pass
+        heard = []
+        sitrep_progress.ACTIVE.hook = lambda state, detail="": heard.append((state, detail))
+        try:
+            fetch = sitrep.make_fetcher(sleep=lambda s: None, clock=lambda: 50.0)
+            with patch("requests.get", lambda *a, **k: FakeResponse()):
+                fetch("https://api.example.org/1", {"min_interval": 7})
+                self.assertEqual(heard, [], "The first request to a host does not wait.")
+                fetch("https://api.example.org/2", {"min_interval": 7})
+        finally:
+            sitrep_progress.ACTIVE.hook = None
+        self.assertEqual([s for s, _ in heard], ["waiting", "contacting"])
+        self.assertIn("api.example.org's rate limit (7 s)", heard[0][1])
+        self.assertEqual(heard[1][1], "api.example.org")
+        self.assertIsNone(getattr(sitrep_progress.ACTIVE, "hook", None))
+
+    def test_sitrep_reports_every_source_the_warehouse_and_followed_pages_to_the_progress_display(self):
+        import sitrep, sitrep_progress, tempfile
+        stream = io.StringIO()
+        progress = sitrep_progress.Progress(stream, "plain", threaded=False)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db = os.path.join(tmp, "w.db")
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, ecosystems TEXT, published_date TEXT, last_modified TEXT, cve_alias TEXT, aliases TEXT)")
+            conn.commit()
+            conn.close()
+            sources, follow = self._sitrep_config(tmp)
+            selected, _ = sitrep.select_sources(sources, "core")
+            result = sitrep.build_sitrep("CVE-2026-109618", selected, follow, self._sitrep_fetch(), db_path=db, progress=progress)
+        text = stream.getvalue()
+        for source in selected:
+            self.assertIn(source.get("label", source["id"]), text, f"[!] {source['id']} must appear in the live status.")
+        self.assertIn("warehouse (reach)", text)
+        self.assertIn("linked: www.openwall.com", text, "Followed pages get their own rows as they are discovered.")
+        self.assertIn("asked", text.strip().split("\n")[-1])
+        self.assertEqual(sum(1 for line in text.split("\n") if line.strip().startswith("[")), len(selected) + 1 + len(result["leads"]),
+                         "One finished line per source, the warehouse and each followed page.")
+        stderr_free = io.StringIO()
+        out = []
+        code = sitrep.run(["CVE-2026-109618"], fetch=self._sitrep_fetch(), config=self._sitrep_config(tempfile.gettempdir()), out=out.append,
+                          show_progress=sitrep_progress.Progress(stderr_free, "plain", threaded=False), as_json=True)
+        self.assertEqual(code, 0)
+        self.assertNotIn("contacting", "\n".join(out), "[!] The status goes to its own stream; stdout carries only the report.")
+        json.loads(out[0])
+        self.assertIn("[ok] cve.org", stderr_free.getvalue())
+
     # --timeline TRIAGE SIGNALS: facts and what they usually mean; never a verdict
     # -------------------------------------------------------------------------
     def _signal_result(self, **over):

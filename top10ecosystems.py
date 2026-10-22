@@ -4317,7 +4317,10 @@ def main():
     parser.add_argument("--crosscheck-limit", type=int, default=100, metavar="N", help="Cap console output to the top N rows (default 100). Use 0 for no cap. Never affects --crosscheck-export.")
     parser.add_argument("--priority-sort", action="store_true", help="Also render Sections VI/VII ranked by KEV -> EPSS -> CVSS and by EPSS -> CVSS, alongside the default CVSS ranking, and apply the KEV-first ranking to --trends.")
     parser.add_argument("--timeline", nargs="+", metavar="ID", help="Dated history of one or more CVE/advisory IDs (published, reviewed, KEV, EPSS, per-tracker lag, fixes). Fetches live from OSV, CISA KEV and FIRST; needs no warehouse.")
-    parser.add_argument("--json", action="store_true", help="With --timeline: print the structured result as JSON instead of the console report.")
+    parser.add_argument("--sitrep", nargs="+", metavar="CVE", help="Situation report for one or more CVE IDs: what a configurable list of trusted sources (cve.org, NVD, KEV, EPSS, Red Hat, Ubuntu, Debian, GitHub, OSV) say, with the clock behind every time, and which warehouse layers it has reached. Works when OSV has no record under the CVE ID yet. Sources live in sitrep_sources.json (personal changes in sitrep_sources.local.json).")
+    parser.add_argument("--sources", type=str, help='With --sitrep: which sources to ask: a profile ("core" is the default, "all" for everything enabled) then +id / -id, e.g. --sources "core,-github_repos".')
+    parser.add_argument("--no-progress", action="store_true", help="With --sitrep: do not show the live status (which source is being contacted, and for how long) on stderr.")
+    parser.add_argument("--json", action="store_true", help="With --timeline or --sitrep: print the structured result as JSON instead of the console report.")
     args = parser.parse_args()
     
     if args.hunt_retracted:
@@ -4339,6 +4342,10 @@ def main():
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.report)
         return
 
+    if args.sitrep:
+        # Live lookups plus an optional read-only look at the warehouse: no modification-stream download, so this runs before that staging.
+        import sitrep
+        sys.exit(sitrep.run(args.sitrep, sources_expression=args.sources, as_json=args.json, db_path=DB_PATH, show_progress=False if args.no_progress else "auto"))
     if args.timeline:
         # Live lookups only: no warehouse and no modification-stream download, so this runs before that staging.
         import timeline

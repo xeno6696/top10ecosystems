@@ -202,6 +202,52 @@ Things it does on purpose: the ID you pass and the main CVE always get their own
 
 ---
 
+## 🔭 Situation Report (`--sitrep`)
+
+`--timeline` starts from OSV, but a new CVE can exist for hours or days before OSV has a record under its own ID (CVE-2026-109618 existed only as Debian, Ubuntu and Bitnami records at first). `--sitrep` asks a configurable list of trusted sources about one CVE in a single pass and lays out what each one says.
+
+```bash
+python top10ecosystems.py --sitrep CVE-2026-109618
+python top10ecosystems.py --sitrep CVE-2026-109618 CVE-2026-109619 --json        # one JSON array
+python top10ecosystems.py --sitrep CVE-2026-109618 --sources "core,-github_repos,-github_oldest"   # skip sources
+python top10ecosystems.py --sitrep CVE-2026-109618 --sources "core,extra"                          # add SUSE, Amazon Linux, Oracle Linux
+```
+
+Exit code: `0` something was found, `1` nothing was, `2` bad ID or configuration.
+
+**Live status.** A run takes 10 to 35 seconds: requests to GitHub are paced to its public rate limit, and the network or DNS is sometimes slow. While it works, a block on **stderr** shows each source's state with a spinner and a running seconds counter (`contacting cveawg.mitre.org`, `waiting for api.github.com's rate limit`, `[ok] Debian ... 0.2 s`), plus the warehouse lookup and any linked pages as they are found. It is erased when the run ends, leaves one summary line, and never touches stdout, so `--json` stays clean. A terminal that cannot redraw gets one line per finished source; redirected output gets nothing; `--no-progress` turns it off. `--json` also carries each source's elapsed seconds, and any source over 10 seconds is noted with the `--sources` expression that skips it.
+
+**What it shows:** the CVE record's state (cve.org, NVD), every CVSS score each source gave (shown side by side, never merged: 9.2 vs 9.8 vs 8.1 is a finding), exploitation signals (CISA KEV, EPSS, CISA's SSVC assessment, and an *unvetted* GitHub repository sample), who ships a fix (Debian, Ubuntu, Red Hat, Arch Linux; SUSE, Amazon Linux and Oracle Linux as link-only leads in the opt-in `extra` profile), whether GitHub's advisory database (which aggregates most package registries) has an entry, what OSV itself has, which warehouse layers the CVE has reached (container vs app; from the warehouse if one exists), and a timeline across all of it.
+
+**Coverage gaps.** When a warehouse is available, the report sets its records for the CVE against the sources configured, both ways: ecosystems that have warehouse records but no source of their own (Bitnami, for example, is seen only through OSV and the warehouse), and ecosystem-specific sources that answered while the warehouse holds nothing for their ecosystem (OSV has not ingested them yet, or this tool does not track those ecosystems). A source declares the ecosystems it speaks for with `ecosystems`.
+
+**Clocks.** Every timeline row says what kind of time it is: `declared` (the source's own timestamp), `header` (an email or HTTP date), `ingested` (when a feed picked it up) or `approximate` (read from prose). They are not directly comparable, and no channel is assumed to hear first; the order comes from the data. A time of exactly midnight is shown as a date, never an invented hour, and a linked page gets a timeline row only if it states a date about itself (an email's `Date:` header or an article timestamp); an HTTP `Last-Modified` header or an index page's first `<time>` tag is ignored, since a wrong time is worse than none.
+
+**It makes no verdict.** A source that is silent shows as `[--]` in the coverage list, an unreachable one as `[!!]`, a refused one as `[xx]`; none of that is evidence the CVE is quiet. Pages that records link to (for example an oss-security post) are fetched only when their host is on the follow list, and appear as leads with a title and date for you to read.
+
+**Sources are data, not code.** `sitrep_sources.json` ships the defaults. Put personal changes in `sitrep_sources.local.json` (git-ignored); an entry with an existing id overrides only the fields it names, a new id adds a source:
+
+```json
+{"sources": [
+  {"id": "github_repos", "enabled": false},
+  {"id": "vendor_x", "label": "Vendor X", "kind": "link", "url": "https://vendor.example/advisories/{cve}",
+   "path": "vendor", "trust": "lead", "profiles": ["core"]}],
+ "follow_hosts": {"blog.example": {"label": "a blog", "path": "community"}}}
+```
+
+- `kind`: `builtin` (a parser shipped with the tool), `link` (only points at a page: title and date) or `json` (named fields read by dotted path: `fields: {"published": "meta.when", "severity": "scores.0.value"}`).
+- `path` says how the fact reached us (`upstream`, `records`, `registry`, `distro`, `vendor`, `exploitation`, `community`, `osv`); `trust` says whether the source is the authority for what it states (`primary`) or a pointer to go and read (`lead`).
+- `profiles` group sources: `--sources core` is the default, `--sources all` is everything enabled, profiles combine (`core,extra`), and `+id` / `-id` adjust the result.
+- `ecosystems` lists the OSV ecosystems a source speaks for (`["Debian"]`), which feeds the coverage-gap report. `must_mention: true` makes a link source count as found only if the page names the CVE, so a generic page for a CVE the site has never heard of is not mistaken for a hit.
+- Optional rate limits and credentials: `min_interval` seconds between requests to a host, and `token_env` naming an environment variable (for example `GITHUB_TOKEN`, `NVD_API_KEY`) whose value is sent only to that source's own host. Tokens are never stored.
+- There are no executable plugins; a parser for a new structured format is a change to `sitrep.py`.
+
+**Safety.** The config is the allow-list: HTTPS GET only, no private, loopback or internal hosts, no credentials in URLs, redirects must stay on the same host, responses are size-capped, and fetched text is only parsed, never followed as instructions. GitHub repositories mentioning a CVE are metadata only; the tool never clones or downloads them, and such repositories can be fake or malicious.
+
+**What it cannot show.** It reports what sources publish at the moment you ask; OSV and the others keep only their latest state, so it cannot say what changed between two asks. GitHub cannot sort repositories by creation date, so the "oldest activity" row is a sample, not a proven first. A watch mode that remembers earlier runs is not built yet.
+
+---
+
 ## 📊 Historical Trend Charting (`--velocity` / `--report`)
 
 Two related but separate tools for looking at churn over time instead of a single window:
