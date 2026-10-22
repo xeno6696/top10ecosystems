@@ -296,9 +296,12 @@ def compress_epss(series, step=EPSS_STEP) -> list:
 
 
 def parse_epss(payload) -> list:
-    """Oldest-first [{'date','score','percentile'}] from FIRST's time-series response, or []."""
+    """Oldest-first [{'date','score','percentile'}] from FIRST's time-series response, or [].
+    FIRST answers a CVE with history with a "time-series" list, but a CVE it scored for the first time gets one flat
+    row (that day's score, same fields, no list); both are read, so a day-old CVE still shows its first score."""
     try:
-        raw = payload["data"][0]["time-series"]
+        row = payload["data"][0]
+        raw = row["time-series"] if "time-series" in row else [row]
         series = [{"date": p["date"], "score": float(p["epss"]), "percentile": float(p["percentile"])} for p in raw]
     except (KeyError, IndexError, TypeError, ValueError):
         return []
@@ -401,6 +404,10 @@ def build_timeline(raw_id, get=default_get, today=None, max_records=MAX_RECORDS,
     fetched, failed, known = gather_records(root, get, max_records, max_per_tracker)
     for record_id, error in failed.items():
         notes.append(f"OSV record {record_id} unavailable ({error})")
+    if not fetched and root.upper().startswith("CVE-"):
+        notes.append("OSV has no record under this CVE ID. That is normal for a CVE only vendors have published so far: their records "
+                     "mention the CVE, but OSV cannot be searched from the CVE side. Try a vendor ID (for example DEBIAN-" + root.upper() + ") "
+                     "or look the CVE up in the warehouse.")
 
     candidates = find_cves(root, fetched, known)
     cve_id, kev, epss_series = (candidates[0] if candidates else None), None, []
@@ -598,9 +605,10 @@ def render_timeline(result, today=None) -> str:
         lines.append(f"    EPSS:         {_pct(epss['score'])} (percentile {epss['percentile'] * 100:.1f}), {_trend(epss)} over the last week; "
                      f"{_pct(epss['window_start_score'])} at {epss['window_start_date']}")
     fixed_in = sorted({fv["ecosystem"] for fv in result["fixed_versions"]})
-    fix_text = "available in " + ", ".join(fixed_in[:5]) + (f", +{len(fixed_in) - 5} more" if len(fixed_in) > 5 else "") if fixed_in else "no fixed version in the records"
+    fix_text = "available in " + ", ".join(fixed_in[:5]) + (f", +{len(fixed_in) - 5} more" if len(fixed_in) > 5 else "") if fixed_in else ("no fixed version in the records" if result["records"] else "unknown (no OSV records to read fixes from)")
     lines.append(f"    Fix:          {fix_text}")
-    lines.append(f"    Withdrawn:    {'yes (' + ', '.join(g['withdrawn']) + ')' if g['withdrawn'] else 'no'}")
+    withdrawn_text = ("yes (" + ", ".join(g["withdrawn"]) + ")" if g["withdrawn"] else "no") if result["records"] else "unknown (no OSV records)"
+    lines.append(f"    Withdrawn:    {withdrawn_text}")
     lines.append("")
     for note in result["notes"]:
         lines.append(f"  {YELLOW}[!] {note}{RESET}")
