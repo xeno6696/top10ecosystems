@@ -182,6 +182,8 @@ def validate_source(source) -> list:
         problems.append(f"{name}: ecosystems must be a list of ecosystem names, e.g. [\"Debian\"]")
     if "must_mention" in source and not isinstance(source["must_mention"], bool):
         problems.append(f"{name}: must_mention must be true or false")
+    if "watch_every" in source and (not isinstance(source["watch_every"], int) or isinstance(source["watch_every"], bool) or source["watch_every"] < 1):
+        problems.append(f"{name}: watch_every must be a whole number of polls, 1 or more")
     if "profiles" in source and not (isinstance(source["profiles"], list) and all(isinstance(p, str) for p in source["profiles"])):
         problems.append(f"{name}: profiles must be a list of names")
     if source.get("token_env") is not None and not re.fullmatch(r"[A-Z][A-Z0-9_]{1,60}", str(source["token_env"])):
@@ -543,7 +545,9 @@ def parse_epss(cve, fetch):
     last = series[-1]
     facts = [{"kind": "exploitation", "text": f"EPSS {last['score'] * 100:.1f}% (percentile {last['percentile'] * 100:.1f}) as of {last['date']}"
               + (f"; first scored {series[0]['date']}" if len(series) == 1 else f"; {series[0]['score'] * 100:.1f}% on {series[0]['date']}")}]
-    return _result(True, facts, [_event(series[0]["date"], "declared", "first EPSS score")])
+    # FIRST keeps 30 days of history: beyond that the first date is only the start of a rolling window, not an event.
+    first_score = [_event(series[0]["date"], "declared", "first EPSS score")] if len(series) < 30 else []
+    return _result(True, facts, first_score)
 
 
 def parse_kev(cve, fetch):

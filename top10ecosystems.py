@@ -4319,6 +4319,10 @@ def main():
     parser.add_argument("--timeline", nargs="+", metavar="ID", help="Dated history of one or more CVE/advisory IDs (published, reviewed, KEV, EPSS, per-tracker lag, fixes). Fetches live from OSV, CISA KEV and FIRST; needs no warehouse.")
     parser.add_argument("--sitrep", nargs="+", metavar="CVE", help="Situation report for one or more CVE IDs: what a configurable list of trusted sources (cve.org, NVD, KEV, EPSS, Red Hat, Ubuntu, Debian, GitHub, OSV) say, with the clock behind every time, and which warehouse layers it has reached. Works when OSV has no record under the CVE ID yet. Sources live in sitrep_sources.json (personal changes in sitrep_sources.local.json).")
     parser.add_argument("--sources", type=str, help='With --sitrep: which sources to ask: a profile ("core" is the default, "all" for everything enabled) then +id / -id, e.g. --sources "core,-github_repos".')
+    parser.add_argument("--watch", nargs="+", metavar="CVE", help="Poll --sitrep on a schedule and report what CHANGED since the last look (new timeline events, KEV listing, SSVC/EPSS movement, new records, fixes, severity). The first poll records a baseline. Exploitation and disclosure changes alert immediately (terminal bell); the rest are listed quietly. State is kept in output/watch/.")
+    parser.add_argument("--every", type=float, default=10.0, metavar="MINUTES", help="With --watch: minutes between polls (default 10, minimum 1).")
+    parser.add_argument("--once", action="store_true", help="With --watch: poll once and exit with a code: 0 quiet or baseline, 10 digest changes, 11 immediate changes.")
+    parser.add_argument("--alert", type=str, help="With --watch: comma-separated change classes that alert immediately (default exploitation,disclosure; others: exposure, severity, fix, records).")
     parser.add_argument("--no-progress", action="store_true", help="With --sitrep: do not show the live status (which source is being contacted, and for how long) on stderr.")
     parser.add_argument("--json", action="store_true", help="With --timeline or --sitrep: print the structured result as JSON instead of the console report.")
     args = parser.parse_args()
@@ -4342,6 +4346,11 @@ def main():
         compare_snapshots(file_base=args.compare[0], file_current=args.compare[1], html_output=args.report)
         return
 
+    if args.watch:
+        # Same live lookups as --sitrep, repeated; its own state under output/watch/, so no stream download either.
+        import watch
+        sys.exit(watch.run(args.watch, every=args.every, once=args.once, alert_expression=args.alert, sources_expression=args.sources, as_json=args.json,
+                           db_path=DB_PATH, show_progress=False if args.no_progress else "auto"))
     if args.sitrep:
         # Live lookups plus an optional read-only look at the warehouse: no modification-stream download, so this runs before that staging.
         import sitrep
