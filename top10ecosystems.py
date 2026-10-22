@@ -1481,6 +1481,14 @@ def _triage_from_pools(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS
     affects several ecosystems (the scatter plots it once per ecosystem; a work queue holds it once). Computed
     from the full pools, not the down-sampled scatter points, so the counts are exact. None when there are none.
     """
+    merged = _merged_pool(ecosystem_epss_pools, ecosystems)
+    return _triage_comparison(merged.values()) if merged else None
+
+
+def _merged_pool(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS) -> dict:
+    """{advisory_id: (cvss, epss, is_kev)} over `ecosystems`, one entry per advisory however many of them it affects
+    (KEV-listed if ANY ecosystem's pool says so), skipping rows without a CVSS score or EPSS data. Built from the full
+    pools, never from the down-sampled scatter points."""
     merged = {}
     for eco, pool in (ecosystem_epss_pools or {}).items():
         if eco not in ecosystems:
@@ -1490,10 +1498,43 @@ def _triage_from_pools(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS
                 continue
             seen = merged.get(advisory_id)
             merged[advisory_id] = (cvss, epss, bool(kev) or bool(seen and seen[2]))
-    return _triage_comparison(merged.values()) if merged else None
+    return merged
 
 
-def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, kev_lead_time: dict = None, spatial_dwell_cve: dict = None, ecosystem_epss_pools: dict = None):
+_TREND_MIN_N = 30   # a CVSS band holding fewer advisories than this gets no trend point
+
+
+def _cvss_epss_trend(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS, min_n: int = _TREND_MIN_N) -> list:
+    """
+    The typical EPSS at each severity, from EVERY advisory (not the plotted dots): per one-point CVSS band (4.0-4.9, 5.0-5.9, ..., 10.0),
+    the advisory count, mean CVSS, median EPSS, the quartiles around it and how many are KEV-listed. The scatter thins its
+    ordinary dots but draws every KEV star, so the eye over-weights the stars; this line is the unthinned counterfactual.
+    Bands under `min_n` advisories are left out as too thin to read.
+    """
+    bands = defaultdict(list)
+    for cvss, epss, kev in _merged_pool(ecosystem_epss_pools, ecosystems).values():
+        bands[min(int(cvss), 10)].append((cvss, epss, kev))
+    trend = []
+    for band in sorted(bands):
+        points = bands[band]
+        if len(points) < min_n:
+            continue
+        q1, median, q3 = statistics.quantiles(sorted(epss for _, epss, _ in points), n=4, method="inclusive")
+        trend.append({"band": band, "n": len(points), "mean_cvss": round(sum(c for c, _, _ in points) / len(points), 2),
+                      "median_epss": median, "q1": q1, "q3": q3, "kev": sum(1 for _, _, kev in points if kev)})
+    return trend
+
+
+def _scatter_sampling(ecosystem_epss_pools: dict) -> dict:
+    """Per ecosystem, how many advisories qualified for the scatter (CVSS and EPSS present) against how many dots it
+    holds after the per-ecosystem cap, so the report can say how much of each crowd is drawn."""
+    pairs = _extract_cvss_epss_pairs(ecosystem_epss_pools)
+    population = {eco: sum(1 for cvss, epss, _ in pool.values() if cvss and cvss > 0 and epss is not None)
+                  for eco, pool in (ecosystem_epss_pools or {}).items()}
+    return {eco: {"population": n, "plotted": len(pairs.get(eco, []))} for eco, n in population.items() if n}
+
+
+def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, target_layer, filtered_results, bucket_counts, layer_bucket_counts, intel_feed_matrix, malware_vector_counts, export_profile_matrix, *, priority_sort_active: bool = False, spatial_blast_radius: dict = None, spatial_dwell_cve: dict = None, ecosystem_epss_pools: dict = None):
     """Handles snapshot backup serialization routines to disk schema layout."""
     if not custom_export_arg:
         return
@@ -1525,10 +1566,11 @@ def serialize_snapshot_payload(custom_export_arg, now, start_date, end_date, tar
                 "intel_architecture_matrix": {e: dict(c) for e, c in intel_feed_matrix.items()},
                 "malware_vectors": dict(malware_vector_counts) if sum(malware_vector_counts.values()) > 0 else {},
                 "profile_matrix": export_profile_matrix,
-                "kev_lead_time": kev_lead_time,
                 "dwell_cve_distribution": _compute_dwell_distribution_stats(spatial_dwell_cve),
                 "cvss_epss_pairs": _extract_cvss_epss_pairs(ecosystem_epss_pools),
-                "triage_comparison": _triage_from_pools(ecosystem_epss_pools)
+                "triage_comparison": _triage_from_pools(ecosystem_epss_pools),
+                "cvss_epss_trend": _cvss_epss_trend(ecosystem_epss_pools),
+                "scatter_sampling": _scatter_sampling(ecosystem_epss_pools)
             }, ef, indent=4)
         print(f"[Static Snapshot Saved]: {export_path}")
     except Exception as e: 
@@ -1816,7 +1858,6 @@ def generate_enterprise_threat_leaderboard(
         malware_vector_counts, export_profile_matrix,
         priority_sort_active=priority_sort_active,
         spatial_blast_radius=spatial_blast_radius,
-        kev_lead_time=kev_lead_time.compute_stats(db_path, session_advisory_ids, start_date.date().isoformat(), end_date.date().isoformat()) if custom_export_arg else None,
         spatial_dwell_cve=spatial_dwell_cve,
         ecosystem_epss_pools=ecosystem_epss_pools
     )
@@ -2109,13 +2150,9 @@ def _render_chart_with_landmarks(fig, ax, landmarks: list, plotted_dates: list, 
             f'<ul class="lm-key">{key_items}</ul>{footnotes}')
 
 
-# The report helpers now live in chart_axes.py and kev_lead_time.py; the old private names stay as aliases.
+# The date-axis helpers now live in chart_axes.py; the old private names stay as aliases.
 _date_label_step = chart_axes.date_label_step
 _thin_date_ticks = chart_axes.thin_date_ticks
-_compute_kev_lead_time_stats = kev_lead_time.compute_stats
-_kev_bucket_bar_html = kev_lead_time.bucket_bar_html
-_KEV_BUCKETS = kev_lead_time.BUCKETS
-_KEV_BUCKET_CSS = kev_lead_time.BUCKET_CSS
 
 
 def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PATH):
@@ -2224,7 +2261,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         chart2_html = _render_chart_with_landmarks(fig2, ax2, landmarks, delta_dates if has_deltas else dates, "Threat Mutation Breakdown Chart", eco_colors)
         mplplt.close(fig2)
 
-        kev_lead_section = kev_lead_time.build_section(snapshots)
+        kev_lead_section = kev_lead_time.build_section(snapshots, db_path)
 
         # Chart 4: CVE Active TTR Distribution (box plot, latest snapshot only). Distribution
         # shape is a point-in-time property, not something that gains meaning from being diffed
@@ -2314,6 +2351,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
 
         img_str_scatter = None
         scatter_caption = ""
+        scatter_window = ""
         if scatter_ecos:
             fig5, ax5 = mplplt.subplots(figsize=(12, 6))
             fig5.patch.set_facecolor('#1e1e1e')
@@ -2331,7 +2369,17 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
             if kev_x:
                 ax5.scatter(kev_x, kev_y, marker='*', s=140, color='#ff5555', edgecolors='#ffffff', linewidths=0.6, zorder=5, label=f"KEV-listed (n={len(kev_x)})")
 
-            scatter_caption = f" (as of {latest_snapshot['metadata']['interval_to']}; {total_points:,} advisories plotted, {len(kev_x):,} KEV-listed)"
+            trend = (latest_snapshot or {}).get("cvss_epss_trend") or []
+            if trend:
+                trend_x = [t["mean_cvss"] for t in trend]
+                ax5.fill_between(trend_x, [max(t["q1"], 5e-5) for t in trend], [max(t["q3"], 5e-5) for t in trend],
+                                 color='#ffffff', alpha=0.10, zorder=3, label="Middle half of EPSS (all advisories)")
+                ax5.plot(trend_x, [max(t["median_epss"], 5e-5) for t in trend], color='#ffffff', linewidth=2.2, marker='o', markersize=5,
+                         zorder=4, label="Median EPSS per CVSS band (all advisories)")
+            scatter_caption = f" (as of {latest_snapshot['metadata']['interval_to']}; {total_points:,} dots plotted, {len(kev_x):,} KEV-listed)"
+            # The points come from one snapshot, which covers its whole export interval -- from the archive's first day, not from
+            # the report's --from -- so the page names that range instead of saying "this window".
+            scatter_window = f"{latest_snapshot['metadata'].get('interval_from', 'the start of the archive')} to {latest_snapshot['metadata']['interval_to']}"
             ax5.set_yscale('log')
             ax5.set_ylim(5e-5, 1.5)
             ax5.set_title("CVSS vs EPSS by Ecosystem (log scale, KEV-listed as stars)", color='#ffffff', fontsize=14, pad=15)
@@ -2348,11 +2396,27 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
             img_str_scatter = base64.b64encode(buf5.read()).decode('utf-8')
             mplplt.close(fig5)
 
+        sampling = (latest_snapshot or {}).get("scatter_sampling") or {}
+        capped = {eco: s for eco, s in sampling.items() if eco in scatter_ecos and s["plotted"] < s["population"]}
+        if capped:
+            shown = "; ".join(f"{eco} {s['plotted']:,} of {s['population']:,}" for eco, s in capped.items())
+            sampling_note = (f"<strong>Reading the dots.</strong> {len(capped)} registries have more advisories than the {_MAX_SCATTER_POINTS_PER_ECO:,}-point cap "
+                             f"({shown} drawn), so only a random subset of their ordinary dots is shown while every KEV-listed advisory is drawn. "
+                             f"The stars therefore look denser against the crowd than they really are; the real crowd is thicker than it appears. ")
+        elif sampling:
+            sampling_note = ""
+        else:
+            sampling_note = (f"<strong>Reading the dots.</strong> A registry with more than {_MAX_SCATTER_POINTS_PER_ECO:,} advisories has its ordinary dots randomly "
+                             f"thinned to the cap while every KEV-listed advisory is drawn, so the stars look denser against the crowd than they really are. ")
+        trend_note = ("The white line is the median EPSS in each one-point CVSS band across all advisories in the charted registries, each counted once, with the "
+                      "shaded band covering the middle half: it is computed from the full population, not from the dots, so it shows the typical EPSS at each severity "
+                      "even where the dots are thinned. " if (latest_snapshot or {}).get("cvss_epss_trend") else "")
+
         scatter_section = ""
         if img_str_scatter:
             scatter_section = f"""
         <h2>V. CVSS vs EPSS</h2>
-        <p>Every advisory this window with both a CVSS score and EPSS data{scatter_caption}, one dot per advisory, colored by ecosystem; KEV-listed advisories are the red stars. Only advisories with a resolvable CVE ID have EPSS (about 8% of the warehouse), so this is the subset where exploitation likelihood is actually known. Across the full warehouse CVSS correlates only moderately with EPSS (about +0.33), so a high CVSS is a weak predictor on its own: look for stars low on the chart (KEV-confirmed despite modest severity) and unmarked dots high on it (likely-exploited, not yet confirmed).</p>
+        <p>Advisories in the snapshot window ({scatter_window}, cumulative from the archive's first day) with both a CVSS score and EPSS data{scatter_caption}, one dot per advisory per registry, colored by ecosystem; KEV-listed advisories are the red stars. Only advisories with a resolvable CVE ID have EPSS (about 8% of the warehouse), so this is the subset where exploitation likelihood is actually known. Across the full warehouse CVSS correlates only moderately with EPSS (about +0.33), so a high CVSS is a weak predictor on its own: look for stars low on the chart (KEV-confirmed despite modest severity) and unmarked dots high on it (likely-exploited, not yet confirmed). {sampling_note}{trend_note}</p>
         <div class="chart">
             <img src="data:image/png;base64,{img_str_scatter}" alt="CVSS vs EPSS Scatter Chart" />
         </div>"""
@@ -2425,7 +2489,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
                      else "the plotted sample (capped per ecosystem), so queue sizes are approximate")
             triage_section = f"""
         <h2>VI. What EPSS Adds: Triage Queue vs KEV Reached</h2>
-        <p>The left panel is the scatter above with EPSS taken away: on CVSS alone the {kev_total} KEV-listed advisories (stars{star_note}) sit inside the same crowd as everything else, at the same few scores. The right panel prices each simple rule ({scope}; {total:,} advisories with CVSS and EPSS data, based on {basis}). A CVSS &ge; 7 rule queues {cvss7['queue']:,} advisories ({pct(cvss7)}) to reach {cvss7['kev_caught']} of the {kev_total}; EPSS &ge; 10% queues {epss10['queue']:,} ({pct(epss10)}) and reaches {epss10['kev_caught']}. EPSS is not complete either: {kev_total - epss1['kev_caught']} KEV-listed advisories score below 1%. Advisories with no resolvable CVE ID have no EPSS at all (about 92% of the warehouse), so this comparison only covers the subset where both signals exist.</p>
+        <p>The left panel is the scatter above with EPSS taken away: on CVSS alone the {kev_total} KEV-listed advisories (stars{star_note}) sit inside the same crowd as everything else, at the same few scores (the dots are Section V's random subset where a registry is over the cap; every star is drawn). The right panel prices each simple rule ({scope}; {total:,} advisories with CVSS and EPSS data, based on {basis}). A CVSS &ge; 7 rule queues {cvss7['queue']:,} advisories ({pct(cvss7)}) to reach {cvss7['kev_caught']} of the {kev_total}; EPSS &ge; 10% queues {epss10['queue']:,} ({pct(epss10)}) and reaches {epss10['kev_caught']}. EPSS is not complete either: {kev_total - epss1['kev_caught']} KEV-listed advisories score below 1%. Advisories with no resolvable CVE ID have no EPSS at all (about 92% of the warehouse), so this comparison only covers the subset where both signals exist.</p>
         <div class="chart">
             <img src="data:image/png;base64,{img_str_triage}" alt="CVSS-only view and triage queue comparison" />
         </div>"""
@@ -2448,7 +2512,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         .meta-box {{ background: #151515; padding: 15px 20px; border-radius: 6px; border: 1px solid #252525; margin-bottom: 30px; }}
         .chart {{ text-align: center; margin-top: 25px; background: #1e1e1e; padding: 20px; border-radius: 8px; border: 1px solid #333; }}
         .chart img {{ max-width: 100%; height: auto; border-radius: 4px; }}
-{_LANDMARK_CSS}{_KEV_BUCKET_CSS}
+{_LANDMARK_CSS}{kev_lead_time.BUCKET_CSS}
     </style>
 </head>
 <body>
