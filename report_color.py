@@ -7,7 +7,7 @@ import re
 
 from termcolor import paint_spans
 
-SECTION_KEYS = ("STATE", "REACH", "SEVERITY", "EXPLOIT", "AFFECTED", "FIXES", "DETAIL", "SOURCES", "COVERAGE GAPS", "TIMELINE", "LEADS", "REFERENCES")
+SECTION_KEYS = ("STATE", "REACH", "SEVERITY", "EXPLOIT", "AFFECTED", "FIXES", "DETAIL", "SOURCES", "COVERAGE GAPS", "TIMELINE", "LEADS", "REFERENCES", "NEXT")
 FACT_SECTIONS = ("STATE", "SEVERITY", "EXPLOIT", "AFFECTED", "FIXES", "DETAIL")
 _KEY_LINE = re.compile(r"^(  )(" + "|".join(re.escape(k) for k in SECTION_KEYS) + r")(\s+)(.*)$")
 _SPEAKER = re.compile(r"(EPSS(?= )|[^:\[\]()]{2,44}:(?= ))")

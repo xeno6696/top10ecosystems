@@ -1972,7 +1972,13 @@ class TestThreatStreamScanner(unittest.TestCase):
     def _sitrep_fetch(self, fail=None, calls=None, extra=None):
         """A fake `fetch` serving the saved real responses for CVE-2026-109618 (OSV answers 404, as it did). `fail` maps a URL to
         a (status, text, headers, url, error) tuple; `calls` collects every URL asked for."""
-        import sitrep
+        import shutil, sitrep, tempfile
+        if not getattr(self, "_sitrep_cache_isolated", False):
+            self._sitrep_cache_isolated = True
+            cache_tmp, real_cache = tempfile.mkdtemp(), sitrep.CACHE_DIR
+            sitrep.CACHE_DIR = os.path.join(cache_tmp, "cache")
+            self.addCleanup(lambda: setattr(sitrep, "CACHE_DIR", real_cache))
+            self.addCleanup(shutil.rmtree, cache_tmp, True)
         cve = "CVE-2026-109618"
         with open(os.path.join("src", "test", "resources", "timeline", "kev_CVE-2016-3081.json"), encoding="utf-8") as f:
             kev_text = f.read()
@@ -1994,6 +2000,9 @@ class TestThreatStreamScanner(unittest.TestCase):
             f"https://linux.oracle.com/cve/{cve}.html": (200, self._sitrep_text(f"oracle_{cve}.html")),
             f"https://www.suse.com/security/cve/{cve}.html": (200, f"<title>{cve} Common Vulnerabilities and Exposures | SUSE</title>"),
             "https://www.php.net/archive/2026.php": (200, "<title>PHP: News Archive - 2026</title>"),   # Arch's references point here
+            f"https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/2026/{cve}.json": (200, self._sitrep_text(f"nomi_sec_{cve}.json")),
+            "https://raw.githubusercontent.com/rapid7/metasploit-framework/master/db/modules_metadata_base.json": (200, self._sitrep_text("metasploit_subset.json")),
+            "https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/cves.json": (200, self._sitrep_text("nuclei_subset.jsonl")),
         }
         served.update(extra or {})
 
@@ -2468,11 +2477,13 @@ class TestThreatStreamScanner(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             sources, _ = self._sitrep_config(tmp)
         ids = lambda expr: [s["id"] for s in sitrep.select_sources(sources, expr)[0]]
-        for extra in ("suse", "amazon", "oracle"):
+        for extra in ("github_repos", "github_oldest", "suse", "amazon", "oracle"):
             self.assertNotIn(extra, ids(None), f"[!] {extra} is slow and page-sized, so it is not in the default run.")
             self.assertIn(extra, ids("core,extra"))
         self.assertEqual(ids("core,extra"), ids("extra,core"), "Profiles combine in any order.")
-        self.assertEqual(ids("extra"), ["suse", "amazon", "oracle"])
+        self.assertEqual(ids("extra"), ["github_repos", "github_oldest", "suse", "amazon", "oracle"])
+        for core in ("nomi_sec", "metasploit", "nuclei"):
+            self.assertIn(core, ids(None), f"{core} is in the default run.")
         self.assertNotIn("suse", ids("core,extra,-suse"))
         self.assertEqual(set(ids("all")), set(ids("core,extra")))
 
@@ -2878,6 +2889,310 @@ class TestThreatStreamScanner(unittest.TestCase):
                           show_progress="auto", stderr=io.StringIO())
         self.assertEqual(asked, [{"keep": True}, {}], "[!] --sitrep keeps its block on screen; --watch does not, or every poll would add one.")
 
+    def test_sitrep_command_prefix_is_how_the_user_runs_it_relative_when_possible_and_quoted_when_needed(self):
+        import sitrep, tempfile
+        sep = os.sep
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            exe = os.path.join(tmp, ".venv", "Scripts", "python.exe")
+            with patch.object(sitrep, "HERE", tmp), patch.object(sys, "executable", exe):
+                self.assertEqual(sitrep.command_prefix(cwd=tmp), f".{sep}.venv{sep}Scripts{sep}python.exe .{sep}top10ecosystems.py",
+                                 "[!] A hidden folder like .venv is not a './' prefix, so one is added.")
+                other = os.path.join(tmp, "elsewhere")
+                os.makedirs(other, exist_ok=True)
+                full = [exe, os.path.join(tmp, "top10ecosystems.py")]
+                self.assertEqual(sitrep.command_prefix(cwd=other), " ".join(f'"{p}"' if " " in p else p for p in full),
+                                 "From a directory the files are not under, the full paths are used.")
+            spaced = os.path.join(tmp, "my folder")
+            os.makedirs(spaced, exist_ok=True)
+            with patch.object(sitrep, "HERE", spaced), patch.object(sys, "executable", os.path.join(spaced, "python.exe")):
+                self.assertEqual(sitrep.command_prefix(cwd=tmp), f'".{sep}my folder{sep}python.exe" ".{sep}my folder{sep}top10ecosystems.py"', "Paths with spaces are quoted.")
+
+    def test_sitrep_suggests_the_exact_timeline_command_from_what_it_already_knows(self):
+        import sitrep
+        reach = {"records": 7, "layers": {}, "list": [{"id": i, "ecosystems": []} for i in (
+            "DEBIAN-CVE-2026-1", "UBUNTU-CVE-2026-1", "BIT-php-2026-1", "BIT-libphp-2026-1", "BIT-php-min-2026-1", "ROOT-APP-CVE-2026-1", "ALPINE-CVE-2026-1")]}
+        missing = [{"id": "osv", "status": "not_found"}, {"id": "nvd", "status": "found"}]
+        step = sitrep.suggest_timeline("CVE-2026-1", missing, reach, cwd=os.getcwd())
+        self.assertEqual(step["ids"], ["UBUNTU-CVE-2026-1", "BIT-libphp-2026-1", "DEBIAN-CVE-2026-1", "ALPINE-CVE-2026-1"],
+                         "[!] One record per vendor family (OSV links the siblings), richest first; ROOT- entries are never OSV records.")
+        self.assertTrue(step["command"].endswith(" --timeline UBUNTU-CVE-2026-1 BIT-libphp-2026-1 DEBIAN-CVE-2026-1 ALPINE-CVE-2026-1"))
+        self.assertIn("top10ecosystems.py --timeline", step["command"])
+        self.assertIn("warehouse holds vendor records", step["reason"])
+        found = sitrep.suggest_timeline("CVE-2026-1", [{"id": "osv", "status": "found"}], reach)
+        self.assertEqual(found["ids"], ["CVE-2026-1"], "If OSV has the CVE itself, start from the CVE.")
+        self.assertIn("--timeline CVE-2026-1", found["command"])
+        many = {"records": 9, "layers": {}, "list": [{"id": f"VENDOR{i}-CVE-2026-1", "ecosystems": []} for i in range(9)]}
+        self.assertEqual(len(sitrep.suggest_timeline("CVE-2026-1", missing, many)["ids"]), sitrep.TIMELINE_ID_LIMIT)
+        self.assertIsNone(sitrep.suggest_timeline("CVE-2026-1", missing, {"records": 0, "layers": {}, "list": []}), "Nothing to follow, nothing suggested.")
+        self.assertIsNone(sitrep.suggest_timeline("CVE-2026-1", missing, None), "No warehouse: nothing to suggest.")
+        self.assertIsNone(sitrep.suggest_timeline("CVE-2026-1", missing, {"records": 1, "layers": {}, "list": [{"id": "ROOT-APP-CVE-2026-1", "ecosystems": []}]}))
+
+    def test_sitrep_report_prints_the_next_step_or_says_why_there_is_none(self):
+        import sitrep, tempfile
+        cve = "CVE-2026-109618"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            db = os.path.join(tmp, "w.db")
+            conn = sqlite3.connect(db)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, ecosystems TEXT, published_date TEXT, last_modified TEXT, cve_alias TEXT, aliases TEXT)")
+            for advisory_id, ecosystem in (("DEBIAN-CVE-2026-109618", "Debian"), ("UBUNTU-CVE-2026-109618", "Ubuntu"), ("BIT-php-2026-109618", "Bitnami")):
+                conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?,?,?,?)", (advisory_id, "php", json.dumps([ecosystem]), "2026-10-21", "2026-10-22", cve, ""))
+            conn.commit()
+            conn.close()
+            sources, follow = self._sitrep_config(tmp)
+            selected, _ = sitrep.select_sources(sources, "core")
+            result = sitrep.build_sitrep(cve, selected, follow, self._sitrep_fetch(), db_path=db)
+            step = result["next"]["timeline"]
+            self.assertEqual(step["ids"], ["UBUNTU-CVE-2026-109618", "BIT-php-2026-109618", "DEBIAN-CVE-2026-109618"])
+            text = sitrep.render_sitrep(result)
+            flat = " ".join(text.split())
+            self.assertIn("NEXT OSV has no record under this CVE ID, but the warehouse holds vendor records for it", flat)
+            self.assertIn(step["command"], text, "[!] The exact command is printed on one line so it can be copied as it is.")
+            self.assertNotIn("try a vendor ID", text, "The vague hint is gone.")
+            self.assertFalse(any("--timeline has no OSV record to follow" in n for n in result["notes"]))
+            json.dumps(result)
+            empty = os.path.join(tmp, "empty.db")
+            conn = sqlite3.connect(empty)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, package_name TEXT, ecosystems TEXT, published_date TEXT, last_modified TEXT, cve_alias TEXT, aliases TEXT)")
+            conn.commit()
+            conn.close()
+            none = sitrep.build_sitrep(cve, selected, follow, self._sitrep_fetch(), db_path=empty)
+            self.assertEqual(none["next"], {})
+            self.assertNotIn("NEXT", sitrep.render_sitrep(none))
+            self.assertTrue(any("--timeline has no OSV record to follow" in n and "only KEV and EPSS" in n for n in none["notes"]),
+                            "With nothing for --timeline to follow, the report says so.")
+            no_warehouse = sitrep.build_sitrep(cve, selected, follow, self._sitrep_fetch())
+            self.assertTrue(any("no warehouse to list vendor record IDs from" in n for n in no_warehouse["notes"]))
+            osv_url = f"https://api.osv.dev/v1/vulns/{cve}"
+            has_osv = sitrep.build_sitrep(cve, selected, follow, self._sitrep_fetch(extra={osv_url: (200, json.dumps({"id": cve, "aliases": []}))}))
+            self.assertEqual(has_osv["next"]["timeline"]["ids"], [cve])
+            self.assertIn(f"--timeline {cve}", sitrep.render_sitrep(has_osv))
+
+    def test_sitrep_nomi_sec_parser_counts_every_repository_and_finds_the_true_earliest(self):
+        import sitrep
+        def served(name):
+            return sitrep.Fetch(200, self._sitrep_text(name), {}, "https://raw.githubusercontent.com/x", None)
+        php = sitrep.parse_nomi_sec("CVE-2026-109618", served("nomi_sec_CVE-2026-109618.json"))
+        self.assertTrue(php["found"])
+        text = php["facts"][0]["text"]
+        self.assertTrue(text.startswith("12 public GitHub repositories mention this CVE ID (tracked by nomi-sec/PoC-in-GitHub; unvetted:"),
+                        "The wording is shared with --watch, which reads the count from it.")
+        self.assertIn("never run their code", text)
+        self.assertIn("Most starred: ", text)
+        first = [e for e in php["events"]][0]
+        self.assertEqual((first["when"], first["clock"]), ("2026-10-18T06:43:48Z", "declared"))
+        self.assertIn("earliest public repository naming this CVE: corelight/php2shell-detect", first["text"])
+        self.assertTrue(first["text"].endswith("(unvetted)"), "[!] A repository's creation time is a lead, never a verdict.")
+        self.assertIn(" - Zeek and Suricata Detections for", first["text"], "The repository's own description follows the name, with no added quote marks.")
+        sibling = sitrep.parse_nomi_sec("CVE-2026-109619", served("nomi_sec_CVE-2026-109619.json"))
+        self.assertTrue(sibling["facts"][0]["text"].startswith("18 public GitHub repositories"))
+        self.assertEqual(sibling["events"][0]["when"], "2026-10-21T14:05:29Z")
+        coldfusion = sitrep.parse_nomi_sec("CVE-2026-48282", served("nomi_sec_CVE-2026-48282.json"))
+        self.assertTrue(coldfusion["facts"][0]["text"].startswith("3 public GitHub repositories"))
+        self.assertIn("imbas007/CVE-2026-48282 (24 stars, created 2026-07-06)", coldfusion["facts"][0]["text"])
+        self.assertEqual(coldfusion["events"][0]["when"], "2026-07-06T12:57:37Z", "The same earliest repository our GitHub search found, but from the complete list.")
+        for empty in ("[]", json.dumps([{"full_name": "x/y"}]), json.dumps([{"created_at": "2026-01-01T00:00:00Z"}])):
+            self.assertFalse(sitrep.parse_nomi_sec("CVE-1", sitrep.Fetch(200, empty, {}, "u", None))["found"], "Entries without a name or a creation time are ignored.")
+        for bad in ("{}", '"text"', "not json"):
+            self.assertIsNotNone(sitrep.parse_nomi_sec("CVE-1", sitrep.Fetch(200, bad, {}, "u", None))["error"], bad)
+
+    def test_sitrep_url_year_placeholder_is_filled_from_the_cve_and_validated(self):
+        import sitrep
+        nomi = {"id": "nomi_sec", "label": "nomi", "kind": "builtin", "parser": "nomi_sec", "path": "exploitation", "trust": "lead",
+                "url": "https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/{year}/{cve}.json"}
+        self.assertEqual(sitrep.validate_source(nomi), [])
+        self.assertTrue(sitrep.validate_source(dict(nomi, url="https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/{year}/x.json")),
+                        "A per-CVE parser still needs {cve} in the url.")
+        asked = []
+        def fetch(url, source=None):
+            asked.append(url)
+            return sitrep.Fetch(404, "", {}, url, None)
+        sitrep.build_sitrep("CVE-2019-0708", [nomi], {}, fetch)
+        self.assertEqual(asked, ["https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/2019/CVE-2019-0708.json"])
+
+    def test_sitrep_cache_reuses_a_fresh_copy_refetches_a_stale_one_and_never_stores_a_bad_answer(self):
+        import sitrep, tempfile
+        source = {"id": "bulk", "cache_hours": 24}
+        calls = []
+        def fetch(url, src=None, status=200, text="{}"):
+            calls.append(url)
+            return sitrep.Fetch(status, text, {}, url, None)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            with patch.object(sitrep, "CACHE_DIR", os.path.join(tmp, "cache")):
+                first = sitrep._cached_fetch("https://x.example/bulk", source, lambda u, s=None: fetch(u, s, text='{"v": 1}'))
+                self.assertEqual((first.status, first.text, len(calls)), (200, '{"v": 1}', 1))
+                self.assertTrue(os.path.exists(os.path.join(tmp, "cache", "bulk.cache")))
+                second = sitrep._cached_fetch("https://x.example/bulk", source, lambda u, s=None: fetch(u, s, text='{"v": 2}'))
+                self.assertEqual((second.text, len(calls)), ('{"v": 1}', 1), "[!] A copy younger than cache_hours is used and nothing is fetched.")
+                path = os.path.join(tmp, "cache", "bulk.cache")
+                stale = os.path.getmtime(path) - 25 * 3600
+                os.utime(path, (stale, stale))
+                third = sitrep._cached_fetch("https://x.example/bulk", source, lambda u, s=None: fetch(u, s, text='{"v": 3}'))
+                self.assertEqual((third.text, len(calls)), ('{"v": 3}', 2), "A copy older than cache_hours is fetched again and replaced.")
+                self.assertEqual(open(path, encoding="utf-8").read(), '{"v": 3}')
+                self.assertFalse(os.path.exists(path + ".tmp"), "Writes are atomic.")
+                for name, bad in (("404", lambda u, s=None: fetch(u, s, status=404, text="")), ("503", lambda u, s=None: fetch(u, s, status=503, text="oops")),
+                                  ("empty", lambda u, s=None: fetch(u, s, text="")),
+                                  ("error", lambda u, s=None: sitrep.Fetch(200, "x", {}, u, "response larger than 100 bytes"))):
+                    other = {"id": f"bad{name}", "cache_hours": 24}
+                    sitrep._cached_fetch("https://x.example/bad", other, bad)
+                    self.assertFalse(os.path.exists(os.path.join(tmp, "cache", f"bad{name}.cache")), f"[!] A {name} answer is never cached.")
+            with patch.object(sitrep, "CACHE_DIR", os.path.join(tmp, "blocked", "cache")), patch("os.makedirs", side_effect=OSError("read-only")):
+                answer = sitrep._cached_fetch("https://x.example/bulk", {"id": "ro", "cache_hours": 1}, lambda u, s=None: fetch(u, s, text="data"))
+                self.assertEqual(answer.text, "data", "A cache that cannot be written is skipped, not an error.")
+            os.makedirs(os.path.join(tmp, "dir", "bulk.cache"))      # a directory where the cache file should be
+            with patch.object(sitrep, "CACHE_DIR", os.path.join(tmp, "dir")):
+                answer = sitrep._cached_fetch("https://x.example/bulk", {"id": "bulk", "cache_hours": 1}, lambda u, s=None: fetch(u, s, text="data"))
+                self.assertEqual(answer.text, "data", "A cache that cannot be read falls back to fetching.")
+        for good in (24, 0.5, 720):
+            self.assertEqual(sitrep.validate_source(dict(self._sitrep_source(), cache_hours=good)), [], good)
+        for bad in (0, -1, 1000, "daily", True):
+            self.assertTrue(any("cache_hours" in p for p in sitrep.validate_source(dict(self._sitrep_source(), cache_hours=bad))), bad)
+
+    def test_sitrep_cache_revalidates_a_stale_copy_with_its_etag_and_only_downloads_when_it_changed(self):
+        import sitrep, tempfile, time
+        source = {"id": "bulk", "cache_hours": 1}
+        sent = []
+        def respond(status, text="", etag=None):
+            def fetch(url, src=None):
+                sent.append((src or {}).get("request_headers"))
+                return sitrep.Fetch(status, text, {"etag": etag} if etag else {}, url, None)
+            return fetch
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp, patch.object(sitrep, "CACHE_DIR", os.path.join(tmp, "cache")):
+            path = os.path.join(tmp, "cache", "bulk.cache")
+            sitrep._cached_fetch("https://x.example/b", source, respond(200, "version one", '"v1"'))
+            self.assertEqual(open(path + ".etag", encoding="utf-8").read(), '"v1"', "The ETag is stored beside the copy.")
+            sitrep._cached_fetch("https://x.example/b", source, respond(200, "never asked"))
+            self.assertEqual(len(sent), 1, "A fresh copy is used without any request.")
+            old = os.path.getmtime(path) - 2 * 3600
+            os.utime(path, (old, old))
+            unchanged = sitrep._cached_fetch("https://x.example/b", source, respond(304))
+            self.assertEqual(sent[-1], {"If-None-Match": '"v1"'}, "[!] A stale copy is revalidated with its ETag, not downloaded blindly.")
+            self.assertEqual((unchanged.status, unchanged.text), (200, "version one"), "A 304 means the copy is current and it is used.")
+            self.assertLess(time.time() - os.path.getmtime(path), 60, "...and it counts as fresh again.")
+            sitrep._cached_fetch("https://x.example/b", source, respond(200, "not asked either"))
+            self.assertEqual(len(sent), 2)
+            os.utime(path, (old, old))
+            changed = sitrep._cached_fetch("https://x.example/b", source, respond(200, "version two", '"v2"'))
+            self.assertEqual((changed.text, open(path, encoding="utf-8").read(), open(path + ".etag", encoding="utf-8").read()), ("version two", "version two", '"v2"'))
+            os.utime(path, (old, old))
+            sitrep._cached_fetch("https://x.example/b", source, respond(200, "no etag now"))
+            self.assertFalse(os.path.exists(path + ".etag"), "A server that stops sending an ETag leaves no stale one behind.")
+            os.utime(path, (old, old))
+            sitrep._cached_fetch("https://x.example/b", source, respond(200, "plain refetch"))
+            self.assertIsNone(sent[-1], "Without a stored ETag the request is unconditional.")
+            sitrep._cached_fetch("https://x.example/other", {"id": "new", "cache_hours": 1}, respond(304))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "cache", "new.cache")), "A 304 with nothing cached is not stored.")
+
+    def test_sitrep_real_fetcher_sends_the_conditional_header_and_passes_a_304_through_but_the_config_cannot_set_it(self):
+        import sitrep
+        sent = []
+        class Response:
+            def __init__(self, status, headers=None):
+                self.status_code, self.headers, self.encoding = status, headers or {}, "utf-8"
+            def iter_content(self, size):
+                return iter(())
+            def close(self):
+                pass
+        def fake_get(url, headers=None, **kwargs):
+            sent.append(headers)
+            return Response(304, {"ETag": '"abc"'})
+        with patch("requests.get", fake_get):
+            result = sitrep.make_fetcher(sleep=lambda s: None)("https://raw.githubusercontent.com/x/y", {"request_headers": {"If-None-Match": '"abc"'}})
+        self.assertEqual(sent[0]["If-None-Match"], '"abc"')
+        self.assertIn("top10ecosystems", sent[0]["User-Agent"])
+        self.assertEqual((result.status, result.text, result.headers["etag"]), (304, "", '"abc"'))
+        self.assertTrue(any("request_headers is set by the program" in p for p in sitrep.validate_source(dict(self._sitrep_source(), request_headers={"X": "y"}))))
+
+    def test_sitrep_tests_never_touch_the_real_cache_directory(self):
+        import sitrep
+        self._sitrep_fetch()
+        self.assertNotEqual(os.path.normpath(sitrep.CACHE_DIR), os.path.normpath(os.path.join("cache", "sitrep")), "[!] Test runs use a throwaway cache.")
+
+    def test_sitrep_metasploit_parser_names_the_modules_that_reference_the_cve(self):
+        import sitrep
+        index = sitrep.Fetch(200, self._sitrep_text("metasploit_subset.json"), {}, "u", None)
+        log4shell = sitrep.parse_metasploit("CVE-2021-44228", index)
+        self.assertTrue(log4shell["found"])
+        text = log4shell["facts"][0]["text"]
+        self.assertTrue(text.startswith("Metasploit: 5 modules reference this CVE: "))
+        self.assertIn("auxiliary/scanner/http/log4shell_scanner", text)
+        self.assertIn("+1 more", text, "At most four are named.")
+        struts = sitrep.parse_metasploit("CVE-2016-3081", index)
+        self.assertEqual(struts["facts"][0]["text"], "Metasploit: 1 module references this CVE: exploit/multi/http/struts_dmi_exec")
+        self.assertEqual(sitrep.parse_metasploit("cve-2016-3081", index)["facts"][0]["text"], struts["facts"][0]["text"], "The CVE ID is matched ignoring case.")
+        for cve in ("CVE-2026-109618", "CVE-2026-48282"):
+            none = sitrep.parse_metasploit(cve, index)
+            self.assertFalse(none["found"], "Not having a module is a fact, but not a 'found' source.")
+            self.assertEqual(none["facts"][0]["text"], "Metasploit: no module references this CVE (index of 9 modules)")
+        self.assertIsNotNone(sitrep.parse_metasploit("CVE-1", sitrep.Fetch(200, "[]", {}, "u", None))["error"])
+        self.assertIsNotNone(sitrep.parse_metasploit("CVE-1", sitrep.Fetch(200, "nope", {}, "u", None))["error"])
+
+    def test_sitrep_nuclei_parser_reports_whether_a_scanner_template_exists(self):
+        import sitrep
+        index = sitrep.Fetch(200, self._sitrep_text("nuclei_subset.jsonl"), {}, "u", None)
+        php = sitrep.parse_nuclei("CVE-2026-109618", index)
+        self.assertTrue(php["found"])
+        self.assertEqual(php["facts"][0]["text"], "Nuclei: a scanner template exists: http/cves/2026/CVE-2026-109618.yaml "
+                                                  "(PHP2Shell (CVE-2026-109618/CVE-2026-109619) - Active Crash Detection; severity critical)")
+        self.assertIn("RDS Arbitrary File Write", sitrep.parse_nuclei("CVE-2026-48282", index)["facts"][0]["text"])
+        self.assertTrue(sitrep.parse_nuclei("cve-2021-44228", index)["found"], "Case does not matter.")
+        sibling = sitrep.parse_nuclei("CVE-2026-109619", index)
+        self.assertFalse(sibling["found"], "[!] The sibling CVE is named inside the PHP2Shell template's title but has no template of its own.")
+        self.assertEqual(sibling["facts"][0]["text"], "Nuclei: no scanner template for this CVE (index of 7 CVE templates)")
+        lookalike = sitrep.Fetch(200, json.dumps({"ID": "CVE-2026-1096180", "Info": {"Name": "x"}, "file_path": "p"}) + "\n", {}, "u", None)
+        self.assertFalse(sitrep.parse_nuclei("CVE-2026-109618", lookalike)["found"], "Only an exact ID counts, not a longer one that starts the same.")
+        self.assertIsNotNone(sitrep.parse_nuclei("CVE-1", sitrep.Fetch(200, "", {}, "u", None))["error"])
+
+    def test_sitrep_default_run_includes_the_three_exploitation_sources_in_the_report(self):
+        import sitrep, tempfile
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        selected, _ = sitrep.select_sources(sources, "core")
+        result = sitrep.build_sitrep("CVE-2026-109618", selected, follow, self._sitrep_fetch())
+        status = {c["id"]: c["status"] for c in result["coverage"]}
+        self.assertEqual((status["nomi_sec"], status["metasploit"], status["nuclei"]), ("found", "not_found", "found"))
+        self.assertNotIn("github_repos", status, "The fuzzy GitHub searches are opt-in now.")
+        exploit = " | ".join(f["text"] for f in result["exploitation"])
+        self.assertIn("12 public GitHub repositories mention this CVE ID", exploit)
+        self.assertIn("Metasploit: no module references this CVE", exploit)
+        self.assertIn("Nuclei: a scanner template exists", exploit)
+        earliest = [e for e in result["events"] if "earliest public repository" in e["text"]][0]
+        self.assertEqual((earliest["when"], earliest["path"]), ("2026-10-18T06:43:48Z", "exploitation"), "The earliest repository is a timeline row.")
+        import watch
+        items = watch.build_items(result)
+        self.assertEqual((items["exploitation|metasploit"]["value"], items["exploitation|nuclei"]["value"], items["exploitation|repos"]["value"]), (0, "exists", 12))
+        extra = sitrep.build_sitrep("CVE-2026-109618", sitrep.select_sources(sources, "core,extra")[0], follow, self._sitrep_fetch())
+        self.assertIn("exploitation|repos", watch.build_items(extra))
+        self.assertTrue([k for k in watch.build_items(extra) if k.startswith("exploitation|repos|github_")], "The GitHub-search counts keep their own keys when asked for.")
+
+    def test_watch_a_metasploit_module_or_nuclei_template_appearing_is_an_immediate_exploitation_change(self):
+        import tempfile
+        cve = "CVE-2026-109618"
+        msf_url = "https://raw.githubusercontent.com/rapid7/metasploit-framework/master/db/modules_metadata_base.json"
+        nuclei_url = "https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/cves.json"
+        index = json.loads(self._sitrep_text("metasploit_subset.json"))
+        with_module = dict(index, exploit_multi_http_php2shell=dict(next(iter(index.values())), fullname="exploit/multi/http/php2shell", references=[cve]))
+        nuclei_lines = [line for line in self._sitrep_text("nuclei_subset.jsonl").splitlines() if line.strip()]
+        without_template = "\n".join(line for line in nuclei_lines if json.loads(line)["ID"] != cve) + "\n"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            at = lambda hour: (lambda: __import__("datetime").datetime(2026, 10, 23, hour, 0, tzinfo=__import__("datetime").timezone.utc))
+            baseline = {nuclei_url: (200, without_template)}
+            _, first = self._watch_run(tmp, extra=baseline, clock=at(9))
+            state = json.load(open(os.path.join(tmp, "state", f"{cve}.json"), encoding="utf-8"))["baseline"]
+            self.assertEqual((state["exploitation|metasploit"]["value"], state["exploitation|nuclei"]["value"]), (0, "none"), "Baselined silently.")
+            code, quiet = self._watch_run(tmp, extra=baseline, clock=at(10))
+            self.assertEqual((code, quiet["changes"]), (0, []), "No module and no template, still: nothing to report.")
+            self._age_sitrep_cache(1)      # an hour passes: the cached indexes are stale and are revalidated (here, replaced)
+            code, hit = self._watch_run(tmp, extra={msf_url: (200, json.dumps(with_module))}, clock=at(11))
+            keys = {c["key"]: c for c in hit["changes"]}
+            self.assertEqual(code, 11)
+            self.assertIn("Metasploit: 1 module references this CVE: exploit/multi/http/php2shell", keys["exploitation|metasploit"]["text"])
+            self.assertTrue(keys["exploitation|metasploit"]["immediate"], "[!] A Metasploit module appearing is immediate by default.")
+            self.assertEqual(keys["exploitation|nuclei"]["class"], "exploitation", "The template came back too (the default network has it), so that is a change as well.")
+            self.assertTrue(keys["exploitation|nuclei"]["immediate"])
+            code, again = self._watch_run(tmp, extra={msf_url: (200, json.dumps(with_module))}, clock=at(12))
+            self.assertEqual((code, again["changes"]), (0, []), "Seen once, reported once.")
+
     def test_sitrep_followed_links_keep_the_fragment_the_record_pointed_at(self):
         import sitrep
         record = json.dumps({"name": "CVE-2026-109618", "severity": "Critical", "packages": ["php"], "advisories": [],
@@ -3032,6 +3347,14 @@ class TestThreatStreamScanner(unittest.TestCase):
 
     KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 
+    def _age_sitrep_cache(self, hours):
+        """Make the cached bulk indexes look `hours` older, as real time between polls would."""
+        import sitrep
+        for name in os.listdir(sitrep.CACHE_DIR) if os.path.isdir(sitrep.CACHE_DIR) else []:
+            path = os.path.join(sitrep.CACHE_DIR, name)
+            old = os.path.getmtime(path) - hours * 3600
+            os.utime(path, (old, old))
+
     def _watch_run(self, tmp, extra=None, fail=None, cadence=False, **kwargs):
         """One `watch.run(..., once=True)` against the saved responses, with `extra` URL->(status, text) overrides. Returns (code, parsed JSON of the poll).
         Every source is asked on every poll unless `cadence` keeps the shipped watch_every (slow sources every 3rd poll)."""
@@ -3074,9 +3397,10 @@ class TestThreatStreamScanner(unittest.TestCase):
             series = [{"epss": "0.053070000", "percentile": "0.925630000", "date": "2026-10-22"}, {"epss": score, "percentile": "0.97", "date": "2026-10-23"}]
             return {f"https://api.first.org/data/v1/epss?cve={cve}&scope=time-series": (200, json.dumps({"data": [{"cve": cve, "time-series": series}]}))}
         if name.startswith("repos_"):
-            data = json.loads(self._sitrep_text(f"github_repos_{cve}.json"))
-            data["total_count"] = int(name.split("_")[1])
-            return {f"https://api.github.com/search/repositories?q={cve}&per_page=5": (200, json.dumps(data))}
+            base = json.loads(self._sitrep_text(f"nomi_sec_{cve}.json"))
+            total = int(name.split("_")[1])
+            repos = base + [dict(base[0], full_name=f"user{i}/poc{i}", id=10_000 + i, created_at="2026-10-23T00:00:00Z") for i in range(len(base), total)]
+            return {f"https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master/2026/{cve}.json": (200, json.dumps(repos))}
         raise AssertionError(name)
 
     def test_watch_first_poll_is_a_silent_baseline_and_an_identical_second_poll_is_quiet(self):
@@ -3105,7 +3429,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             self._watch_run(tmp, clock=at(9, 0))
             baseline = json.load(open(os.path.join(tmp, "state", "CVE-2026-109618.json"), encoding="utf-8"))["baseline"]
             extra = {}
-            for variant in ("kev_listed", "cve_org_changed", "epss_0.083070000", "repos_900"):
+            for variant in ("kev_listed", "cve_org_changed", "epss_0.083070000", "repos_30"):
                 extra.update(self._watch_variant(variant))
             code, record = self._watch_run(tmp, extra=extra, clock=at(9, 12))
             self.assertEqual(code, 11, "An immediate-class change gives exit code 11.")
@@ -3138,15 +3462,15 @@ class TestThreatStreamScanner(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             self._watch_run(tmp)
-            small = dict(self._watch_variant("epss_0.058000000"), **self._watch_variant("repos_600"))
+            small = dict(self._watch_variant("epss_0.058000000"), **self._watch_variant("repos_20"))
             code, record = self._watch_run(tmp, extra=small)
-            self.assertEqual((code, record["changes"]), (0, []), "[!] EPSS 5.3 -> 5.8 and repositories 461 -> 600 are noise.")
-            code, record = self._watch_run(tmp, extra=dict(self._watch_variant("epss_0.064000000"), **self._watch_variant("repos_700")))
+            self.assertEqual((code, record["changes"]), (0, []), "[!] EPSS 5.3 -> 5.8 and repositories 12 -> 20 are noise.")
+            code, record = self._watch_run(tmp, extra=dict(self._watch_variant("epss_0.064000000"), **self._watch_variant("repos_23")))
             keys = {c["key"] for c in record["changes"]}
             self.assertIn("exploitation|epss", keys, "The baseline keeps the value last REPORTED, so 5.3 -> 6.4 (1.1 points) now counts even though each step was small.")
             self.assertNotIn("exploitation|repos", keys)
-            code, record = self._watch_run(tmp, extra=self._watch_variant("repos_950"))
-            self.assertIn("exploitation|repos", {c["key"] for c in record["changes"]}, "461 -> 950 is more than double the last reported count.")
+            code, record = self._watch_run(tmp, extra=self._watch_variant("repos_30"))
+            self.assertIn("exploitation|repos", {c["key"] for c in record["changes"]}, "12 -> 30 is more than double the last reported count.")
 
     def test_watch_a_new_source_answering_and_a_new_warehouse_record_are_exposure_changes(self):
         import tempfile
@@ -3237,16 +3561,16 @@ class TestThreatStreamScanner(unittest.TestCase):
             self.assertEqual([s["id"] for s in watch.due_sources(selected, 1)], [s["id"] for s in selected if s.get("watch_every", 1) == 1])
             self.assertEqual(len(watch.due_sources(selected, 0)), len(selected), "The first poll asks everything.")
             self.assertEqual(len(watch.due_sources(selected, 3)), len(selected))
-            _, first = self._watch_run(tmp, cadence=True)
-            _, second = self._watch_run(tmp, cadence=True)
+            _, first = self._watch_run(tmp, cadence=True, sources_expression="core,extra")
+            _, second = self._watch_run(tmp, cadence=True, sources_expression="core,extra")
             self.assertIn("github_repos", first["asked"])
             self.assertNotIn("github_repos", second["asked"], "[!] A watch_every: 3 source is skipped on poll 2.")
             self.assertNotIn("github_oldest", second["asked"])
             self.assertEqual(second["changes"], [], "Skipped sources do not read as removals.")
             state = json.load(open(os.path.join(tmp, "state", "CVE-2026-109618.json"), encoding="utf-8"))
             self.assertIn("exploitation|repos", state["baseline"], "Their baseline items survive the skipped polls.")
-            _, third = self._watch_run(tmp, cadence=True)
-            _, fourth = self._watch_run(tmp, cadence=True)
+            _, third = self._watch_run(tmp, cadence=True, sources_expression="core,extra")
+            _, fourth = self._watch_run(tmp, cadence=True, sources_expression="core,extra")
             self.assertIn("github_repos", fourth["asked"], "...and are asked again on the third poll after the baseline (poll index 3).")
             self.assertNotIn("github_repos", third["asked"])
 
@@ -3262,7 +3586,7 @@ class TestThreatStreamScanner(unittest.TestCase):
         classes = {i["class"] for i in items.values()}
         self.assertTrue({"exploitation", "disclosure", "exposure", "severity", "fix", "records"} >= classes)
         self.assertEqual(items["exploitation|kev"]["value"], "not listed")
-        self.assertEqual(items["exploitation|repos"]["value"], 443)
+        self.assertEqual(items["exploitation|repos"]["value"], len(json.loads(self._sitrep_text("nomi_sec_CVE-2026-109618.json"))))
         classify = lambda path, text: watch._event_class({"path": path, "text": text})
         self.assertEqual(classify("exploitation", "added to the CISA KEV catalog"), "exploitation")
         self.assertEqual(classify("upstream", "CVE record published by php"), "disclosure")
