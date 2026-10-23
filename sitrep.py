@@ -36,10 +36,12 @@ import requests
 
 import report_color
 import sitrep_progress
+import sys
 import timeline
 from osv_ecosystems import clean_ecosystem_tag, get_artifact_layer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+CACHE_DIR = os.path.join("cache", "sitrep")      # bulk indexes (Metasploit, Nuclei) are downloaded once a day, not once a run; cache/ is git-ignored
 DEFAULT_CONFIG = os.path.join(HERE, "sitrep_sources.json")
 LOCAL_CONFIG = os.path.join(HERE, "sitrep_sources.local.json")
 
@@ -164,14 +166,14 @@ def validate_source(source) -> list:
         needs_cve = not (kind == "builtin" and source.get("parser") in PARSERS and not PARSERS[source["parser"]][1])
         if needs_cve and "{cve}" not in url:
             problems.append(f"{name}: url must contain {{cve}}")
-        issue = _url_problem(url.replace("{cve}", "CVE-2000-0000"))
+        issue = _url_problem(url.replace("{cve}", "CVE-2000-0000").replace("{year}", "2000"))
         if issue:
             problems.append(f"{name}: url {issue}")
     if source.get("path") not in PATHS:
         problems.append(f"{name}: path must be one of {', '.join(PATHS)}")
     if source.get("trust") not in TRUSTS:
         problems.append(f"{name}: trust must be one of {', '.join(TRUSTS)}")
-    for key, low, high in (("min_interval", 0, 120), ("timeout", 1, 60), ("max_bytes", 1000, 20_000_000)):
+    for key, low, high in (("min_interval", 0, 120), ("timeout", 1, 60), ("max_bytes", 1000, 20_000_000), ("cache_hours", 0.01, 720)):
         value = source.get(key, None)
         if value is not None and (not isinstance(value, (int, float)) or isinstance(value, bool) or not low <= value <= high):
             problems.append(f"{name}: {key} must be a number from {low} to {high}")
@@ -183,6 +185,8 @@ def validate_source(source) -> list:
         problems.append(f"{name}: ecosystems must be a list of ecosystem names, e.g. [\"Debian\"]")
     if "must_mention" in source and not isinstance(source["must_mention"], bool):
         problems.append(f"{name}: must_mention must be true or false")
+    if "request_headers" in source:
+        problems.append(f"{name}: request_headers is set by the program (for cache revalidation), not by the config")
     if "watch_every" in source and (not isinstance(source["watch_every"], int) or isinstance(source["watch_every"], bool) or source["watch_every"] < 1):
         problems.append(f"{name}: watch_every must be a whole number of polls, 1 or more")
     if "profiles" in source and not (isinstance(source["profiles"], list) and all(isinstance(p, str) for p in source["profiles"])):
@@ -308,6 +312,7 @@ def make_fetcher(sleep=time.sleep, clock=time.monotonic, retries=1):
         timeout = source.get("timeout", DEFAULT_TIMEOUT)
         max_bytes = int(source.get("max_bytes", DEFAULT_MAX_BYTES))
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json, text/html;q=0.8, */*;q=0.5"}
+        headers.update(source.get("request_headers") or {})        # set by the cache (If-None-Match), never by the config
         token = os.environ.get(source["token_env"]) if source.get("token_env") else None
         if token:
             headers[source.get("token_header", "Authorization")] = source.get("token_prefix", "Bearer ") + token
@@ -693,10 +698,69 @@ def parse_github_advisories(cve, fetch):
     return _result(True, facts, events, refs)
 
 
+def parse_nomi_sec(cve, fetch):
+    """nomi-sec/PoC-in-GitHub: one file per CVE listing every public GitHub repository that names it, with creation time and stars. Complete
+    (not a search sample) and cheap (a raw file, no API limit), so it also gives the true earliest repository. Unvetted: a repository
+    naming a CVE may be a PoC, a detection rule, a scanner, a placeholder, or something hostile."""
+    data, error = _json(fetch)
+    if error or not isinstance(data, list):
+        return _result(error=error or "unexpected response")
+    repos = [r for r in data if isinstance(r, dict) and r.get("full_name") and r.get("created_at")]
+    if not repos:
+        return _result()
+    top = sorted(repos, key=lambda r: (-int(r.get("stargazers_count") or 0), r["created_at"]))[:3]
+    shown = "; ".join(f"{r['full_name']} ({r.get('stargazers_count', 0)} stars, created {r['created_at'][:10]})" for r in top)
+    facts = [{"kind": "exploitation", "text": f"{len(repos):,} public GitHub repositories mention this CVE ID (tracked by nomi-sec/PoC-in-GitHub; unvetted: "
+              f"names alone prove nothing, and such repositories can be PoCs, detection rules, placeholders or fake or malicious; never run their code). Most starred: {shown}"}]
+    first = min(repos, key=lambda r: r["created_at"])
+    note = (first.get("description") or "").strip()
+    events = [_event(first["created_at"], "declared", f"earliest public repository naming this CVE: {first['full_name']}" + (f" - {_clip(note, 70)}" if note else "") + " (unvetted)")]
+    return _result(True, facts, events)
+
+
+def parse_metasploit(cve, fetch):
+    """Rapid7's Metasploit module index: which modules reference the CVE. A module is a strong sign a flaw has been weaponized."""
+    data, error = _json(fetch)
+    if error or not isinstance(data, dict):
+        return _result(error=error or "unexpected response")
+    wanted = cve.upper()
+    modules = sorted(m.get("fullname") or key for key, m in data.items()
+                     if isinstance(m, dict) and any(str(ref).upper() == wanted for ref in m.get("references") or []))
+    if not modules:
+        return _result(facts=[{"kind": "exploitation", "text": f"Metasploit: no module references this CVE (index of {len(data):,} modules)"}])
+    listed = ", ".join(modules[:4]) + (f", +{len(modules) - 4} more" if len(modules) > 4 else "")
+    return _result(True, [{"kind": "exploitation", "text": f"Metasploit: {len(modules)} module{'s' if len(modules) != 1 else ''} reference{'' if len(modules) != 1 else 's'} this CVE: {listed}"}])
+
+
+def parse_nuclei(cve, fetch):
+    """ProjectDiscovery's Nuclei template index: whether a scanner template exists for the CVE (used to find vulnerable hosts at scale)."""
+    text = fetch.text or ""
+    wanted = cve.upper()
+    total = sum(1 for line in text.splitlines() if line.strip())
+    hits = []
+    if wanted in text.upper():
+        for line in text.splitlines():
+            if wanted in line.upper():
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if str(entry.get("ID", "")).upper() == wanted:
+                    hits.append(entry)
+    if not total:
+        return _result(error="empty index")
+    if not hits:
+        return _result(facts=[{"kind": "exploitation", "text": f"Nuclei: no scanner template for this CVE (index of {total:,} CVE templates)"}])
+    entry = hits[0]
+    info = entry.get("Info") or {}
+    return _result(True, [{"kind": "exploitation", "text": f"Nuclei: a scanner template exists: {entry.get('file_path', '?')} ({info.get('Name', 'unnamed')}; severity {info.get('Severity', '?')})"}])
+
+
 PARSERS = {   # name -> (function, needs {cve} in the url)
     "cve_org": (parse_cve_org, True), "nvd": (parse_nvd, True), "redhat": (parse_redhat, True), "ubuntu": (parse_ubuntu, True),
     "debian": (parse_debian, True), "github_repos": (parse_github_repos, True), "github_oldest": (parse_github_oldest, True), "epss": (parse_epss, True),
-    "kev": (parse_kev, False), "osv_cve": (parse_osv_cve, True), "arch": (parse_arch, True), "github_advisories": (parse_github_advisories, True),
+    "kev": (parse_kev, False), "osv_cve": (parse_osv_cve, True), "arch": (parse_arch, True), "github_advisories": (parse_github_advisories, True), "nomi_sec": (parse_nomi_sec, True),
+    "metasploit": (parse_metasploit, False), "nuclei": (parse_nuclei, False),
 }
 
 
@@ -848,6 +912,55 @@ def _note(state, detail=""):
         hook(state, detail)
 
 
+TIMELINE_ID_LIMIT = 4
+# Which vendor record to start --timeline from when several ecosystems have one: tested on CVE-2026-109618, a Ubuntu record links the most
+# (its notices and the sibling CVE), then Bitnami (its sibling components), then Debian.
+TIMELINE_FAMILY_ORDER = ("UBUNTU", "BIT", "DEBIAN")
+
+
+def command_prefix(cwd=None) -> str:
+    """How to run this tool from where the user is: the interpreter that is running now and top10ecosystems.py, relative to the current
+    directory when they are under it (.\\.venv\\Scripts\\python.exe .\\top10ecosystems.py), absolute otherwise, quoted if they contain spaces."""
+    cwd = cwd or os.getcwd()
+    parts = []
+    for path in (sys.executable, os.path.join(HERE, "top10ecosystems.py")):
+        try:
+            relative = os.path.relpath(path, cwd)
+        except ValueError:                       # a different drive on Windows
+            relative = path
+        if relative.startswith("..") or os.path.isabs(relative):
+            shown = path                                    # not under the current directory: the full path
+        elif relative.startswith(("." + os.sep, "./")):
+            shown = relative
+        else:
+            shown = "." + os.sep + relative                 # .venv\Scripts\python.exe -> .\.venv\Scripts\python.exe (a hidden folder is not a prefix)
+        parts.append(f'"{shown}"' if " " in shown else shown)
+    return " ".join(parts)
+
+
+def suggest_timeline(cve, entries, reach, cwd=None):
+    """The exact --timeline command that would add something, from data sitrep already holds, or None. If OSV has a record under the CVE
+    ID, start from the CVE. If it does not but the warehouse holds vendor records (Debian, Ubuntu, Bitnami, ...), start from one record per
+    vendor family: OSV links the sibling records from there. Synthetic ROOT- entries the warehouse makes are not OSV records, so they are
+    never suggested."""
+    osv = next((e for e in entries if e["id"] == "osv"), None)
+    if osv and osv["status"] == "found":
+        ids, reason = [cve], "OSV has a record under this CVE ID, so --timeline can follow its aliases, reviews and fixes"
+    elif reach and reach["records"]:
+        families = {}
+        for record in reach["list"]:
+            if not record["id"].startswith("ROOT-"):
+                families.setdefault(record["id"].split("-")[0], []).append(record["id"])
+        order = [f for f in TIMELINE_FAMILY_ORDER if f in families] + sorted(f for f in families if f not in TIMELINE_FAMILY_ORDER)
+        ids = [sorted(families[f])[0] for f in order][:TIMELINE_ID_LIMIT]
+        reason = "OSV has no record under this CVE ID, but the warehouse holds vendor records for it; --timeline can start from them and follow their linked records"
+    else:
+        return None
+    if not ids:
+        return None
+    return {"ids": ids, "reason": reason, "command": f"{command_prefix(cwd)} --timeline {' '.join(ids)}"}
+
+
 def _query_source(cve, source, fetch, progress=None):
     started = time.monotonic()
     sitrep_progress.ACTIVE.hook = progress.hook_for(source["id"]) if progress else None
@@ -875,12 +988,58 @@ def slow_notes(entries, threshold=SLOW_SECONDS) -> list:
     return [f"{e['label']} took {e['seconds']:.0f} s; --sources \"core,-{e['id']}\" skips it" for e in slow]
 
 
+def _cached_fetch(url, source, fetch) -> Fetch:
+    """fetch() with a copy on disk for bulk indexes. A copy younger than cache_hours is used as it is. An older one is revalidated: the
+    stored ETag goes out as If-None-Match, and a 304 (a few hundred bytes) means the copy is still current, so an 11 MB file is downloaded
+    again only when it changed. That keeps a --watch poll every few minutes both cheap and fresh. Only a good answer is stored, and a
+    cache that cannot be read or written is simply skipped, never an error."""
+    path = os.path.join(CACHE_DIR, f"{source['id']}.cache")
+    cached = age = etag = None
+    try:
+        age = time.time() - os.path.getmtime(path)
+        with open(path, encoding="utf-8") as handle:
+            cached = handle.read()
+        try:
+            with open(path + ".etag", encoding="utf-8") as handle:
+                etag = handle.read().strip() or None
+        except OSError:
+            pass
+    except OSError:
+        cached = None
+    if cached is not None and age < float(source["cache_hours"]) * 3600:
+        _note("reading", f"cached copy ({age / 3600:.1f} h old)")
+        return Fetch(200, cached, {}, url, None)
+    response = fetch(url, dict(source, request_headers={"If-None-Match": etag}) if cached is not None and etag else source)
+    if response.status == 304 and cached is not None:
+        try:
+            os.utime(path, None)
+        except OSError:
+            pass
+        _note("reading", "unchanged (revalidated)")
+        return Fetch(200, cached, response.headers, url, None)
+    if response.status == 200 and not response.error and response.text:
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(path + ".tmp", "w", encoding="utf-8") as handle:
+                handle.write(response.text)
+            os.replace(path + ".tmp", path)
+            new_etag = (response.headers or {}).get("etag")
+            if new_etag:
+                with open(path + ".etag", "w", encoding="utf-8") as handle:
+                    handle.write(new_etag)
+            elif os.path.exists(path + ".etag"):
+                os.remove(path + ".etag")
+        except OSError:
+            pass
+    return response
+
+
 def _query_source_inner(cve, source, fetch):
-    url = source["url"].replace("{cve}", quote(cve))
+    url = source["url"].replace("{cve}", quote(cve)).replace("{year}", cve.split("-")[1] if cve.count("-") >= 2 else "0")
     entry = {"id": source["id"], "label": source.get("label", source["id"]), "path": source["path"], "trust": source["trust"],
              "url": url, "status": "error", "detail": "", "facts": [], "events": [], "refs": [], "reflinks": [], "lead": None}
     _note("contacting", urlparse(url).hostname)
-    response = fetch(url, source)
+    response = _cached_fetch(url, source, fetch) if source.get("cache_hours") else fetch(url, source)
     _note("reading", "")
     if response.status is None or response.error:   # transport failures and oversize responses; HTTP statuses carry no error
         entry["detail"] = response.error or "request failed"
@@ -995,8 +1154,14 @@ def build_sitrep(cve, sources, follow_hosts, fetch, db_path=None, today=None, wo
     errors = [e for e in entries_all if e["status"] in ("error", "blocked")]
     if errors:
         notes.append(f"{len(errors)} source(s) could not be read (see the coverage list); their silence is not evidence")
-    if any(e["id"] == "osv" and e["status"] == "not_found" for e in entries) and not (reach and reach["records"]):
-        notes.append("OSV has no record under this CVE ID and the warehouse holds none that mention it; try a vendor ID with --timeline if one is known")
+    osv_missing = any(e["id"] == "osv" and e["status"] == "not_found" for e in entries)
+    next_step = suggest_timeline(cve, entries, reach)
+    if osv_missing and reach is not None and not reach["records"]:
+        notes.append("OSV has no record under this CVE ID and the warehouse holds none that mention it, so --timeline has no OSV record to follow; "
+                     "it would add only KEV and EPSS, which this report already shows")
+    elif osv_missing and reach is None:
+        notes.append("OSV has no record under this CVE ID and there is no warehouse to list vendor record IDs from; if you know one "
+                     "(DEBIAN-CVE-..., UBUNTU-CVE-...), --timeline can start from it")
     gaps = coverage_gaps(reach, sources, entries)
     references = build_references(entries, followed)
     return {
@@ -1007,6 +1172,7 @@ def build_sitrep(cve, sources, follow_hosts, fetch, db_path=None, today=None, wo
         "fixes": [f for f in facts if f["kind"] == "fix"], "affected": [f for f in facts if f["kind"] == "affected"],
         "details": [f for f in facts if f["kind"] == "detail"], "events": events, "leads": leads, "reach": reach, "notes": notes,
         "references": references["references"], "references_covered": references["covered"],
+        "next": {"timeline": next_step} if next_step else {},
     }
 
 
@@ -1095,6 +1261,9 @@ def render_sitrep(result, color=False) -> str:
         if result["references_covered"]:
             hosts = sorted({urlparse(u).hostname for u in result["references_covered"]})
             out += _wrap("    ", f"Already queried above: {', '.join(hosts)} ({len(result['references_covered'])} link(s))")
+    timeline_step = (result.get("next") or {}).get("timeline")
+    if timeline_step:
+        out += ["", *_wrap("  NEXT       ", timeline_step["reason"] + ". Run:"), "             " + timeline_step["command"]]
     for note in result["notes"]:
         out += _wrap("  [!] ", note)
     out.append(rule)

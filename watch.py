@@ -96,9 +96,15 @@ def build_items(result) -> dict:
             if score is not None:
                 put("exploitation|epss", "exploitation", text, score, fact)
         elif "public GitHub repositories mention" in text:
-            put("exploitation|repos", "exploitation", text, int(_number(r"^([\d,]+) public GitHub", text) or 0), fact)
+            # nomi-sec's complete list is the canonical count; the GitHub search sources (opt-in, fuzzier) keep their own keys
+            put("exploitation|repos" if fact["source"] == "nomi_sec" else f"exploitation|repos|{fact['source']}", "exploitation", text,
+                int(_number(r"^([\d,]+) public GitHub", text) or 0), fact)
         elif text.startswith("no public GitHub repository"):
-            put("exploitation|repos", "exploitation", text, 0, fact)
+            put("exploitation|repos" if fact["source"] == "nomi_sec" else f"exploitation|repos|{fact['source']}", "exploitation", text, 0, fact)
+        elif text.startswith("Metasploit:"):
+            put("exploitation|metasploit", "exploitation", text, int(_number(r"Metasploit: (\d+) module", text) or 0), fact)
+        elif text.startswith("Nuclei:"):
+            put("exploitation|nuclei", "exploitation", text, "exists" if "template exists" in text else "none", fact)
     for entry in result["coverage"]:
         if entry["id"].startswith("link-"):
             continue
@@ -123,8 +129,12 @@ def _changed(key, old, new) -> bool:
     before, after = old["value"], new["value"]
     if key == "exploitation|epss":
         return abs(after - before) >= EPSS_STEP_POINTS
-    if key == "exploitation|repos":
+    if key.startswith("exploitation|repos"):
         return (before == 0 and after > 0) or (before > 0 and after >= 2 * before)
+    if key == "exploitation|metasploit":
+        return after > before                       # a Metasploit module appearing (or another one) is a strong weaponization signal
+    if key == "exploitation|nuclei":
+        return after == "exists" and before != "exists"
     if key == "exploitation|kev":
         return after == "LISTED" and before != "LISTED"
     if key.startswith("coverage|"):
@@ -142,7 +152,8 @@ def diff(baseline, items, now, failed_sources=(), silent_sources=(), silent_labe
         old = baseline.get(key)
         entry = dict(item, first_seen=now, last_seen=now)
         if old is None:
-            silent = (key.startswith("coverage|") and item["value"] != "found") or (key == "exploitation|repos" and item["value"] == 0) \
+            silent = (key.startswith("coverage|") and item["value"] != "found") or (key.startswith("exploitation|repos") and item["value"] == 0) \
+                or (key == "exploitation|metasploit" and item["value"] == 0) or (key == "exploitation|nuclei" and item["value"] == "none") \
                 or (key == "exploitation|kev" and item["value"] != "LISTED") or item["source"] in silent_sources \
                 or any(f"(linked from {label})" in item["label"] for label in silent_labels)
             updated[key] = entry
