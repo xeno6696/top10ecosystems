@@ -2686,6 +2686,38 @@ class TestThreatStreamScanner(unittest.TestCase):
         result_like = {"references": sitrep.build_references(many, [])["references"], "references_covered": []}
         self.assertEqual(len(result_like["references"]), 40)
 
+    def test_sitrep_references_legend_only_points_at_leads_when_there_is_a_leads_section(self):
+        """[REGRESSION] On CVE-2023-22894 nothing was fetched (none of the referenced hosts is on the follow list), so there was no LEADS
+        section, but the REFERENCES legend always said '[x] read above (see LEADS)'. The legend now names only what is on the page."""
+        import sitrep, tempfile
+        adobe = "https://helpx.adobe.com/security/products/coldfusion/apsb26-68.html"
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sources, follow = self._sitrep_config(tmp)
+        selected, _ = sitrep.select_sources(sources, "core")
+        followed = dict(follow, **{"helpx.adobe.com": {"label": "Adobe", "path": "vendor"}})
+        def render(served, hosts):
+            return sitrep.render_sitrep(sitrep.build_sitrep("CVE-2026-48282", selected, hosts, self._coldfusion({adobe: served} if served else None)))
+        def references_line(text):
+            return [line for line in text.split("\n") if line.startswith("  REFERENCES")][0]
+        nothing_fetched = render(None, {})
+        self.assertNotIn("\n  LEADS", nothing_fetched, "No page was fetched, so there is no LEADS section...")
+        self.assertNotIn("LEADS", nothing_fetched, "[!] ...and nothing in the report may point at one.")
+        self.assertTrue(references_line(nothing_fetched).endswith("a checklist.   [ ] not read"), references_line(nothing_fetched))
+        read = render((200, "<title>APSB26-68</title>"), followed)
+        self.assertIn("\n  LEADS", read)
+        self.assertTrue(references_line(read).endswith("[ ] not read   [x] read above (see LEADS)"), "The pointer appears exactly when LEADS does.")
+        failed = render((403, ""), followed)
+        self.assertNotIn("LEADS", failed, "A page that could not be fetched makes no lead, so no pointer to one.")
+        self.assertTrue(references_line(failed).endswith("[ ] not read   [!!] could not be fetched"), references_line(failed))
+        for text in (nothing_fetched, read, failed):
+            self.assertEqual("see LEADS" in text, "\n  LEADS" in text, "Every pointer to LEADS has a LEADS section behind it.")
+        result = sitrep.build_sitrep("CVE-2026-1111", [{"id": "nvd", "label": "NVD", "kind": "builtin", "parser": "nvd", "url": "https://nvd.example/{cve}", "path": "records", "trust": "primary"}], {},
+                                     lambda url, src=None: sitrep.Fetch(404, "", {}, url, None))
+        self.assertNotIn("REFERENCES", sitrep.render_sitrep(result), "With no references at all the section is absent, as before.")
+        only_covered = dict(result, references=[], references_covered=["https://nvd.nist.gov/vuln/detail/CVE-2026-1"])
+        covered_line = references_line(sitrep.render_sitrep(only_covered))
+        self.assertNotIn("not read", covered_line, "With only 'already queried' links there are no boxes, so no legend for them.")
+
     def test_sitrep_checklist_is_capped_in_the_console_but_complete_in_json(self):
         import sitrep, tempfile
         refs = [{"url": f"https://p{i:02d}.example/x", "tags": []} for i in range(40)]
