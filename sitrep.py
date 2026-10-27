@@ -1249,7 +1249,12 @@ def render_sitrep(result, color=False) -> str:
             out.append(f"      {lead['url']}")
     references = result["references"]
     if references or result["references_covered"]:
-        out += ["", "  REFERENCES  what the records point at, by what they say it is: a checklist.   [ ] not read   [x] read above (see LEADS)   [!!] could not be fetched"]
+        # The legend names only the boxes that appear below, and points at LEADS only when there is one: LEADS is printed only when a page was fetched.
+        seen = {row["status"] for row in references}
+        legend = ""
+        if references:
+            legend = "   [ ] not read" + ("   [x] read above (see LEADS)" if "read" in seen else "") + ("   [!!] could not be fetched" if "failed" in seen else "")
+        out += ["", "  REFERENCES  what the records point at, by what they say it is: a checklist." + legend]
         category = None
         for row in references[:MAX_REFERENCES_SHOWN]:
             if row["category"] != category:
