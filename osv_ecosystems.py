@@ -21,6 +21,9 @@ import re
 KNOWN_CONTAINER_ECOSYSTEMS = ["Debian", "Ubuntu", "MinimOS", "Azure Linux", "Alpine Linux", "Alpaquita Linux", "Chainguard", "Bitnami", "Echo", "Android"]
 KNOWN_REGISTRY_ECOSYSTEMS = ["npm", "PyPI", "Maven (Java)", "Packagist (PHP)", "Go (Golang)", "NuGet", "Crates.io", "RubyGems", "Hex", "Pub", "ConanCenter", "SwiftURL"]
 
+# The registries the --report charts show (a subset of the registries above), so every report section describes the same advisories.
+REPORT_ECOSYSTEMS = ("npm", "PyPI", "Go (Golang)", "Maven (Java)", "Packagist (PHP)", "Crates.io", "NuGet")
+
 # Order matters: the first track a tag matches wins.
 MASTER_TRACKS = KNOWN_CONTAINER_ECOSYSTEMS + KNOWN_REGISTRY_ECOSYSTEMS + ["GIT", "Untagged Commit Hash/CVE Noise", "Android"]
 

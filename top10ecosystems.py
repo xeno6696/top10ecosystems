@@ -55,10 +55,12 @@ import plotext as pltx
 import requests
 
 import chart_axes
+import epss_triage
+import kev_history
 import kev_lead_time
 from osv_ecosystems import (
     KNOWN_CONTAINER_ECOSYSTEMS, KNOWN_REGISTRY_ECOSYSTEMS, MASTER_TRACKS,
-    FALLBACK_ECOSYSTEM, OUTPUT_TRACKS,
+    FALLBACK_ECOSYSTEM, OUTPUT_TRACKS, REPORT_ECOSYSTEMS,
     clean_ecosystem_tag, get_artifact_layer,
 )
 
@@ -1454,25 +1456,11 @@ def _extract_cvss_epss_pairs(ecosystem_epss_pools: dict) -> dict:
 
 # The registries the --report charts show, so exported counts (the triage comparison) describe the same advisories the
 # scatter plots.
-_REPORT_ECOSYSTEMS = ("npm", "PyPI", "Go (Golang)", "Maven (Java)", "Packagist (PHP)", "Crates.io", "NuGet")
+_REPORT_ECOSYSTEMS = REPORT_ECOSYSTEMS
 
-_TRIAGE_RULES = (("CVSS \u2265 9", "cvss", 9.0), ("CVSS \u2265 7", "cvss", 7.0), ("CVSS \u2265 4", "cvss", 4.0),
-                 ("EPSS \u2265 10%", "epss", 0.1), ("EPSS \u2265 1%", "epss", 0.01))
-
-
-def _triage_comparison(points) -> dict:
-    """
-    For (cvss, epss, is_kev) points, how big a work queue each simple triage rule produces and how many
-    KEV-listed advisories it reaches: the "what does EPSS buy you over CVSS alone" comparison behind the
-    --report triage chart. Rules are _TRIAGE_RULES (a CVSS cut-off or an EPSS cut-off, inclusive).
-    """
-    points = list(points)
-    rules = []
-    for label, kind, threshold in _TRIAGE_RULES:
-        index = 0 if kind == "cvss" else 1
-        hits = [p for p in points if p[index] >= threshold]
-        rules.append({"label": label, "kind": kind, "threshold": threshold, "queue": len(hits), "kev_caught": sum(1 for p in hits if p[2])})
-    return {"total": len(points), "kev_total": sum(1 for p in points if p[2]), "rules": rules}
+# The triage arithmetic lives in epss_triage.py, shared with the full-history section; the old private names stay as aliases.
+_TRIAGE_RULES = epss_triage.TRIAGE_RULES
+_triage_comparison = epss_triage.triage_comparison
 
 
 def _triage_from_pools(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS):
@@ -1501,28 +1489,13 @@ def _merged_pool(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS) -> d
     return merged
 
 
-_TREND_MIN_N = 30   # a CVSS band holding fewer advisories than this gets no trend point
+_TREND_MIN_N = epss_triage.TREND_MIN_N   # a CVSS band holding fewer advisories than this gets no trend point
 
 
 def _cvss_epss_trend(ecosystem_epss_pools: dict, ecosystems=_REPORT_ECOSYSTEMS, min_n: int = _TREND_MIN_N) -> list:
-    """
-    The typical EPSS at each severity, from EVERY advisory (not the plotted dots): per one-point CVSS band (4.0-4.9, 5.0-5.9, ..., 10.0),
-    the advisory count, mean CVSS, median EPSS, the quartiles around it and how many are KEV-listed. The scatter thins its
-    ordinary dots but draws every KEV star, so the eye over-weights the stars; this line is the unthinned counterfactual.
-    Bands under `min_n` advisories are left out as too thin to read.
-    """
-    bands = defaultdict(list)
-    for cvss, epss, kev in _merged_pool(ecosystem_epss_pools, ecosystems).values():
-        bands[min(int(cvss), 10)].append((cvss, epss, kev))
-    trend = []
-    for band in sorted(bands):
-        points = bands[band]
-        if len(points) < min_n:
-            continue
-        q1, median, q3 = statistics.quantiles(sorted(epss for _, epss, _ in points), n=4, method="inclusive")
-        trend.append({"band": band, "n": len(points), "mean_cvss": round(sum(c for c, _, _ in points) / len(points), 2),
-                      "median_epss": median, "q1": q1, "q3": q3, "kev": sum(1 for _, _, kev in points if kev)})
-    return trend
+    """The typical EPSS at each severity, from EVERY in-window advisory in `ecosystems` (each counted once), not the plotted dots.
+    The banding itself is epss_triage.cvss_epss_trend, shared with the full-history section."""
+    return epss_triage.cvss_epss_trend(_merged_pool(ecosystem_epss_pools, ecosystems).values(), min_n)
 
 
 def _scatter_sampling(ecosystem_epss_pools: dict) -> dict:
@@ -2262,6 +2235,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         mplplt.close(fig2)
 
         kev_lead_section = kev_lead_time.build_section(snapshots, db_path)
+        kev_history_section = kev_history.build_section(db_path)   # whole warehouse, independent of the report window
 
         # Chart 4: CVE Active TTR Distribution (box plot, latest snapshot only). Distribution
         # shape is a point-in-time property, not something that gains meaning from being diffed
@@ -2535,7 +2509,7 @@ def generate_html_report(snapshots: list, html_output: str, db_path: str = DB_PA
         <div class="chart">
             {chart2_html}
         </div>
-{kev_lead_section}{dwell_section}{scatter_section}{triage_section}
+{kev_lead_section}{dwell_section}{scatter_section}{triage_section}{kev_history_section}
     </div>
 </body>
 </html>"""
