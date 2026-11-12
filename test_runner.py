@@ -4887,6 +4887,7 @@ class TestThreatStreamScanner(unittest.TestCase):
             self.assertEqual(result["charted"], ["CVE-A"])
             self.assertEqual([(o["cve_id"], o["ecosystems"]) for o in result["other"]], [("CVE-B", ["Debian"])])
             self.assertEqual(result["not_in_osv"], 1, "CVE-Z has no OSV record at all.")
+            self.assertEqual([a["cve_id"] for a in result["not_in_osv_list"]], ["CVE-Z"], "The entries behind that count are named, not just counted.")
             self.assertEqual(len(result["charted"]) + len(result["other"]) + result["not_in_osv"], result["added"],
                              "[!] Every KEV entry must land in exactly one bucket.")
             self.assertIsNone(t.kev_window_breakdown(os.path.join(tmp, "missing.db"), "2026-09-01", "2026-09-30", []))
@@ -4894,11 +4895,19 @@ class TestThreatStreamScanner(unittest.TestCase):
 
     def test_landmark_footnotes_state_the_accounting_and_list_what_is_off_the_chart(self):
         import top10ecosystems as t
-        breakdown = {"added": 35, "charted": ["CVE-1", "CVE-2"], "not_in_osv": 24,
+        absent = [{"cve_id": f"CVE-8-{i}", "name": "<i>Closed</i> Box", "added": "2026-10-1%d" % i} for i in range(24)]
+        breakdown = {"added": 35, "charted": ["CVE-1", "CVE-2"], "not_in_osv": 24, "not_in_osv_list": absent,
                      "other": [{"cve_id": f"CVE-9-{i}", "name": "<b>Big</b> & Co", "added": "2026-10-0%d" % (i + 1), "ecosystems": ["Debian"]} for i in range(3)]}
         hidden = [{"cve_id": "CVE-5-1", "name": "Extra", "epss": 0.5, "ecosystems": ["npm"]}, {"cve_id": "CVE-5-2", "name": "Extra2", "epss": None, "ecosystems": ["PyPI"]}]
         text = t._landmark_footnotes(breakdown, hidden, "2026-09-18", "2026-10-19")
-        self.assertIn("CISA added 35 KEV entries between 2026-09-18 and 2026-10-19: 2 in charted registries, 3 in other ecosystems (listed below), 24 not in OSV at all.", text)
+        self.assertIn("CISA added 35 KEV entries between 2026-09-18 and 2026-10-19: 2 in charted registries, 3 in other ecosystems (listed below), ", text)
+        self.assertIn('<span class="lm-absent"><span class="lm-swatch lm-swatch-absent"></span>24 not in OSV at all</span> (listed below in the same color).', text,
+                      "[!] The count the sentence quotes is colored like the list that names those entries.")
+        self.assertEqual(text.count('<li class="lm-absent">'), 15, "The not-in-OSV entries are listed (capped like the other lists) in their own color.")
+        self.assertIn("(+9 more)", text)
+        self.assertIn('href="https://nvd.nist.gov/vuln/detail/CVE-8-0"', text, "No OSV page exists for these, so they link to NVD.")
+        self.assertIn("&lt;i&gt;Closed&lt;/i&gt; Box", text)
+        self.assertNotIn("<i>Closed", text)
         self.assertIn("+2 more KEV-listed CVEs in charted registries", text)
         self.assertIn(f"first {t.LANDMARK_LIMIT}", text)
         self.assertIn("EPSS 50.0%", text)
@@ -4911,6 +4920,8 @@ class TestThreatStreamScanner(unittest.TestCase):
         single = t._landmark_footnotes({"added": 1, "charted": [], "other": [], "not_in_osv": 1}, [], "2026-09-18", "2026-10-19")
         self.assertIn("CISA added 1 KEV entry between", single)
         self.assertNotIn("(listed below)", single, "Nothing is listed below, so the sentence must not point there.")
+        self.assertNotIn("same color", single, "No list was given, so the sentence must not promise one.")
+        self.assertNotIn('<li class="lm-absent">', single)
         self.assertEqual(t._landmark_footnotes(None, [], "2026-09-18", "2026-10-19"), "")
 
     def test_report_plots_up_to_the_limit_and_lists_the_rest_instead_of_dropping_them(self):
@@ -4944,7 +4955,9 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertEqual(page.count('<a class="lm'), 2 * limit, "[!] The cap is per chart: LANDMARK_LIMIT labels on each of the two charts, not more.")
         self.assertIn("+3 more KEV-listed CVEs in charted registries", page, "[!] Landmarks beyond the cap must be listed, not silently dropped.")
         self.assertIn("CVE-2026-1014", page, "The lowest-EPSS charted CVE must still appear (in the overflow list).")
-        self.assertIn("15 in charted registries, 2 in other ecosystems (listed below), 1 not in OSV at all", page)
+        self.assertIn("15 in charted registries, 2 in other ecosystems (listed below), ", page)
+        self.assertIn("1 not in OSV at all</span> (listed below in the same color)", page)
+        self.assertIn("CVE-2026-3000", page, "[!] The one KEV entry with no OSV record is named in the report.")
         self.assertEqual(page.count("CISA added 18 KEV entries"), 1, "The accounting appears once, under chart I only.")
         self.assertIn("Distro 0", page)
 

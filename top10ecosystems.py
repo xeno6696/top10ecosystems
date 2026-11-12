@@ -1853,6 +1853,9 @@ _LANDMARK_CSS = """
         .lm-key a { color: #e0e0e0; text-decoration: none; font-weight: 600; }
         .lm-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: baseline; }
         .lm-key a:hover { text-decoration: underline; }
+        .lm-absent { color: #ff8a80; }
+        .lm-swatch-absent { background: #ff5252; }
+        li.lm-absent a, .lm-key-title.lm-absent { color: #ff8a80; }
         .lm-key-title { text-align: left; font-size: 13px; color: #cccccc; margin: 14px 0 0 0; }
 """
 
@@ -1978,15 +1981,15 @@ def kev_window_breakdown(db_path: str, start_date: str, end_date: str, registrie
         return None
     finally:
         conn.close()
-    charted, other, missing = [], [], 0
+    charted, other, missing = [], [], []
     for cve_id, name, added in kev_rows:
         if cve_id not in has_record:
-            missing += 1
+            missing.append({"cve_id": cve_id, "name": (name or "").strip(), "added": added})
         elif ecosystems[cve_id] & charted_registries:
             charted.append(cve_id)
         else:
             other.append({"cve_id": cve_id, "name": (name or "").strip(), "added": added, "ecosystems": sorted(ecosystems[cve_id])})
-    return {"added": len(kev_rows), "charted": charted, "other": other, "not_in_osv": missing}
+    return {"added": len(kev_rows), "charted": charted, "other": other, "not_in_osv": len(missing), "not_in_osv_list": missing}
 
 
 def _landmark_footnotes(breakdown, hidden: list, start_date: str, end_date: str, listed: int = 15) -> str:
@@ -2003,7 +2006,8 @@ def _landmark_footnotes(breakdown, hidden: list, start_date: str, end_date: str,
         parts.append(
             f'<p class="lm-key-title">CISA added {n} KEV {"entry" if n == 1 else "entries"} between {html.escape(start_date[:10])} and {html.escape(end_date[:10])}: '
             f'{len(breakdown["charted"])} in charted registries, {len(other)} in other ecosystems{" (listed below)" if other else ""}, '
-            f'{breakdown["not_in_osv"]} not in OSV at all.</p>')
+            f'<span class="lm-absent"><span class="lm-swatch lm-swatch-absent"></span>{breakdown["not_in_osv"]} not in OSV at all</span>'
+            f'{" (listed below in the same color)" if breakdown.get("not_in_osv_list") else ""}.</p>')
     if hidden:
         items = "".join(item(lm["cve_id"], lm["name"], f'{", ".join(lm["ecosystems"])}; EPSS {lm["epss"] * 100:.1f}%' if lm.get("epss") is not None else ", ".join(lm["ecosystems"])) for lm in hidden[:listed])
         more = f' (+{len(hidden) - listed} more)' if len(hidden) > listed else ""
@@ -2013,6 +2017,15 @@ def _landmark_footnotes(breakdown, hidden: list, start_date: str, end_date: str,
         items = "".join(item(o["cve_id"], o["name"], f'{", ".join(o["ecosystems"])}; added to KEV {o["added"]}') for o in shown)
         more = f' (+{len(breakdown["other"]) - listed} more)' if len(breakdown["other"]) > listed else ""
         parts.append(f'<p class="lm-key-title">KEV-listed CVEs in other ecosystems (no repository color, so not on the chart){more}:</p><ul class="lm-key">{items}</ul>')
+    absent = (breakdown or {}).get("not_in_osv_list") or []
+    if absent:
+        # No OSV record exists, so there is no osv.dev page to link to: point at NVD instead.
+        items = "".join(
+            f'<li class="lm-absent"><span class="lm-swatch lm-swatch-absent"></span>'
+            f'<a href="https://nvd.nist.gov/vuln/detail/{html.escape(a["cve_id"])}" target="_blank" rel="noopener">{html.escape(a["cve_id"])}</a>'
+            f' -- "{html.escape(a["name"] or "unnamed")}" <span>(added to KEV {html.escape(a["added"] or "?")})</span></li>' for a in absent[:listed])
+        more = f' (+{len(absent) - listed} more)' if len(absent) > listed else ""
+        parts.append(f'<p class="lm-key-title lm-absent">KEV-listed CVEs with no OSV record at all (typically proprietary products; no repository color, so not on the chart){more}:</p><ul class="lm-key">{items}</ul>')
     return "".join(parts)
 
 
