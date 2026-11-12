@@ -93,6 +93,8 @@ python top10ecosystems.py --compare snapshot_a.json snapshot_b.json
 3. **Check the warehouse.** `python db_warehouse.py --verify` (about 15s) for a live audit against upstream, and `python test_runner.py` for the health invariants and logic tests.
 4. **Build a briefing.** `python top10ecosystems.py --layer app --from X --to Y --report output/briefing.html`.
 
+**Automating it.** `python daily_run.py` does steps 1, 2 and 4 in one go (a 30-day report to `output/daily_report.html`) after first checking CISA's whole KEV catalog for changes. `schedule_daily.ps1` registers it with Windows Task Scheduler (`.\schedule_daily.ps1 -At 07:00`, in the machine's local time zone; `-Remove` takes it out). Quiet days are silent. A **new KEV entry** (any vendor, in OSV or not) or an entry newly marked **ransomware: Known** plays a rising three-note chime and opens `output/kev_watch/latest_digest.txt`; a failed step plays a lower two-note tone and opens `output/daily/latest_status.txt`. Due-date changes, text edits and removals are written to the digest and history without a sound. `python kev_watch.py` runs just the KEV check (exit 0 quiet, 10 minor changes, 11 alert, 2 fetch error); `output/kev_watch/history.jsonl` records when *we* first saw each change, because the warehouse's KEV table is overwritten on every refresh and remembers nothing.
+
 **When to rebuild:** if `--verify` keeps reporting stale or missing advisories after a `--sync`, if a warehouse health test fails, or after pulling code that changes ingest/parsing. Run `python db_warehouse.py --rebuild`. The warehouse is disposable by design and archiving it first isn't needed. A rebuild also re-fetches the master archive, so expect several minutes.
 
 ---
