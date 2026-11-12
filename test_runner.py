@@ -5158,6 +5158,147 @@ class TestThreatStreamScanner(unittest.TestCase):
                                 cwd=here, capture_output=True, text=True, timeout=60)
         self.assertEqual((result.returncode, result.stdout.strip()), (0, "True"), result.stderr)
 
+    def _kev_history_db(self, tmp, with_kev=True):
+        """A warehouse with no last_modified column at all: the full-history section must not need one."""
+        path = os.path.join(tmp, "kevhistory.db")
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, cvss_score REAL, ecosystems TEXT)")
+        conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL, model_date TEXT)")
+        conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT)")
+        advisories = [
+            ("GHSA-A1", "CVE-A", 5.0, ["npm"]),
+            ("GHSA-A2", "CVE-A", 9.0, ["PyPI"]),                  # same CVE, another registry: one CVE, highest CVSS
+            ("GHSA-B", "CVE-B", 7.5, ["npm"]),
+            ("GHSA-C", "CVE-C", 8.0, ["Maven"]),
+            ("DEB-D", "CVE-D", 9.9, ["Debian"]),                  # not a charted registry
+            ("GHSA-E", "CVE-E", 0.0, ["npm"]),                    # no CVSS
+            ("GHSA-F", "CVE-F", 6.0, ["npm"]),                    # no EPSS
+            ("ROOT-APP-NPM-CVE-2026-1234", "", 9.8, ["npm"]),     # no alias: the CVE is only in the advisory id
+            ("GHSA-K", "CVE-K", None, ["npm"]),                   # KEV-listed but cannot be plotted (no CVSS)
+            ("GHSA-N", "", 7.0, ["npm"])]                         # no CVE at all
+        for advisory_id, cve, cvss, ecosystems in advisories:
+            conn.execute("INSERT INTO vulnerabilities VALUES (?,?,?,?)", (advisory_id, cve, cvss, json.dumps(ecosystems)))
+        epss = {"CVE-A": 0.95, "CVE-B": 0.004, "CVE-C": 0.3, "CVE-D": 0.9, "CVE-E": 0.5, "CVE-2026-1234": 0.8, "CVE-K": 0.7}
+        for cve, score in epss.items():
+            conn.execute("INSERT INTO epss_scores VALUES (?,?,?)", (cve, score, "2026-11-10"))
+        if with_kev:
+            for cve, added in {"CVE-A": "2022-03-01", "CVE-C": "2026-05-10", "CVE-2026-1234": "2026-06-06", "CVE-D": "2023-01-01",
+                               "CVE-K": "2026-07-01", "CVE-Z": "2024-01-01"}.items():   # CVE-Z is in no advisory at all
+                conn.execute("INSERT INTO kev_catalog VALUES (?,?)", (cve, added))
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_kev_history_population_is_one_point_per_cve_over_the_whole_warehouse(self):
+        import tempfile
+        import kev_history
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            population = kev_history.load_population(self._kev_history_db(tmp))
+        points = {p[0]: p for p in population.points}
+        self.assertEqual(sorted(points), ["CVE-2026-1234", "CVE-A", "CVE-B", "CVE-C"],
+                         "[!] Debian, no-CVSS, no-EPSS and no-CVE rows must be out; the synthetic advisory resolves from its id.")
+        self.assertEqual(points["CVE-A"], ("CVE-A", 9.0, 0.95, "2022-03-01"), "[!] One CVE with two advisories is one point, at its highest CVSS.")
+        self.assertIsNone(points["CVE-B"][3], "A CVE not in the KEV catalog has no listing date.")
+        self.assertEqual(population.stats["kev_plotted"], 3)
+        self.assertEqual(population.stats["kev_in_charted"], 4, "CVE-K is KEV-listed with an advisory in a charted registry but cannot be plotted.")
+        self.assertEqual((population.stats["charted_cves"], population.stats["no_cvss"], population.stats["no_epss"]), (7, 2, 1))
+        self.assertEqual(population.stats["kev_catalog_total"], 6)
+        self.assertEqual(population.stats["model_date"], "2026-11-10")
+        self.assertEqual(kev_history.load_population(os.path.join(tempfile.gettempdir(), "no_such_kev_history.db")).points, [])
+
+    def test_kev_history_degrades_to_empty_without_the_tables(self):
+        import tempfile
+        import kev_history
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            bare = os.path.join(tmp, "bare.db")
+            conn = sqlite3.connect(bare)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY)")
+            conn.close()
+            self.assertEqual(kev_history.load_population(bare).points, [])
+            self.assertEqual(kev_history.build_section(bare), "")
+            self.assertEqual(kev_history.build_section(os.path.join(tmp, "missing.db")), "")
+            self.assertEqual(kev_history.build_section(self._kev_history_db(tmp, with_kev=False)), "", "No KEV-listed CVE to plot: no section.")
+
+    def test_kev_history_crowd_sample_keeps_every_kev_star_and_is_repeatable(self):
+        import kev_history
+        points = [(f"CVE-{i}", 7.0, 0.01, "2026-01-01" if i % 100 == 0 else None) for i in range(1000)]
+        kev, crowd = kev_history.crowd_sample(points, limit=50)
+        self.assertEqual(len(kev), 10, "[!] Every KEV star is drawn, however thin the crowd is made.")
+        self.assertEqual(len(crowd), 50)
+        self.assertEqual(crowd, kev_history.crowd_sample(points, limit=50)[1], "[!] The same data must give the same dots every run.")
+        kev_small, crowd_small = kev_history.crowd_sample(points[:30], limit=50)
+        self.assertEqual(len(kev_small) + len(crowd_small), 30, "Under the cap nothing is thinned.")
+
+    def test_kev_history_groups_kev_epss_by_listing_year_in_order(self):
+        import kev_history
+        points = [("CVE-1", 9.0, 0.9, "2023-05-01"), ("CVE-2", 8.0, 0.2, "2021-12-01"), ("CVE-3", 7.0, 0.5, "2023-01-01"), ("CVE-4", 7.0, 0.01, None)]
+        self.assertEqual(kev_history.by_listing_year(points), {"2021": [0.2], "2023": [0.9, 0.5]})
+
+    def test_kev_history_section_states_its_scope_and_the_hindsight_caveat(self):
+        import tempfile
+        import kev_history
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            section = kev_history.build_section(self._kev_history_db(tmp))
+        self.assertIn("VII. Full-History KEV vs EPSS", section)
+        self.assertIn("4 CVEs, 3 of them on CISA's KEV list", section)
+        self.assertIn("1 more KEV-listed CVEs have an advisory in a charted registry but no CVSS score or no EPSS", section)
+        self.assertIn("EPSS here is today's score (EPSS model date 2026-11-10)", section, "[!] The page must say EPSS is today's, not the listing-time score.")
+        self.assertIn("flatters EPSS", section)
+        self.assertIn("The unit is the CVE, not the advisory", section)
+        self.assertEqual(section.count("data:image/png;base64,"), 3, "Scatter, triage comparison and by-year chart.")
+        self.assertIn("2022: 1, 2026: 2", section)
+        self.assertIn("The most recent year has the weakest separation", section)
+
+    def test_kev_history_section_survives_a_warehouse_where_every_cve_is_kev_listed(self):
+        """[!] Found by a report test whose fixture is all KEV: there is no 'rest' to take a median of, and the crash lost the whole report."""
+        import tempfile
+        import kev_history
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            path = os.path.join(tmp, "allkev.db")
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE vulnerabilities (advisory_id TEXT PRIMARY KEY, cve_alias TEXT, cvss_score REAL, ecosystems TEXT)")
+            conn.execute("CREATE TABLE epss_scores (cve_id TEXT PRIMARY KEY, epss_score REAL)")      # no model_date column either
+            conn.execute("CREATE TABLE kev_catalog (cve_id TEXT PRIMARY KEY, date_added TEXT)")
+            conn.execute("INSERT INTO vulnerabilities VALUES ('GHSA-1','CVE-1',9.0,'[\"npm\"]')")
+            conn.execute("INSERT INTO epss_scores VALUES ('CVE-1', 0.9)")
+            conn.execute("INSERT INTO kev_catalog VALUES ('CVE-1', '2026-01-01')")
+            conn.commit()
+            conn.close()
+            section = kev_history.build_section(path)
+        self.assertIn("no other CVE has both CVSS and EPSS to compare with", section)
+        self.assertNotIn("EPSS model date", section, "No model_date column: the page simply omits it.")
+        self.assertNotIn("The most recent year has the weakest separation", section, "One listing year is not a comparison.")
+
+    def test_report_includes_the_full_history_section_whatever_the_snapshot_window(self):
+        import contextlib, tempfile
+        def snap(day):
+            return {"metadata": {"interval_to": day, "interval_from": "2026-04-18", "target_layer_filter": "app"},
+                    "leaderboard": {"npm": 5}, "threat_profile": {"Malware (New Entry)": 5}}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            out = os.path.join(tmp, "r.html")
+            with contextlib.redirect_stdout(io.StringIO()):
+                top10ecosystems.generate_html_report([snap("2026-09-29"), snap("2026-09-30")], out, db_path=self._kev_history_db(tmp))
+            with open(out, encoding="utf-8") as f:
+                with_db = f.read()
+            with contextlib.redirect_stdout(io.StringIO()):
+                top10ecosystems.generate_html_report([snap("2026-09-29"), snap("2026-09-30")], out, db_path=os.path.join(tmp, "absent.db"))
+            with open(out, encoding="utf-8") as f:
+                without_db = f.read()
+        self.assertIn("VII. Full-History KEV vs EPSS", with_db, "[!] The section reads the warehouse, not the snapshots, so a window with no EPSS snapshots still gets it.")
+        self.assertNotIn("VII. Full-History", without_db, "No warehouse: no section, no crash.")
+
+    def test_triage_and_ecosystem_definitions_are_shared_between_the_windowed_and_full_history_sections(self):
+        import subprocess, sys
+        import epss_triage, kev_history, osv_ecosystems
+        self.assertIs(top10ecosystems._triage_comparison, epss_triage.triage_comparison)
+        self.assertIs(top10ecosystems._TRIAGE_RULES, epss_triage.TRIAGE_RULES)
+        self.assertIs(top10ecosystems._REPORT_ECOSYSTEMS, osv_ecosystems.REPORT_ECOSYSTEMS)
+        self.assertIs(kev_history.REPORT_ECOSYSTEMS, osv_ecosystems.REPORT_ECOSYSTEMS)
+        here = os.path.dirname(os.path.abspath(__file__))
+        result = subprocess.run([sys.executable, "-c", "import kev_history, epss_triage; print(kev_history.build_section('none.db') == '')"],
+                                cwd=here, capture_output=True, text=True, timeout=60)
+        self.assertEqual((result.returncode, result.stdout.strip()), (0, "True"), result.stderr)
+
     def test_cvss_epss_trend_uses_every_advisory_once_per_band_and_skips_thin_bands(self):
         import statistics
         band7 = {f"B7-{i}": (7.0 + (i % 10) / 10, 0.001 * (i + 1), i == 3) for i in range(40)}
