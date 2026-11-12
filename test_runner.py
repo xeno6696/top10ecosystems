@@ -5376,5 +5376,155 @@ class TestThreatStreamScanner(unittest.TestCase):
         self.assertIn("20 of 4874 repackaged advisories this window need action", out)
 
 
+
+class TestKevWatchAndDailyRun(unittest.TestCase):
+    """The KEV change watcher (whole catalog, remembers the previous run) and the daily job that wraps it."""
+
+    @staticmethod
+    def _catalog(*entries, version="2026.11.12"):
+        base = {"vendorProject": "Acme", "product": "Widget", "vulnerabilityName": "Widget flaw", "dateAdded": "2026-11-01",
+                "dueDate": "2026-11-22", "knownRansomwareCampaignUse": "Unknown", "requiredAction": "Patch.", "notes": ""}
+        return {"catalogVersion": version, "vulnerabilities": [dict(base, cveID=cve, **over) for cve, over in entries]}
+
+    def _check(self, tmp, catalog, now=None):
+        import kev_watch
+        return kev_watch.check(tmp, fetch=lambda: catalog, now=now or datetime.datetime(2026, 11, 12, 14, 0, tzinfo=datetime.timezone.utc))
+
+    def test_first_run_only_records_a_baseline(self):
+        import tempfile, kev_watch
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            result = self._check(tmp, self._catalog(("CVE-1", {}), ("CVE-2", {})))
+            self.assertEqual(result["exit"], kev_watch.EXIT_QUIET)
+            self.assertTrue(result["baselined"])
+            self.assertEqual(result["changes"], [], "[!] A first look has nothing to compare with: it must not call the whole catalog new.")
+            self.assertTrue(os.path.exists(os.path.join(tmp, kev_watch.BASELINE_NAME)))
+
+    def test_a_new_entry_is_an_alert_from_any_vendor_and_is_remembered_in_history(self):
+        import tempfile, kev_watch
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._check(tmp, self._catalog(("CVE-1", {})))
+            result = self._check(tmp, self._catalog(("CVE-1", {}), ("CVE-9", {"vendorProject": "Barracuda", "dateAdded": "2026-11-12"})))
+            self.assertEqual(result["exit"], kev_watch.EXIT_ALERT)
+            self.assertEqual([(c["kind"], c["cve"]) for c in result["changes"]], [("new", "CVE-9")])
+            self.assertIn("ALERT NEW", result["digest"])
+            self.assertIn("Barracuda", result["digest"], "The digest names the vendor so the alert says what to look at.")
+            with open(os.path.join(tmp, kev_watch.HISTORY_NAME), encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f]
+            self.assertEqual([(r["kind"], r["cve"], r["observed_at"]) for r in rows], [("new", "CVE-9", "2026-11-12T14:00:00Z")],
+                             "[!] History records when WE saw the bump, not just when CISA listed it.")
+            again = self._check(tmp, self._catalog(("CVE-1", {}), ("CVE-9", {})))
+            self.assertEqual((again["exit"], again["changes"]), (kev_watch.EXIT_QUIET, []), "The baseline advanced: the same entry is not new twice.")
+
+    def test_ransomware_flip_alerts_but_due_date_and_edits_and_removals_only_make_a_digest(self):
+        import tempfile, kev_watch
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._check(tmp, self._catalog(("CVE-1", {}), ("CVE-2", {}), ("CVE-3", {}), ("CVE-4", {})))
+            quiet = self._check(tmp, self._catalog(("CVE-1", {}), ("CVE-2", {"dueDate": "2026-12-01"}), ("CVE-3", {"notes": "see vendor"})))
+            kinds = sorted((c["kind"], c["cve"]) for c in quiet["changes"])
+            self.assertEqual(kinds, [("due date", "CVE-2"), ("edited", "CVE-3"), ("removed", "CVE-4")])
+            self.assertEqual(quiet["exit"], kev_watch.EXIT_DIGEST, "[!] Housekeeping edits are written down but never make a sound.")
+            loud = self._check(tmp, self._catalog(("CVE-1", {"knownRansomwareCampaignUse": "Known"}), ("CVE-2", {"dueDate": "2026-12-01"}), ("CVE-3", {"notes": "see vendor"})))
+            self.assertEqual([(c["kind"], c["cve"]) for c in loud["changes"]], [("ransomware", "CVE-1")])
+            self.assertEqual(loud["exit"], kev_watch.EXIT_ALERT)
+            self.assertIn("ransomware use: Unknown -> Known", loud["digest"])
+
+    def test_a_bad_fetch_leaves_the_baseline_alone(self):
+        import tempfile, kev_watch
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._check(tmp, self._catalog(*[(f"CVE-{i}", {}) for i in range(10)]))
+            with open(os.path.join(tmp, kev_watch.BASELINE_NAME), encoding="utf-8") as f:
+                before = f.read()
+            def boom():
+                raise kev_watch.KevFetchError("timed out")
+            failed = kev_watch.check(tmp, fetch=boom)
+            self.assertEqual((failed["exit"], failed["error"]), (kev_watch.EXIT_ERROR, "timed out"))
+            truncated = self._check(tmp, self._catalog(("CVE-0", {})))
+            self.assertEqual(truncated["exit"], kev_watch.EXIT_ERROR, "[!] A catalog a tenth the size is a bad download, not CISA deleting everything.")
+            self.assertIn("bad fetch", truncated["error"])
+            empty = kev_watch.check(tmp, fetch=lambda: {"vulnerabilities": []})
+            self.assertEqual(empty["exit"], kev_watch.EXIT_ERROR)
+            with open(os.path.join(tmp, kev_watch.BASELINE_NAME), encoding="utf-8") as f:
+                self.assertEqual(f.read(), before)
+            recovered = self._check(tmp, self._catalog(*[(f"CVE-{i}", {}) for i in range(10)]))
+            self.assertEqual((recovered["exit"], recovered["changes"]), (kev_watch.EXIT_QUIET, []),
+                             "After the failures the next good fetch compares against the intact baseline: no phantom re-adds.")
+
+    def test_digest_for_a_quiet_day_says_so(self):
+        import kev_watch
+        self.assertIn("No changes since the last check.", kev_watch.format_digest([], "2026-11-12T14:00:00Z", "v", 1500))
+
+    def _run_daily(self, tmp, kev_result, codes=None):
+        import daily_run
+        calls, sounds, opened = [], [], []
+        codes = codes or {}
+        def runner(argv, timeout):
+            name = {"db_warehouse.py": "sync"}.get(argv[1]) or ("report" if "--report" in argv else "export")
+            calls.append(name)
+            return codes.get(name, 0), f"{name} output"
+        rc = daily_run.run(now=datetime.datetime(2026, 11, 12, 14, 0, tzinfo=datetime.timezone.utc), out_dir=os.path.join(tmp, "daily"),
+                           kev_dir=os.path.join(tmp, "kev"), kev_check=lambda d: kev_result, step_runner=runner,
+                           chime=sounds.append, opener=opened.append, python="py")
+        return rc, calls, sounds, opened
+
+    def test_daily_run_is_silent_on_a_quiet_day_and_runs_every_step(self):
+        import tempfile, kev_watch
+        quiet = {"exit": kev_watch.EXIT_QUIET, "changes": [], "digest": "No changes since the last check.\n"}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            rc, calls, sounds, opened = self._run_daily(tmp, quiet)
+            self.assertEqual((rc, calls, sounds, opened), (0, ["sync", "export", "report"], [], []), "[!] Quiet day: no sound, no window.")
+            with open(os.path.join(tmp, "daily", "latest_status.txt"), encoding="utf-8") as f:
+                self.assertIn("KEV: no changes", f.read())
+
+    def test_daily_run_chimes_and_opens_the_digest_on_a_kev_alert_but_is_not_a_failure(self):
+        import tempfile, kev_watch
+        alert = {"exit": kev_watch.EXIT_ALERT, "changes": [{"kind": "new", "cve": "CVE-9"}], "digest": "ALERT NEW CVE-9\n"}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            rc, calls, sounds, opened = self._run_daily(tmp, alert)
+            self.assertEqual(rc, 0, "A KEV alert is news, not a failed job.")
+            self.assertEqual(sounds, ["alert"])
+            self.assertEqual(opened, [os.path.join(tmp, "kev", kev_watch.DIGEST_NAME)])
+            self.assertEqual(calls, ["sync", "export", "report"], "The alert doesn't stop the rest of the day's work.")
+
+    def test_daily_run_skips_snapshot_and_report_when_the_sync_fails_and_sounds_the_failure_chime(self):
+        import tempfile, kev_watch
+        quiet = {"exit": kev_watch.EXIT_QUIET, "changes": [], "digest": "x\n"}
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            rc, calls, sounds, opened = self._run_daily(tmp, quiet, codes={"sync": 1})
+            self.assertEqual(rc, 1)
+            self.assertEqual(calls, ["sync"], "[!] A snapshot built from a stale warehouse would be quietly wrong: skip it.")
+            self.assertEqual(sounds, ["failure"])
+            with open(opened[0], encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("sync: FAILED", text)
+            self.assertIn("export: skipped because the sync failed", text)
+
+    def test_daily_run_survives_a_crashing_kev_check_and_still_does_the_warehouse_steps(self):
+        import tempfile, daily_run
+        calls = []
+        def crash(d):
+            raise RuntimeError("boom")
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            sounds = []
+            rc = daily_run.run(now=datetime.datetime(2026, 11, 12, 14, 0, tzinfo=datetime.timezone.utc), out_dir=os.path.join(tmp, "d"), kev_dir=tmp,
+                               kev_check=crash, step_runner=lambda argv, t: (calls.append(argv[1]) or 0, ""), chime=sounds.append, opener=lambda p: None, python="py")
+        self.assertEqual((rc, len(calls), sounds), (1, 3, ["failure"]))
+
+    def test_daily_plan_exports_yesterday_and_reports_the_thirty_days_ending_then(self):
+        import daily_run
+        steps = dict(daily_run.plan(datetime.date(2026, 11, 12), python="py"))
+        self.assertEqual(steps["sync"], ["py", "db_warehouse.py", "--sync"])
+        self.assertEqual(steps["export"], ["py", "top10ecosystems.py", "--layer", "app", "--to", "2026-11-11", "--export"],
+                         "[!] Snapshots cover complete days: the last complete UTC day is yesterday.")
+        self.assertEqual(steps["report"][1:9], ["top10ecosystems.py", "--layer", "app", "--from", "2026-10-13", "--to", "2026-11-11", "--report"])
+        self.assertEqual(steps["report"][-1], daily_run.REPORT_PATH)
+
+    def test_chime_kinds_are_distinguishable_and_the_bell_fallback_never_raises(self):
+        import contextlib, daily_run
+        self.assertNotEqual(daily_run.ALERT_TUNE, daily_run.FAILURE_TUNE)
+        with patch.dict(sys.modules, {"winsound": None}), contextlib.redirect_stdout(io.StringIO()) as out:
+            daily_run.play_chime("alert")
+        self.assertEqual(out.getvalue(), "\a")
+
+
 if __name__ == '__main__':
     unittest.main()
